@@ -1,0 +1,5 @@
+{
+  "summary": "The exact draft supplies a reusable controlled header-selector comparison. It establishes policy independently of responses, preserves actual caller identity, separates valid policy-denied values from invalid-value behavior, recognizes legitimate shared access and inconclusive cases, and inspects protected content rather than treating status, shape or error labels as permission decisions. Phase separation, evidence retention and source limitations are explicit. The retained sources support the bounded attributions; the header-specific procedure is accurately described as original methodology. No concrete material defect was identified against the frozen criteria.",
+  "issues": [],
+  "suggestions": []
+}

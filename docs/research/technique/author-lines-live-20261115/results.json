@@ -1,0 +1,43 @@
+{
+  "prior_requests": 18,
+  "current": {
+    "limit": 6,
+    "requests": 3,
+    "roles": 3
+  },
+  "results": [
+    {
+      "case": "network",
+      "prompt_sha256": "b1b94cde5036d8b17d0cda11aed89efa473b1a17e016442bf66dc3ea9f4da4af",
+      "status": "completed",
+      "line_items": 47,
+      "body_lines": 47,
+      "message_token": false,
+      "body_sha256": "963ee267ba5a18e325301acb8a4a51f09a6af8efc2d23e3040d92499964f3002"
+    },
+    {
+      "case": "filesystem",
+      "prompt_sha256": "a9dbc97c582b75cf45b711ba62b349e03729bd3cd895600710ec94fa0455078f",
+      "status": "completed",
+      "line_items": 56,
+      "body_lines": 56,
+      "message_token": false,
+      "body_sha256": "db78eb3e51257d192d98ffd40bbbd7e0977c01d0b749fb1cbeda4d12235d0c2c"
+    },
+    {
+      "case": "http",
+      "prompt_sha256": "47fc1a694fd3792b48e0f09cb7607d2e4b2b33dfd903f9dad4c7ebba044d7731",
+      "status": "completed",
+      "line_items": 76,
+      "body_lines": 75,
+      "message_token": false,
+      "body_sha256": "d54d5cd9b684265925bf0445250ed67028426a341accae55794aa94f06ba52cd"
+    }
+  ],
+  "scope": "Authorship-only check of same frozen user prompts; no publication or execution",
+  "candidate_code_identity": "d311fb8a63b999da210dcd0c7e71af883d9536f03521b0d0ad8944bf088b0818",
+  "total_requests": 21,
+  "authorized_total": 30,
+  "unused_requests": 9,
+  "human_adjudication": "pending"
+}

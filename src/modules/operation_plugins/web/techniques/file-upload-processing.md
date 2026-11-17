@@ -53,12 +53,22 @@ sources:
   title: File Upload Cheat Sheet
   retrieved_at: '2026-11-06T21:29:20.387751+00:00'
   selection_reason: extension, media type, storage and processing risks.
+- url: https://www.rfc-editor.org/rfc/rfc7578.html
+  title: 'RFC 7578: Returning Values from Forms: multipart/form-data'
+  retrieved_at: '2026-11-13T11:31:54.212625+00:00'
+  selection_reason: Boundary and part metadata, multiple files and preservation of repeated field names and order.
+- url: https://developer.mozilla.org/en-US/docs/Web/API/XMLHttpRequest_API/Using_FormData_Objects
+  title: Using FormData Objects
+  retrieved_at: '2026-11-13T11:31:54.212625+00:00'
+  selection_reason: Browser-generated multipart boundaries and explicit file names with FormData.
 source_coverage: 'Independently selected retrieved references supply mechanism/control background. extension,
   media type, storage and processing risks. Limits: Development-oriented guidance supplies mechanism/control
   background; application policy, live exploitability, negative controls and minimal-impact procedure
   remain original methodology requiring target-specific verification. Numbered procedures and controls
   are original knowledge-allowed synthesis, not individually source-verified. No completed target execution
-  or affected-version claim is supplied.'
+  or affected-version claim is supplied. RFC 7578 supplies multipart encoding and repeated-field semantics;
+  MDN supplies FormData construction guidance. Size/count comparisons and security interpretations
+  are original methodology, not protocol-mandated application policies.'
 ---
 
 # File upload, storage and downstream processing
@@ -74,20 +84,28 @@ Choose only the assigned branch and obey the operation's scope, identities, rate
 1. Trace the assigned file through acceptance, storage, asynchronous processing and retrieval. Record filename, declared media type, actual bytes, processing job and served Content-Type/disposition/origin; an upload success response proves only acceptance.
 2. Identify expected filename/root, type/content, tenant/access and processor external-resource policies. Distinguish intentionally supported active content or document links from forbidden interpreter/network behavior. Note whether conversion rewrites or merely stores the input.
 
+3. For multipart workflows, record the client-declared method, file-field names, filename metadata and required text parts. Client declarations support future checks; server acceptance, authentication and storage behavior remain unestablished until observed.
+
 ## Hypothesis generation
 
 1. Using recorded workflow evidence plan separate future tests for extension/media/content agreement, storage/filename boundaries, retrieval authorization and converter/parser behavior. Change only one layer at a time.
 2. Define a valid tiny file, a same-size invalid/mismatched file, a harmless unique output marker and a forbidden-policy comparison. For archives use a few tiny members and an owner-provided marker fixture; never plan expansion bombs.
 3. For processing, specify how a generated output, approved callback or restricted resource marker would distinguish actual processor execution from stored bytes or browser rendering. Do not upload, queue jobs or retrieve test content during hypothesis design.
 
+4. For multipart size/count hypotheses, distinguish per-file, aggregate request and file-count limits. Plan below/at/above comparisons only when an established limit fits the authorized envelope; include zero-byte files where relevant. Unknown limits remain future checks, not permission to increase load.
+5. For repeated-field hypotheses, plan a valid single-part control and a few repeated parts with distinct harmless markers. Preserve part order and duplicates in the test client; compare which values are validated, stored or processed.
+
 ## Vulnerability verification
 
-1. Upload a valid small fixture and follow its complete owned workflow to final storage, conversion and retrieval. Verify actual content, size, owner/tenant and state; establish a valid processing job and cleanup operation.
+1. For multipart uploads, establish a valid small baseline with observed field names, required metadata and an explicit file name. Let a multipart client generate matching body delimiters and the Content-Type boundary; when using browser FormData, do not manually set that header. Keep malformed-framing probes separate from the valid baseline. Upload a valid small fixture and follow its complete owned workflow to final storage, conversion and retrieval. Verify actual content, size, owner/tenant and state; establish a valid processing job and cleanup operation.
 2. Compare one filename/extension change while keeping bytes and declared type fixed, then one declared type change with bytes/name fixed. Compare a genuinely invalid small file and a correctly typed valid counterpart. Acceptance of a harmless mismatch is not automatically exploitable; determine what downstream trust decision it affects.
 3. Test filename/root or duplicate-name behavior only against test-owned objects. For archives, inspect the resulting accessible owned outputs and compare normal names with the one approved boundary case. Do not target existing files, arbitrary paths or high expansion ratios.
 4. Retrieve the uploaded/derived object as its owner, a separately owned actor lacking access under established policy and, only where assigned, without credentials. Confirm actual synthetic bytes rather than guessing access from a URL or HTTP200. Public hosting may be intentional.
 5. For a converter/parser hypothesis, vary one harmless active feature in the synthetic document: a unique approved external reference, inert template construct or owner-provided nonsecret processing marker. Compare a feature-free file and invalid-feature control. Require actual derived output or attributable server-side effect, not an upload receipt, thumbnail delay or browser-initiated fetch.
 6. If client-side execution is the assigned consequence, render only in owned browser sessions and demonstrate a harmless local marker in the actual served origin. If server processing is claimed, browser execution is not sufficient. Re-run the valid file workflow after each branch and stop at the minimal verified boundary.
+
+7. Where size/count enforcement is assigned, compare the planned small cases while holding other inputs fixed. Record actual file bytes, total encoded request size, part count and any partial acceptance or cleanup needs. Separate client-side rejection from server enforcement; interpret results against the established limit and policy.
+8. Where repeated-field handling is assigned, compare the single-part control with repeated parts and, if relevant, reversed order. Use a representation that preserves duplicate fields. Different selection behavior or acceptance of malformed framing alone is not a vulnerability; identify a forbidden validation/storage/processing effect.
 
 ## Execution
 
@@ -101,7 +119,7 @@ Choose only the assigned branch and obey the operation's scope, identities, rate
 
 ## Evidence requirements
 
-Preserve synthetic file hashes/bytes and size, name/type variations, upload and job IDs, derived artifact content, owner/nonowner controls, processing attribution, served browser origin and cleanup results. Record the exact layer and policy crossed, not a generic unrestricted-upload label.
+Preserve synthetic file hashes/bytes and size, name/type variations, upload and job IDs, derived artifact content, owner/nonowner controls, processing attribution, served browser origin and cleanup results. For multipart comparisons retain request Content-Type/boundary, ordered part names, filenames, declared part types, per-file byte sizes and total request size, along with response and returned file/job identifiers. Record the exact layer and policy crossed, not a generic unrestricted-upload label.
 
 ## Limitations
 

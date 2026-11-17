@@ -89,16 +89,27 @@ def evaluate_task_techniques(runtime, task, reason, outcomes, *, plan=None) -> N
                 if available
                 else []
             )
+        acceptance = getattr(task, "acceptance", None)
+        dump_contract = getattr(acceptance, "to_dict", None)
+        task_contract = dump_contract() if callable(dump_contract) else None
         context = json.dumps(
             {
                 "available_evidence_refs": available,
                 "unavailable_evidence_refs": unavailable,
                 "objective": task.objective,
+                "task_contract": {
+                    "provenance": "frozen_task_acceptance" if task_contract is not None else "unavailable",
+                    "value": task_contract,
+                },
+                "reason_provenance": "controller_task_evaluation",
                 "status": task.status,
                 "reason": reason,
                 "outcomes": [
-                    {"tool": outcome.tool_name, "success": outcome.success, "output": outcome.output_summary}
-                    for outcome in outcomes or []
+                    {"tool": outcome.tool_name, "success": outcome.success, "output": outcome.output_summary,
+                     "sequence": getattr(outcome, "sequence", index),
+                     "sequence_provenance": "recorded" if hasattr(outcome, "sequence") else "list_order",
+                     "recovery_role": getattr(outcome, "recovery_role", "unknown")}
+                    for index, outcome in enumerate(outcomes or [], 1)
                 ],
             }
         )

@@ -490,6 +490,7 @@ class WorkflowDecision:
     repair_kind: str = "none"
     unresolved_evidence_gaps: tuple[str, ...] = ()
     execution_receipt_gaps: tuple[str, ...] = ()
+    repair_declared: bool = False
 
 
 @dataclass(frozen=True)
@@ -699,7 +700,9 @@ _PROMPT_FITTING_ROLES = REVIEW_ROLES | {"task_prompt_builder"}
 
 
 def _prompt_optional_headings(role: str) -> tuple[str, ...]:
-    return (*{
+    from modules.techniques.delivery import HEADING
+
+    return (*((HEADING,) if role in {"task_executor", "task_evaluator"} else ()), *{
         "task_evaluator": ("Task history", "Eligible Semantic Memories", "Task worker final context"),
         "phase_evaluator": ("Eligible Semantic Memories",),
     }.get(role, ("Task history", "Eligible Semantic Memories")), *(
@@ -6054,9 +6057,11 @@ class MultiAgentWorkflowController:
                     live_outcomes_reader if callable(live_outcomes_reader) else None
                 )
                 try:
+                    from modules.techniques.delivery import execution_guidance_prompt
                     from modules.techniques.integration import recommendation_prompt
 
                     prompt = recommendation_prompt(prompt, tool_override or tools)
+                    prompt = execution_guidance_prompt(self.runtime, task, prompt, system_prompt, tool_override or tools)
                     if production:
                         prompt = self._fit_hypothesis_replay(prompt, system_prompt, tool_override or tools)
                     with scoped_shell_command_validator(
@@ -6118,6 +6123,9 @@ class MultiAgentWorkflowController:
                             + ("\nPreserve existing subjects; publish only missing dispositions."
                                if production["publication"] and production["missing_subject_ids"]
                                else self._hypothesis_repair_context(task))
+                        )
+                        publication_prompt = execution_guidance_prompt(
+                            self.runtime, task, publication_prompt, system_prompt, publication_tools,
                         )
                         publication_result = self._executor_cycle_result(executor(
                             self._fit_hypothesis_replay(publication_prompt, system_prompt, publication_tools),
@@ -7263,6 +7271,7 @@ class MultiAgentWorkflowController:
                                         )
                                 elif (
                                     decision.status == "partial_failure"
+                                    and not decision.repair_declared
                                     and not self._is_hypothesis_producer(task)
                                     and decision.instructions.strip()
                                     and evaluator_corrections < evaluator_correction_limit
@@ -13818,6 +13827,9 @@ applicability or a finding, and published proof of concepts must not be executed
                 plan, phase, task, worker_context, tool_outcomes, resolved_acceptance_results,
                 review_binding=review_binding,
             )
+            from modules.techniques.delivery import delivered_guidance
+
+            evaluator_prompt += delivered_guidance(self.runtime, task)
         except WorkflowInvariantError as error:
             return WorkflowDecision(
                 status="partial_failure", reason=f"Task evaluation input invalid: {self._short(str(error), 300)}",
@@ -13855,6 +13867,7 @@ applicability or a finding, and published proof of concepts must not be executed
                 repair_context(data, hypothesis_binding(task).get("sha256", "")) or decision.instructions
             )
         decision.repair_kind = repair["kind"]
+        decision.repair_declared = isinstance(data.get("repair"), dict)
         decision.unresolved_evidence_gaps = tuple(repair["evidence_gaps"])
         decision.execution_receipt_gaps = tuple(repair["execution_receipt_gaps"])
         if decision.status == "done" and decision.unresolved_evidence_gaps:

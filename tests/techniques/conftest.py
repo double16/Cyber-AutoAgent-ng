@@ -161,7 +161,8 @@ def scripted_service(store, markdown):
             )
         if role == "technique_critic":
             result = json.loads(critique_result(state.approve))
-            if '"id": "requirement-1"' in prompt:
+            if ('"id": "requirement-1"' in prompt
+                    or '"requirement_id": "requirement-1"' in prompt):
                 for issue in result["issues"]:
                     issue["requirement_ids"] = ["requirement-1"]
             return json.dumps(result)
@@ -192,7 +193,7 @@ def scripted_service(store, markdown):
                                "harmful_effect": "Misleading control" if state.score == -1 else "",
                                "reason": "Guidance helped discriminate behavior"})
         if role == "technique_trigger_matcher":
-            return json.dumps({"trigger_ids": [], "reason": "No semantic match"})
+            return json.dumps(matcher_payload({"trigger_ids": [], "reason": "No semantic match"}))
         raise AssertionError(role)
 
     research_calls = []
@@ -377,3 +378,17 @@ def connection_records(prompt, references):
         "observation_sha256": row["sha256"], "quote": row["excerpt"][:30],
         "explanation": "Scripted fixture connects the observed condition to the assigned subject",
     } for reference in references for row in records if row["source"] == reference][:len(references)]
+
+
+def matcher_payload(legacy):
+    """Build compact fixture leads without model-generated provenance."""
+    selected = legacy["trigger_ids"]
+    support = legacy.get("support", [])
+    return {"matches": [
+        {"trigger_id": f"t{index}", "subject_id": "s1", "observation_reference": "o1"}
+        for index, identifier in enumerate(selected, 1)
+        if any(row["trigger_id"] == identifier for row in support)
+    ] if support or not selected else [
+        {"trigger_id": identifier, "subject_id": "s1", "observation_reference": "o1"}
+        for identifier in selected
+    ]}

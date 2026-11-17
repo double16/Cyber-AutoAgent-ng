@@ -1,0 +1,17 @@
+**Final decision**
+
+* Classification: **Inconclusive – insufficient evidence for an authorization violation**
+
+* Supporting observation IDs:
+  * `obs-1` – identity mapping `session-red` → `A`, `session-blue` → `B`
+  * `obs-2` – policy context unavailable: `available: false`, `reason: "Policy record unavailable"`
+  * `obs-3` – `session-red` / selector `A` → 200, `error: "not authorized"`, `object.owner: "A"`
+  * `obs-4` – `session-red` / selector `B` → 200, `error: "not authorized"`, `object.owner: "B"`
+  * `obs-5` – `session-blue` / selector `A` → 200, `error: "not authorized"`, `object.owner: "A"`
+  * `obs-6` – `session-blue` / selector `B` → 200, `error: "not authorized"`, `object.owner: "B"`
+
+* Explanation:
+  * The X-Account header is processed server-side; changing the selector changes the returned object while authentication is held constant, e.g., `session-red` with selector A vs B in `obs-3` vs `obs-4`, and `session-blue` with selector A vs B in `obs-5` vs `obs-6`.
+  * The reusable header-selector authorization test requires a documented access-control policy establishing which principals may access which objects, a legitimate baseline, negative control, and entitlement control before an authorization violation can be claimed.
+  * Policy record is unavailable per `obs-2`; therefore the policy prerequisite is not met and the entitlement relationship cannot be confirmed.
+  * With no established allow/deny policy, the observed header-driven object selection cannot be classified as an unauthorized disclosure. The finding remains inconclusive and requires policy documentation and controls before a violation can be asserted.

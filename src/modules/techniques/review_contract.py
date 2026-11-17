@@ -86,3 +86,18 @@ class ReviewContract:
             "optional elaboration belongs in suggestions. New claims introduced by the draft can violate "
             "existing criteria; do not invent new mandatory deliverables or silently broaden scope.\n"
         )
+
+
+    def advisory_render(self):
+        """Render the request and policy goals without a publication-veto contract."""
+        from modules.handlers.utils import sanitize_toon_value
+
+        criteria = json.loads(self.payload)["acceptance_criteria"]
+        return (
+            "Authorship improvement goals; the executor adapts the guidance to its actual task.\n"
+            f"goals[{len(criteria)}]{{id,goal,kind,grounding}}:\n"
+            + "\n".join("  " + sanitize_toon_value(row["id"]) + ","
+                        + sanitize_toon_value(row["obligation"]) + "," + sanitize_toon_value(row.get("kind", ""))
+                        + "," + sanitize_toon_value(row.get("grounding", "")) for row in criteria)
+            + "\n"
+        )

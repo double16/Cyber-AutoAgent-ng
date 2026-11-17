@@ -45,7 +45,7 @@ def test_atomic_requirement_correction(recover):
     assert attempts == {**dict.fromkeys([f"r{i}" for i in range(6)], 1), "r6": 2}
 
 
-@pytest.mark.parametrize("defect", ["unknown_url", "duplicate_url", "missing_attribution", "blank", "extra_coverage"])
+@pytest.mark.parametrize("defect", ["unknown_url", "missing_attribution", "blank", "extra_coverage"])
 @pytest.mark.parametrize("recover", [False, True])
 def test_source_correction_is_bounded_and_preserves_prior_selection(scripted_service, defect, recover):
     from conftest import assessment_output
@@ -72,8 +72,6 @@ def test_source_correction_is_bounded_and_preserves_prior_selection(scripted_ser
         if not recover or len(calls) == 1:
             if defect == "unknown_url":
                 payload["selected_urls"] = ["https://unknown.example"]
-            elif defect == "duplicate_url":
-                payload["selected_urls"] = [url, url]
             elif defect == "missing_attribution":
                 payload["attributions"] = []
             elif defect == "blank":

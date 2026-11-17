@@ -35,13 +35,14 @@ def test_recorded_continuation_reviews(scripted_service, monkeypatch, tmp_path, 
             return schema.model_validate_json(result.message.content)
         if role == "technique_judge":
             return review_response(prompt)
-        return schema(trigger_ids=[], support=[], reason="Shared co-occurrence supplies no subject connection")
+        return schema(matches=[])
 
     monkeypatch.setattr(service, "_json", reviewer)
     revision = scripted_service.publish()
     monkeypatch.setattr(service, "_candidates", lambda *args: [{"revision_id": revision}])
     monkeypatch.setattr(service.store, "document", lambda *args: SimpleNamespace(
-        markdown=FIXTURE["selection"]["procedure"],
+        markdown=FIXTURE["selection"]["procedure"], sha256="fixture",
+        metadata=SimpleNamespace(model_dump=dict),
     ))
     assert service._select(FIXTURE["selection"]["request"]) == revision
     for case in FIXTURE["recommendations"]:

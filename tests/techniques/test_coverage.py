@@ -253,3 +253,66 @@ def source_required_fixture_requests(request):
     # These tests intentionally exercise mandatory retrieved-evidence workflows.
     if "scripted_service" in request.fixturenames:
         request.getfixturevalue("scripted_service").grounding = "source_required"
+
+
+@pytest.mark.parametrize("repeated", [False, True])
+def test_source_assessment_groups_exact_url_contributions_without_losing_limits(repeated):
+    from modules.techniques.coverage import SourceAssessment
+
+    url = "https://vendor.example/method"
+    rows = [{"url": url, "reason": "Documents the boundary", "limitations": ["Version unknown"]},
+            {"url": url, "reason": "Documents controls", "limitations": ["Version unknown", "Policy unknown"]}]
+    assessment = SourceAssessment(selected_urls=[url, url], attributions=rows + ([rows[0]] if repeated else []),
+                                  reason="Relevant contributions", authoritative_sufficient=True)
+    assert assessment.selected_urls == [url]
+    assert assessment.attributions[0].reason == "Documents the boundary\nDocuments controls"
+    assert assessment.attributions[0].limitations == ["Version unknown", "Policy unknown"]
+    SourceSelection(**assessment.model_dump(), coverage=[]).validate_references([{"url": url}], [])
+
+
+def test_source_assessment_does_not_discard_an_unselected_attribution():
+    from modules.techniques.coverage import SourceAssessment
+
+    assessment = SourceAssessment(selected_urls=[], attributions=[{
+        "url": "https://vendor.example/method", "reason": "Unselected", "limitations": [],
+    }], reason="Rejected", authoritative_sufficient=False)
+    with pytest.raises(ValueError, match="own attribution"):
+        SourceSelection(**assessment.model_dump(), coverage=[]).validate_references([], [])
+
+
+def test_repeated_source_contributions_do_not_consume_a_correction(scripted_service):
+    import json
+
+    from modules.techniques.coverage import select_sources
+
+    state = scripted_service
+    original = state.service.runner
+    calls = []
+
+    def runner(role, prompt, tools):
+        result = json.loads(original(role, prompt, tools))
+        if role == "technique_source_assessor":
+            calls.append(prompt)
+            result["selected_urls"] *= 2
+            row = result["attributions"][0]
+            result["attributions"] = [row, {**row, "reason": "Also documents the control"}, row]
+        return json.dumps(result)
+
+    state.service.runner = runner
+    result = select_sources(state.service, "HTTP controls", [Requirement(id="method", description="Controls")],
+                            [{"url": state.source_urls[0], "text": "Primary mechanism and control facts"}])
+    assert len(calls) == 1
+    assert len(result.attributions) == len(result.selected_urls) == 1
+    assert "Also documents the control" in result.attributions[0].reason
+
+
+def test_source_grouping_never_truncates_to_fit_existing_field_bounds():
+    from pydantic import ValidationError
+
+    from modules.techniques.coverage import SourceAssessment
+
+    url = "https://vendor.example/method"
+    with pytest.raises(ValidationError, match="at most 1000"):
+        SourceAssessment(selected_urls=[url], attributions=[
+            {"url": url, "reason": "a" * 600}, {"url": url, "reason": "b" * 600},
+        ], reason="Contributions exceed the bounded canonical field", authoritative_sufficient=True)

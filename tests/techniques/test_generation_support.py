@@ -175,9 +175,9 @@ def test_methodology_review_instructions_cover_reusable_checks(scripted_service)
     state.service.get("JWT handling")
     critic = next(prompt for role, prompt, _ in state.calls if role == "technique_critic")
     assert not any(role == "technique_critique_assessor" for role, _, _ in state.calls)
-    assert "Future verification instructions" in critic
-    assert "material issues and optional suggestions" in critic
-    assert "No audit tables or approval vote" in critic
+    assert "recommendations" in critic
+    assert "do not approve, reject" in critic
+    assert "executor adapts" in critic
 
 
 def test_minimal_repair_and_execution_scope_preserve_explicit_obligations():

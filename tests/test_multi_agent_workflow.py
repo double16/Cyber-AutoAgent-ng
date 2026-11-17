@@ -25154,3 +25154,42 @@ def test_checkpoint_entry_failure_skips_task_preparation(worker_flow_case, monke
     current = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
     assert current.status == "partial_failure"
     assert current.evidence == task.evidence
+
+
+@pytest.mark.parametrize("declared", [True, False])
+def test_explicit_no_repair_prevents_legacy_instruction_retry(declared):
+    runtime = _runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 1})
+    task = Task(task_uid="active", title="Compare retained observations", objective="Assess the observations",
+                phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    state.acceptance_results[task.task_uid] = [AcceptanceResult(
+        criterion_id=task.acceptance.criteria[0].id, status="satisfied", disposition="observation",
+        summary="The observations were compared.", evidence_refs=("artifact:artifacts/comparison.txt",),
+    )]
+    actor_prompts = []
+    evaluations = []
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"compare observations","tools":[]}'
+        if role == "task_evaluator":
+            evaluations.append(prompt)
+            if len(evaluations) > 1:
+                return '{"status":"done","reason":"Legacy correction completed."}'
+            data = {"status": "partial_failure", "reason": "Policy unavailable.",
+                    "instructions": "If policy becomes available, repeat the comparison."}
+            if declared:
+                data["repair"] = {"kind": "none", "evidence_gaps": ["Policy unavailable."]}
+            return json.dumps(data)
+        raise AssertionError(role)
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        actor_prompts.append(prompt)
+        return workflow_mod.TaskExecutorCycleResult(text="Policy is unavailable; retained inconclusive comparison.",
+                                                    outcomes=[])
+
+    controller = MultiAgentWorkflowController(runtime=runtime, budget=BudgetConfig(max_duration_minutes=60),
+                                             state_store=state, text_runner=text_runner, work_runner=work_runner)
+    controller._run_task(_plan(), _plan().phases[0], task)
+    assert len(actor_prompts) == (1 if declared else 2)
+    assert state.tasks[0].status == ("partial_failure" if declared else "done")

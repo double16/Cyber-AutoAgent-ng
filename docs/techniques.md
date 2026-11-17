@@ -26,13 +26,18 @@ separately with bounded coverage summaries rather than concatenating all fetched
 contain requirement IDs, supporting URLs, explanations and unresolved gaps. Python validates references;
 the judge assesses meaning. Source snippets are discovery leads, not documents. Inputs exceeding the
 configured prompt limit fail explicitly, preserving exact-document critique instead of truncating it.
-Up to three author attempts are allowed, with independent critique before publication. Critique distinguishes
-authored-content, request-coverage, source-attribution and research-coverage defects. Procedure or omitted
-request content returns to the author; attribution receives a dedicated attribution-only repair once per source-selection round; missing
-support returns to targeted research within the component's three-batch limit. Attribution and research
-repairs retain the authored draft. Exhaustion yields an explicit unresolved result. Python owns fetched
-URLs, titles, timestamps and individual attribution, separately from overall coverage. Similar attribution
-wording alone is not rejection grounds. Source code informs reasoning; original examples use Python 3.13+ or browser JavaScript.
+After source validation, authorship uses one author → advisory critic → optional author revision.
+The critic returns `summary` and `recommendations`, with no approval or rejection field. An empty list
+accepts the initial valid document immediately. Otherwise one revision applies useful suggestions using
+the author's technical judgement, then publishes without another critique. Critic feedback cannot reopen
+research or attribution repair. The document is reusable guidance that the executor adapts to its case,
+not an exhaustive playbook to follow verbatim.
+Each author pass allows up to three JSON/schema/document-format corrections. Invalid initial output
+remains an error. Unavailable advice accepts the valid initial document; an unavailable or persistently
+malformed revision retains that initial document with an explicit diagnostic. Controller-owned source
+provenance, active state, phase metadata, privacy and catalog integrity checks remain in force. Identical
+inactive revisions cannot reset their stored feedback. Python owns fetched URLs, titles, timestamps,
+attribution and coverage; the author does not replace validated source metadata.
 
 During operations, lookup receives the executor-authored methodology request, structured phase
 guidance, module technique policy and explicit methodology restrictions. Task objectives, subjects,
@@ -59,7 +64,7 @@ flowchart LR
     J -->|miss| W[Researcher + source judge]
     W --> G{Requirement coverage sufficient?}
     G -->|gaps; batches remain| W
-    G -->|yes| C[Author + critic]
+    G -->|yes| C[Author / advisory critic / optional revision]
     G -->|exhausted| X[Unresolved component]
     C --> S[Store approved Markdown]
     J -->|match| U[Return guidance]
@@ -245,14 +250,12 @@ multipart signals do not imply XXE or unsafe upload processing. CORS headers do 
 browser-readable sensitive data. No additional signal is inferred merely from a URL path or
 vulnerability name. Technique triggers must still declare compatible phases and applicability.
 
-The controller scans assigned inventory records, referenced captures, and task tool results. Matching
-recommendations include source references and digests, never actual token values. A separate semantic
-matcher considers a Qdrant-ranked shortlist (20 phase-compatible candidates by default) and a 12,000-character observed excerpt, with
-six semantic passes per task. Deterministic signals supply candidate leads for that same semantic
-review; they never independently endorse a recommendation. Review must connect each recommendation
-to assigned subject IDs and observation references. Shared-bundle decoys are insufficient. After the
-allowance is exhausted, only valid cached reviews can endorse leads. Source captures
-over 16 MB, unavailable captures, and exhausted semantic allowances remain explicit limitations.
+The controller scans assigned inventory records, referenced captures, and task tool results.
+The matcher considers a phase-compatible shortlist and a bounded observation excerpt for each assigned
+subject. It returns only short trigger, subject and observation IDs; Python attaches source references
+and digests. These are lookup leads, never applicability endorsements or execution evidence. Unknown
+prerequisites may remain conditional. Shared-bundle co-occurrence alone is insufficient. Deterministic
+signals nominate candidates for the same semantic matching. Missing captures remain explicit limitations.
 Only captured content can be inspected; missing browser/network bodies are not assumed observed.
 
 Recommendations persist through continuation and are advisory: the worker decides whether to request
@@ -315,18 +318,17 @@ and existing `SSL_CERT_FILE` / `SSL_CERT_DIR` overrides. Environment proxies and
 Certificate verification remains enabled. A certificate-verification failure stops further searches and
 fetches for that research attempt and returns a trust-configuration diagnostic through tool events.
 
-Semantic trigger decisions are cached within the operation for the same phase contexts, trigger
-fingerprint, assigned subjects, observation provenance, and submitted excerpt. Each trigger has its own cached decision; adding guidance preserves
-decisions for unchanged triggers and never resets a task's six-call allowance. The sensitive internal cache
-stores selected trigger IDs, subject/observation references, exact supporting excerpts and connection
-explanations. Observation identity is the source reference plus its content digest; quotes must occur
-in that revision's submitted excerpt. Shared origin or bundle co-occurrence does not establish relevance.
-Older decisions lacking these connections are invalidated without resetting call allowances.
-Both positive and negative valid decisions can be reused across tasks and
-continuations; each task retains its own recommendation provenance. Failed decisions remain retryable.
-Only actual model calls consume the six-call per-task allowance. Seeded evidence and non-empty tool
-outputs receive semantic matching; tool inputs receive deterministic detection only. Deterministic
-signals remain unendorsed after the semantic allowance is exhausted unless a valid cached review exists.
+Semantic trigger decisions are cached per phase set, trigger definition and revision, assigned subject,
+and full observation content digest, origin and scope. Unrelated accumulated observations, source labels,
+capabilities and incidental ordering do not invalidate decisions. Python reattaches the current source
+reference on reuse. Cache files retain matched/empty/invalid status only; recommendation records retain
+controller-owned provenance without model quotes, hashes or explanations.
+
+Valid empty decisions are reusable. An invalid response gets one concise correction; exhausted failures
+are cached separately and are not retried for unchanged inputs. Relevant evidence, phase, subject or
+revision changes permit a new decision. Matching has no lifetime six-call task allowance. Legacy cache
+contracts are ignored without deleting historical files. Matching events distinguish cache hits, misses
+and contract failures. Tool inputs nominate deterministic candidates but do not invoke semantic matching.
 
 Assigned subject observations precede shared artifact excerpts. Recommendations retain source/unknown
 origin and subject/shared scope. Trusted tool declarations use `_cyber_technique_observation_origin`
@@ -349,7 +351,7 @@ Agents prefer techniques for reusable methodology and direct web research for ta
 intelligence. Both tools remain available, and lookup remains the executor's decision.
 
 Regeneration must revise an identical inactive generated document; it cannot reset that revision’s
-feedback or return inactive guidance. The existing author/critic revision limit still applies.
+feedback or return inactive guidance. The fixed advisory authorship cycle still applies.
 
 ## Lifecycle visibility
 
@@ -392,15 +394,16 @@ The researcher remains tool-driven: Python collects fetched documents rather tha
 prose. Feedback may inspect evidence with supplied tools, then closes investigation before structured
 finalization. Correction context retains tool results without repeating investigation.
 
-The author returns authored metadata and a Markdown body under a response schema. Source attribution,
+The structured author returns authored metadata and an ordered array of Markdown lines under a response
+schema. Empty items represent blank lines; Python joins the items with newline characters before
+document assembly and review. Legacy string bodies remain accepted without changing their content.
+The controller does not guess missing line breaks or rewrite code examples. Source attribution,
 retrieval details, source coverage, schema version, and active state are controller-owned and excluded
-from that schema. Python assembles YAML frontmatter; the independent critic reviews the exact assembled
-document. Controller checks still reject unknown identifiers, unsupported references, and invalid
-documents; structured output alone does not establish semantic support or applicability.
-Validation corrections include bounded error details and rejected content when available; source-selection
-corrections preserve the last valid coverage assessment. Generation allows three author attempts,
-with repair feedback identifying JSON, schema, document validation, or critique failures.
-Exhaustion reports the final failure stage.
+from that schema. Python assembles YAML frontmatter; the advisory critic sees the assembled initial
+document. Advice has no approval field and cannot veto publication. Source selection remains a preceding,
+independent stage. Deterministic validation corrections retain the full request, sources, draft and
+advice without invoking another critic. Each author pass has up to three format corrections; if the
+revision cannot be validated, the valid initial draft is retained with an explicit diagnostic.
 
 During operations, rejected responses are saved immediately as private diagnostic JSON files under
 `techniques/builds/<activity-id>/attempt-<number>.json`, outside `artifacts/`. Each file includes
@@ -1192,9 +1195,64 @@ Unset or blank retrieval overrides preserve the defaults below.
 | `TECHNIQUE_DOCUMENT_LIMIT` | `10` | Eligible document shortlist, integer 1–50. |
 | `TECHNIQUE_TRIGGER_LIMIT` | `20` | Eligible trigger shortlist, integer 1–50. |
 | `TECHNIQUE_SEARCH_REPRESENTATION` | `full` | `full` Markdown or `summary` metadata and trigger descriptions. |
+| `TECHNIQUE_AUTO_DELIVERY` | `false` | Opt-in operation pilot: select and supply one existing guide per task when complete text fits. Boolean; blank preserves the default. |
 
 Changing representation creates a separate rebuildable index. Full Markdown remains authoritative
 for review and delivery in both modes. Invalid settings fail initialization.
+
+### Opt-in automatic delivery pilot
+
+Set `TECHNIQUE_AUTO_DELIVERY=true` in the operation environment to pilot automatic guidance delivery.
+The setting is forwarded by `docker/docker-compose.yml`. Restart the operation process after changing
+it. The default retains voluntary lookup. Standalone `caa-technique` lookup behavior is unchanged.
+
+```mermaid
+flowchart LR
+    R[Task recommendation] --> S[Opt-in existing-document selection]
+    S --> F{Complete guide fits?}
+    F -->|Yes| D[Record snapshot and supply advisory guide]
+    F -->|No or unresolved| L[Continue with optional lookup]
+    D --> E[Executor adapts guidance]
+    E --> U[Existing contribution feedback]
+```
+
+When a task receives a recommendation, its live executor hook tries the highest-ranked lead once.
+It runs the existing methodology-compatibility and complete-document selection reviews against the
+active, phase-compatible catalog. It does not start bundle planning, research or authorship. Unknown
+method prerequisites remain conditional. Selection failure or a catalog miss leaves optional lookup
+available and does not block execution. A prior manual delivery suppresses automatic selection.
+
+The pilot supplies at most one complete document per task. It does not invent procedure identities
+or trim away caveats to create an excerpt. The hook runs after ordinary prompt fitting and supplies
+the guide only when estimated live input plus the preferred output reservation fits the available
+context. Unknown capacity or insufficient space defers delivery without recording a use. A selected
+revision is cached locally, so a later fitting opportunity or continuation does not repeat selection.
+The cache is scoped to the task's acceptance snapshot, phase and methodology restrictions.
+
+Python records the exact advisory packet immediately before adding it to a live model input. Delivery
+is availability, not evidence of reading, useful application, target applicability, findings or task
+completion. The task and its frozen acceptance contract retain authority; the executor adapts useful
+parts of the guide. Existing feedback evaluates actual contribution without a new critic or rubric.
+
+Actor continuation and repair prompts replay exact prior active-document snapshots, including cycles
+without a lookup tool, when the whole packet fits. Optional replay is omitted as a unit before required
+task input is reduced; it cannot require dropping a document's caveats. Evaluators receive those same
+snapshots before prompt fitting and retain them
+for review even if a revision later becomes inactive. No prior-operation receipt is replayed. Feedback
+and receipts stay idempotent. Inactive revisions are not newly supplied to an executor.
+
+Selection state is stored beside the task recommendation file as `*.delivery.json`. Lifecycle events
+use `technique_auto_delivery` with `selected`, `no_match`, `delivered`, `replayed`, `deferred_capacity`,
+`inactive` or `unavailable` status. A receipt with `delivery_mode=automatic_selected_document` freezes
+the supplied packet in `delivered_documents`. Disabling the flag prevents new automatic delivery;
+already recorded current-task guidance remains available for review and continuation.
+
+The earlier [research comparison](research/technique/low-friction-20261116/README.md) observed supported
+results in two excerpt-delivery cases. That small synthetic study motivates this opt-in pilot; it does
+not establish broad effectiveness or increased voluntary adoption. Full-document delivery in this
+production path differs from the research wrapper's curated excerpts.
+The [implementation validation record](research/technique/automatic-delivery-20261116/README.md)
+documents assembled prompt paths, capacity regressions and the isolated production-hook smoke check.
 
 For labeled embedding comparisons, call `modules.techniques.benchmark.evaluate(store, cases)`
 with `RetrievalCase(request=..., phases=[...], relevant_lineages=[...])` records and the same
@@ -1263,14 +1321,19 @@ document count is global to the technique store and may exceed the selected modu
 
 ### Contribution and checkpoint integrity
 
-Selection reviews map each requirement exactly once to covered, conditional or unmet, with numbered
-complete-document passages and exact quotations. Unmet judgments identify the missing requested
-capability. Equivalent procedures count regardless of headings or terminology; reviewers must not add
-stricter requirements. Python validates references and derives reuse eligibility; semantic coverage and
-subject relevance remain model judgments. Invalid mappings are unresolved, not catalog misses.
-When an exact quote is absent from its declared, known passage, Python resolves it only if exactly
-one other submitted passage contains it. Unknown passage IDs and absent or ambiguous quotes remain
-invalid. This corrects numbering without inventing evidence or adding a semantic retry.
+Selection reviews map supplied requirements to covered, conditional or unmet. Python parses YAML
+front matter and binds the full document and numbered passages to the submitted revision and hash.
+New reviews cite passage IDs, without copying exact quotations. Legacy quote-bearing records remain
+readable and supplied quotes are checked. Unmet judgments name a missing requested capability and may
+omit citations when that capability is absent. Equivalent procedures count regardless of terminology;
+unknown target prerequisites remain conditional, not grounds for rejection.
+
+Python validates IDs and derives reuse eligibility. One targeted reference correction is allowed;
+exhausted contract failures remain unresolved rather than authorizing generation or rejecting guidance.
+Preservation approval is derived from preservation findings in Python, without a redundant model verdict.
+Explicitly truncated technique decisions receive one concise recovery with up to twice the initial
+generation allocation, within configured context and output limits. Retained investigation is reused;
+partial output is never accepted and research is not replayed.
 
 Benchmark `support_contract_valid` measures reference completeness, while `subject_relevance` compares
 recommendations against supplied lineage labels. `catalog_rejection_correct` compares a declared miss
@@ -1284,7 +1347,9 @@ that task without repeating preparation; existing evidence and subsequent schedu
 
 Future usefulness reviews require correspondence to a specific delivered procedure, control, exclusion
 criterion or justified next step. Exclusions require evidence mappings establishing the delivered
-criterion; successful work, citations, matching words and absent observed inputs are insufficient.
+criterion. For hypothesis generation, recorded assumptions, conditional hypotheses and future checks
+are actual deliverables; unknown server behavior does not require execution proof. Successful work,
+citations and matching words alone are insufficient.
 Unestablished contribution remains neutral; unavailable necessary evidence remains pending. Negative
 feedback requires demonstrated misleading guidance or harm. Historical evaluations are preserved.
 
@@ -1299,3 +1364,56 @@ and `unnecessary_generation`, in addition to ranked retrieval and recommendation
 The offline [continuation calibration fixture](../tests/techniques/fixtures/continuation_usefulness.json)
 records the static-JavaScript mismatch and contrasting exclusions/controls. Its scripted tests validate
 contract propagation and reference handling; they do not establish live model calibration accuracy.
+
+Bundle planning reviews share a decomposition policy with the planner. Supporting steps remain
+requirements; umbrella components must not duplicate their constituent methods. Review corrections
+retain the previous proposal and structured issues. Reviewers must explain changed recommendations;
+Python validates issue references and approval consistency before component execution.
+
+Planner and reviewer share decomposition examples. Missing prerequisite confirmation leaves
+applicability unknown; refutation requires contradictory evidence. New positive and negative
+usefulness decisions must leave `neutral_basis` null. Historical records remain unchanged.
+
+Correction uses component-local remove, merge or replace edits in the production structured
+runner. Python applies edits atomically and keeps unchanged content and provenance. IDs refer
+to the proposal supplied with that correction; the resulting proposal is numbered again for
+review. Exact duplicate method/requirement values collapse while retaining their input references.
+Legacy injected text runners still return complete plans. Unknown references, conflicting edits,
+or an empty resulting plan fail before delivery. The existing correction bound is unchanged.
+
+Usefulness review presents the frozen guidance and observed results once in an evidence inventory.
+The independent reviewer investigates that inventory before receiving the evaluator decision for
+comparison. Historical scores and delivered snapshots are not rewritten. Correction events record
+component counts and edit kinds; review contract failures remain separate from semantic rejection.
+
+Legacy offline review APIs retain snapshot references and strict evidence validation for historical
+experiments. Production authorship uses `AuthorshipAdvice` instead; no issue IDs, approval votes,
+blocking categories or inspected-source proofs are required from the advisory critic.
+
+Identical method request strings are grouped with a lossless union of distinct requirements and
+provenance. Groups remain separate if combining them exceeds the existing requirement schema bound.
+Phase-only alignment exposes framing fields; restriction-conflict decisions are available when
+explicit user or module restrictions are supplied.
+
+Usefulness context includes the frozen task acceptance contract as baseline obligations, the
+controller evaluation reason with its provenance, and recorded tool-outcome sequence and recovery
+roles when available. Legacy missing metadata is labeled unavailable or unknown rather than
+reconstructed from prose. An outcome sequence alone does not establish causal contribution.
+
+Source assessment accepts multiple contribution records for the same exact URL and combines their
+reasons and limitations into one canonical attribution. It preserves all distinct text and still
+rejects unselected or unknown URLs. Existing field bounds remain in force; normalization never
+truncates contributions or decides whether their claims are supported.
+
+The advisory critic receives its own packet: the complete initial draft, request/policy improvement
+goals once, and selected retained source passages with optional lookup for omitted text. It does not
+receive the author's examples or drafting instructions. Sources were validated before authorship;
+critique offers improvements rather than another source-validation gate. Author and critic role
+instructions are separated from invocation data in production and retained as a complete string for
+legacy injected runners. Corrections preserve the same full data and line-oriented author schema.
+
+Planning and plan review send controller instructions as system content and invocation data
+(requests, authoritative inputs, proposals and prior reviews) as user content. Corrections keep
+the same boundary. Legacy injected text runners retain the complete combined prompt string.
+Prompt fitting counts each part once, and integrity checks and truncation recovery retain their
+existing behavior. This changes message structure rather than adding review rules or stages.

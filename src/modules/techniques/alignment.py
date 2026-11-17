@@ -2,13 +2,14 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, computed_field, model_validator
 
 from modules.prompts.security_interpretation import SECURITY_INTERPRETATION
 from modules.techniques.context import MethodologyContext, methodology_context
 from modules.techniques.documents import CONTEXTS, json_payload
 
 AUTHORING_ADDITIONS = (
+    "Write reusable guidance that the executor adapts to its specific case, not a verbatim mandatory playbook. "
     "Use clear section headings, numbered procedural steps and specific technical language. "
     "Prefer concrete, followable instructions over abstract prose where practical. "
     "During repair, keep the method's explicit subject, objects and operations visible in headings "
@@ -59,7 +60,19 @@ class PreservationReview(BaseModel):
     """Semantic preservation findings; references identify controller-supplied fields."""
 
     model_config = ConfigDict(extra="forbid")
-    approved: StrictBool
+    @model_validator(mode="before")
+    @classmethod
+    def discard_legacy_approval(cls, value):
+        if isinstance(value, dict):
+            value = {key: item for key, item in value.items() if key != "approved"}
+        return value
+
+    @computed_field
+    @property
+    def approved(self) -> bool:
+        return (self.subject_preserved and self.mechanisms_preserved
+                and self.deliverables_preserved and not self.additions and not self.omissions)
+
     reason: str = Field(min_length=1, max_length=2000)
     subject_preserved: StrictBool
     mechanisms_preserved: StrictBool
@@ -73,10 +86,7 @@ class PreservationReview(BaseModel):
     def validate_decision(self) -> None:
         if len(self.references) != len(set(self.references)):
             raise ValueError("Preservation references must identify unique supplied input fields")
-        preserved = (self.subject_preserved and self.mechanisms_preserved
-                     and self.deliverables_preserved and not self.additions and not self.omissions)
-        if self.approved != preserved:
-            raise ValueError("Preservation approval must agree with all findings")
+
 
 
 PRESERVATION_RULES = (
@@ -89,7 +99,7 @@ PRESERVATION_RULES = (
     "Operation terminal dispositions and completed target execution are not reusable "
     "methodology deliverables. Preserve explicitly requested CVEs and legitimate restrictions. "
     "Report subject, mechanism and deliverable preservation, additions and omissions. "
-    "Approve only when all are preserved and there are no additions or omissions. "
+    "Python derives approval from these findings; do not return a separate approval decision. "
     "Clarifying phase framing and abstracting incidental target details are allowed when requested "
     "methods and deliverables remain intact. "
     "Cite only original_request, component_request, requirements, phase_contexts or constraints "
@@ -123,6 +133,12 @@ class AlignmentOutput(BaseModel):
     )
     reason: str = Field(min_length=1, max_length=2000)
     conflict: AlignmentConflict | None = None
+
+
+class FramingOutput(AlignmentOutput):
+    """Phase framing has no restriction conflict to adjudicate."""
+
+    conflict: None = None
 
 
 class RequestAlignment(BaseModel):
@@ -201,11 +217,13 @@ def align_request(service, request: str, context: MethodologyContext | None):
                 {"phase_contexts": phases, "constraints": context.methodology_constraints},
             ])
         )
+        output_schema = (AlignmentOutput if context.methodology_constraints or context.module_technique_policy
+                         else FramingOutput)
         for attempt in range(2):
             output = None
             try:
                 with service.events.scope(correction_attempt=attempt), service.events.stage("request_alignment"):
-                    output = service._json("technique_request_aligner", prompt, AlignmentOutput)
+                    output = service._json("technique_request_aligner", prompt, output_schema)
                 service._validate_request(output.adjusted_request)
                 if output.conflict is None and output.adjusted_request != request:
                     with service.events.scope(transformation="alignment", correction_attempt=attempt):

@@ -1,0 +1,70 @@
+{
+  "status": "assistant logical review; not human adjudication or observed agent benefit",
+  "review_subject_sha256": "cf959e0c30c607c73126f70c24ab880c213d1ef60319b5900bd99757c17445ae",
+  "fixture_scope": "Pure data/function counterexample; no target access or provider calls",
+  "counterexample": {
+    "principal": "A",
+    "baseline": {
+      "owner": "A",
+      "record": "alpha"
+    },
+    "invalid_selector_response": {
+      "owner": "A",
+      "record": "alpha"
+    },
+    "valid_other_selector_response": {
+      "owner": "B",
+      "record": "beta"
+    },
+    "unauthorized_under_fixture_policy": true
+  },
+  "defects": [
+    {
+      "claim": "If the response is unchanged, the header is not a selector for this endpoint.",
+      "problem": "Invalid selectors can fall back to the authenticated principal while valid selectors choose another object. An unchanged invalid-value control is inconclusive.",
+      "impact": "The stated stopping rule can miss a header-selector authorization defect."
+    },
+    {
+      "claim": "Variant returns the same status code and content shape as baseline as a necessary condition for establishing the violation.",
+      "problem": "Unauthorized attributable content can be disclosed with a different status code or response structure.",
+      "impact": "This unnecessary condition can prevent recognition of an otherwise established disclosure."
+    }
+  ],
+  "not_claimed": "No empirical false-negative rate or live agent task benefit was measured.",
+  "different_response_counterexample": {
+    "responses": {
+      "baseline": {
+        "status": 200,
+        "body": {
+          "owner": "A"
+        }
+      },
+      "variant": {
+        "status": 206,
+        "body": {
+          "records": [
+            {
+              "owner": "B"
+            }
+          ]
+        }
+      },
+      "negative": {
+        "status": 404,
+        "body": null
+      },
+      "entitlement": {
+        "status": 200,
+        "body": {
+          "owner": "B"
+        }
+      }
+    },
+    "policy_A_may_access_B": false,
+    "unauthorized_attributable_content_returned": true,
+    "draft_same_status_and_shape_condition": false
+  },
+  "final_document_sha256": "7f91190f9cc73efb226698bf0bffb086f7144f6f9aa5ee33bebac4289dd32d74",
+  "final_body_sha256": "2ce39a1f86b6bf3b3fe4406cd6136e39b066cd49ac3cffde7ab5902b6c213fd5",
+  "stopping_rule_persists_in_approved_document": true
+}

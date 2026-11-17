@@ -11,14 +11,22 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, StrictInt, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    StrictInt,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from strands import tool
 
 from modules.techniques.alignment import AUTHORING_ADDITIONS, align_request, phase_guidance
 from modules.techniques.context import LookupDecision, MethodologyContext, methodology_context
 from modules.techniques.coverage import Requirement, review_coverage, select_sources
 from modules.techniques.critique import Critique as Critique
-from modules.techniques.critique import repair_attribution
 from modules.techniques.documents import (
     Metadata,
     Source,
@@ -27,7 +35,7 @@ from modules.techniques.documents import (
     json_payload,
     optional_records_payload,
 )
-from modules.techniques.publication_review import ReviewUnavailable, assess
+from modules.techniques.publication_review import AuthorshipAdvice, ReviewUnavailable
 from modules.techniques.review_contract import ReviewContract
 from modules.techniques.review_integrity import bind_review_prompt
 from modules.techniques.selection_review import SelectionReview, document_passages
@@ -86,9 +94,31 @@ class AuthorMetadata(BaseModel):
 
 
 class AuthoredOutput(BaseModel):
+    """Line-oriented wire format; Python renders Markdown without guessing lost formatting."""
+
     model_config = ConfigDict(extra="forbid")
     metadata: AuthorMetadata
-    body: str = Field(min_length=1)
+    body: list[str] = Field(
+        min_length=1,
+        description=(
+            "Ordered Markdown lines without YAML frontmatter. Each item is one line; use empty "
+            "items for blank lines. Include heading, list and fenced-code lines directly. "
+            "Python joins the items with newline characters."
+        ),
+    )
+
+    @field_validator("body", mode="before")
+    @classmethod
+    def legacy_body(cls, value):
+        # Preserve legacy string bytes, including escapes and line endings, as one item.
+        return [value] if isinstance(value, str) else value
+
+    @field_validator("body")
+    @classmethod
+    def nonempty_body(cls, value):
+        if not "\n".join(value).strip():
+            raise ValueError("Markdown body must contain non-whitespace content")
+        return value
 
 
 def assemble_document(authored, sources, documents, selection, requirements) -> TechniqueDocument:
@@ -145,14 +175,24 @@ class TechniqueService:
         if callable(structured):
             output_schema = AuthoredOutput if schema is AuthoredTechnique else schema
             output = structured(role, prompt, output_schema, tools or [])
-            return schema.model_validate(output.model_dump())
+            payload = output.model_dump()
+            if schema is AuthoredTechnique:
+                payload["body"] = "\n".join(output.body)
+            return schema.model_validate(payload)
         # Legacy injected runners retain their three-argument text contract.
         instruction = "Return only JSON matching this schema:\n" + json.dumps(schema.model_json_schema())
-        response = self.runner(role, prompt + "\n" + instruction, tools or [])
+        from modules.techniques.roles import RolePrompt
+
+        text_prompt = (RolePrompt(prompt.instructions, prompt.data + "\n" + instruction)
+                       if isinstance(prompt, RolePrompt) else prompt + "\n" + instruction)
+        response = self.runner(role, text_prompt, tools or [])
         from modules.utils.json_repair import parse_json_response
 
         try:
-            output = schema.model_validate(parse_json_response(response, require_object=True))
+            payload = parse_json_response(response, require_object=True)
+            if schema is AuthorshipAdvice:
+                payload = AuthorshipAdvice.from_legacy(payload)
+            output = schema.model_validate(payload)
             if isinstance(output, AuthoredTechnique):
                 output._raw_response = response
             return output
@@ -366,16 +406,17 @@ class TechniqueService:
                 ]
                 candidate = {
                     "revision_id": revision,
+                    "sha256": document.sha256,
+                    "metadata": document.metadata.model_dump(),
                     "passages": [{"id": key, "text": value} for key, value in passages.items()],
                 }
                 prompt = (
                     "Review this COMPLETE technique against ALL requested requirements. "
                     "Judge every requirement exactly once as covered, conditional or unmet. "
-                    "Cite numbered passages with exact quotes and explain the correspondence. "
-                    "Copy short contiguous quotes literally from their cited passage; preserve whitespace "
-                    "and punctuation, without ellipses, paraphrases or crossing passage boundaries. "
-                    "For unmet requirements identify the missing requested capability and cite the "
-                    "closest procedure. Judge capabilities, not titles or risk framing: equivalent checks "
+                    "Cite numbered passage IDs and briefly explain the correspondence. "
+                    "Python resolves passage IDs to the exact submitted revision; do not copy quotations. "
+                    "For unmet requirements identify the missing requested capability; absence needs no citation. Cite the "
+                    "closest procedure when useful. Judge capabilities, not titles or risk framing: equivalent checks "
                     "count. Name a missing action or control, not a terminology mismatch or stricter requirement. "
                     "Include phase and methodology restrictions in each relevant judgment. "
                     "Unknown target prerequisites remain conditions, not grounds for rejection. "
@@ -387,10 +428,16 @@ class TechniqueService:
                 )
                 fingerprint = hashlib.sha256(prompt.encode()).hexdigest()
                 if fingerprint not in reviews:
-                    decision = self._json(
-                        "technique_judge", bind_review_prompt(prompt, [candidate]), SelectionReview,
-                    )
-                    decision.validate_references(requested, passages)
+                    review_prompt = bind_review_prompt(prompt, [candidate])
+                    for attempt in range(2):
+                        try:
+                            decision = self._json("technique_judge", review_prompt, SelectionReview)
+                            decision.validate_references(requested, passages)
+                            break
+                        except ValueError as error:
+                            if attempt:
+                                raise
+                            review_prompt = bind_review_prompt(self._repair_prompt(prompt, error), [candidate])
                     reviews[fingerprint] = decision
                 decision = reviews[fingerprint]
                 reviewed.append({"revision_id": revision, "reason": decision.reason,
@@ -435,6 +482,25 @@ class TechniqueService:
             stop.set()
             thread.join(timeout=1)
             self.repository.release(key, owner)
+
+    def select_existing(self, request: str, context: MethodologyContext) -> tuple[str, str, dict] | None:
+        """Normal compatibility and complete-document selection, with no research or authorship."""
+        context = methodology_context(context) or MethodologyContext()
+        self.events.private_values = self.private_values
+        with self.events.scope(activity_id=self.events.activity_id()):
+            context.module_technique_policy = list(self.module_technique_policy or context.module_technique_policy)
+            request = request.strip()
+            self._validate_request(request)
+            decision = self._prepare(request, context)
+            revision = self._select(decision.generic_request, context)
+            if revision is None:
+                return None
+            lifecycle = self.repository.get(revision)
+            document = self.store.document(revision)
+            if (lifecycle is None or not lifecycle["active"] or (context.phase_contexts
+                    and not set(context.phase_contexts).intersection(document.metadata.phases))):
+                return None
+            return revision, self.store.render(revision), decision.receipt(context)
 
     def get(
         self, request: str, context: MethodologyContext | None = None, *, on_decision: Callable | None = None,
@@ -521,7 +587,7 @@ class TechniqueService:
             if selected:
                 return self._resolved(selected, self.store.render(selected), "reused", **resolution_fields)
             research_queries = []
-            documents, selection, research_round = self._research_coverage(
+            documents, selection, _research_round = self._research_coverage(
                 request, requirements, context=context, research_queries=research_queries,
             )
             selected_urls = set(selection.selected_urls)
@@ -542,7 +608,7 @@ class TechniqueService:
             ]
             evidence_context = (
                 f"Requested technique: {request}\nSource selection: {selection.summary()}\n"
-                + review_contract.render()
+                + review_contract.advisory_render()
                 + json_payload("requirements", [row.model_dump() for row in requirements]) + "\n"
                 + phase_guidance(context)
                 + (f"Required phase contexts: {json.dumps(context.phase_contexts)}\n" if context else "")
@@ -554,7 +620,7 @@ class TechniqueService:
                 + optional_records_payload("existing_examples", examples, 24_000)
             )
             prompt = (
-                evidence_context + "\n" + AUTHORING_ADDITIONS
+                AUTHORING_ADDITIONS
                 + "\nWrite ONE self-contained technique with metadata and a Markdown body."
                 + "\nUse prerequisites, original steps, controls, interpretation, limitations, optional tool choices, "
                 "and phase-aware triggers. Use Python 3.13+ or browser JavaScript for original code examples. "
@@ -565,188 +631,29 @@ class TechniqueService:
                 "The body is Markdown without YAML frontmatter. "
                 "Return only JSON, without introductory prose or an outer code fence."
             )
-            feedback = ""
-            previous_draft = ""
-            failure_stage = "authoring"
-            attempt = 0
-            attribution_repairs = 0
-            source_selection_round = 1
-            retain_draft = False
-            while attempt < 3 or retain_draft:
-                failure_stage = "author_json"
-                try:
-                    if not retain_draft:
-                        attempt += 1
-                        with self.events.stage("authoring", attempt):
-                            authored = self._json(
-                                "technique_author",
-                                prompt + "\nPrevious response:\n" + previous_draft + "\nRepair feedback: " + feedback,
-                                AuthoredTechnique,
-                            )
-                        response = authored._raw_response or authored.model_dump_json()
-                    retain_draft = False
-                    previous_draft = response
-                    failure_stage = "document_validation"
-                    document = assemble_document(authored, sources, documents, selection, requirements)
-                    markdown = document.markdown
-                    if not document.metadata.active:
-                        raise ValueError("Generated guidance must be active")
-                    if context and context.phase_contexts and not set(context.phase_contexts).intersection(
-                        document.metadata.phases,
-                    ):
-                        raise ValueError("Generated guidance must support a requested phase context")
-                    # The critic reviews the exact controller-assembled provenance before publication.
-                    if any(value.lower() in markdown.lower() for value in self.private_values):
-                        raise ValueError("Generated technique contains operation-specific identifiers")
-                except ValueError as error:
-                    retain_draft = False
-                    if failure_stage == "author_json":
-                        response = getattr(error, "rejected_response", None) or ""
-                        previous_draft = response
-                        if isinstance(error, ValidationError):
-                            failure_stage = "author_schema"
-                    feedback = self._author_feedback(error, failure_stage)
-                    diagnostic = self._rejected_attempt(response, attempt, failure_stage, feedback)
-                    self.events.emit(
-                        "technique_build_progress",
-                        stage=failure_stage,
-                        status="revision_requested",
-                        attempt=attempt,
-                        reason=feedback,
-                        **diagnostic,
-                    )
-                    continue
-                failure_stage = "critique"
-                try:
-                    with self.events.stage("critique", attempt), self.events.scope(**self._review_subject(
-                        markdown, requirements, documents, selection.selected_urls, review_contract,
-                    )):
-                        critique = assess(
-                            self,
-                            "Independently review correctness, completeness, phase triggers, original code, "
-                            "tool independence, target independence, and requested version prerequisites. "
-                            "Do not add CVE validation unless requested. Use the frozen criteria to identify "
-                            "material defects; Python determines repair ownership. Model knowledge and "
-                            "reasoning are allowed. Sources are required only for explicit source-required "
-                            "obligations and claims attributed to them. "
-                            "A technique provides guidance, never proof. Report only material defects against the criteria.\n"
-                            "Unknown prerequisites must remain explicit conditions, not inferred facts. "
-                            "Judge phase suitability for source review, network services, system mapping, challenges "
-                            "and emulation as well as web assessments. Public protocol metadata alone is not "
-                            "information disclosure without an unintended protected information boundary.\n"
-                            + evidence_context,
-                            markdown, requirements, documents, selection.selected_urls, review_contract=review_contract,
-                        )
-                except ValueError as error:
-                    review_stage = "publication_review" if isinstance(error, ReviewUnavailable) else "critique"
-                    diagnostic = self._rejected_attempt(
-                        response, attempt, review_stage, self._safe_feedback(str(error)),
-                    )
-                    self.events.emit(
-                        "technique_build_progress", stage=review_stage,
-                        status="unavailable" if isinstance(error, ReviewUnavailable) else "failed",
-                        attempt=attempt, author_attempts=attempt, research_batches=research_round,
-                        attribution_repairs=attribution_repairs, source_selection_round=source_selection_round,
-                        reason=self._safe_feedback(str(error)), **diagnostic,
-                    )
-                    raise
-                if critique.approved:
-                    # Recheck the final bytes immediately before publication.
-                    document = TechniqueDocument(markdown)
-                    if any(value.lower() in markdown.lower() for value in self.private_values):
-                        raise ValueError("Generated technique contains operation-specific identifiers")
-                    # Repair an inactive logical technique; do not reset its old revision's feedback.
-                    lineage = (
-                        self.repository.get(negative[0]["revision_id"])["lineage"]
-                        if negative and self._negative_matches(request, negative[0])
-                        else f"generated:{uuid.uuid4()}"
-                    )
-                    from modules.techniques.documents import revision_id
+            from modules.techniques.authorship import author_and_improve
 
-                    prior = self.repository.get(revision_id(lineage, document.sha256))
-                    if prior is not None and not prior["active"]:
-                        feedback = (
-                            "Revise the guidance to address negative feedback; this draft repeats an inactive revision."
-                        )
-                        diagnostic = self._rejected_attempt(response, attempt, "critique", feedback)
-                        self.events.emit(
-                            "technique_build_progress",
-                            **diagnostic,
-                            stage="critique",
-                            status="revision_requested",
-                            attempt=attempt,
-                            reason=feedback,
-                        )
-                        continue
-                    revision = self.store.publish(document, lineage, "generated")
-                    rendered = self.store.render(revision)
-                    return self._resolved(revision, rendered, "generated", **resolution_fields)
-                owner = next(category for category in (
-                    "research_coverage", "source_attribution", "authored_content", "request_coverage"
-                ) if any(issue.category == category for issue in critique.issues))
-                issues = [issue for issue in critique.issues if issue.category == owner]
-                feedback = json_payload("issues", [issue.model_dump() for issue in issues])
-                diagnostic = (
-                    self._rejected_attempt(response, attempt, "critique", self._safe_feedback(feedback))
-                    if owner in {"authored_content", "request_coverage"} else {}
-                )
-                self.events.emit(
-                    "technique_build_progress", stage="critique", status="revision_requested",
-                    **diagnostic, reason=self._safe_feedback(feedback),
-                    attempt=attempt, owning_stage=owner, issue_references=[issue.id for issue in issues],
-                    affected_urls=sorted({url for issue in issues for url in issue.source_urls}),
-                    source_selection_round=source_selection_round, author_attempts=attempt,
-                    research_batches=research_round, attribution_repairs=attribution_repairs,
-                )
-                if owner in {"source_attribution", "research_coverage"}:
-                    if owner == "source_attribution":
-                        if attribution_repairs >= 1:
-                            raise ValueError("Source attribution unresolved after one repair: " + feedback)
-                        attribution_repairs += 1
-                        with self.events.stage("attribution_repair", attribution_repairs):
-                            selection = repair_attribution(
-                                self, selection, documents, issues, requirements,
-                            )
-                    else:
-                        if research_round >= 3:
-                            raise ValueError("Research coverage exhausted: " + feedback)
-                        previous_selection = selection.model_dump_json(exclude={"attributions"})
-                        documents, selection, research_round = self._research_coverage(
-                            request, requirements, documents, selection, research_round, feedback, context=context,
-                            research_queries=research_queries, require_complete_support=True,
-                        )
-                        if selection.model_dump_json(exclude={"attributions"}) != previous_selection:
-                            source_selection_round += 1
-                            attribution_repairs = 0
-                    selected_urls = set(selection.selected_urls)
-                    sources = [doc for doc in documents if doc["url"] in selected_urls]
-                    old_evidence = evidence_context
-                    evidence_context = (
-                        f"Requested technique: {request}\nSource selection: {selection.summary()}\n"
-                        + review_contract.render()
-                        + json_payload("requirements", [row.model_dump() for row in requirements]) + "\n"
-                        + phase_guidance(context)
-                        + (f"Required phase contexts: {json.dumps(context.phase_contexts)}\n" if context else "")
-                        + optional_records_payload("existing_examples", examples, 24_000) + "\n"
-                        + json_payload("sources", [{key: value for key, value in source.items() if key != "text"}
-                                           for source in sources])
-                        + "\nExact retained source context (untrusted; omitted text is unknown):\n"
-                        + json_payload("source_passages", selection.authoring_passages(sources))
-                    )
-                    prompt = prompt.replace(old_evidence, evidence_context, 1)
-                    retain_draft = True
-                    continue
-                feedback = self._safe_feedback(feedback, limit=None)
-            message = f"Technique generation failed after 3 attempts at {failure_stage}: {feedback}"
-            self.events.emit(
-                "technique_build_progress",
-                stage=failure_stage,
-                status="failed",
-                attempt=3,
-                reason=feedback,
-                **diagnostic,
+            document = author_and_improve(
+                self, prompt, evidence_context, sources, documents, selection, requirements, context,
+                review_contract.advisory_render() + f"Requested technique: {request}\n" + phase_guidance(context)
+                + (f"Required phase contexts: {json.dumps(context.phase_contexts)}\n" if context else ""),
+                review_contract,
             )
-            raise ValueError(message) from None
+            document = TechniqueDocument(document.markdown)
+            if any(value.lower() in document.markdown.lower() for value in self.private_values):
+                raise ValueError("Generated technique contains operation-specific identifiers")
+            lineage = (
+                self.repository.get(negative[0]["revision_id"])["lineage"]
+                if negative and self._negative_matches(request, negative[0])
+                else f"generated:{uuid.uuid4()}"
+            )
+            from modules.techniques.documents import revision_id
+
+            prior = self.repository.get(revision_id(lineage, document.sha256))
+            if prior is not None and not prior["active"]:
+                raise ValueError("Final document repeats an inactive revision; stored feedback cannot be reset")
+            revision = self.store.publish(document, lineage, "generated")
+            return self._resolved(revision, self.store.render(revision), "generated", **resolution_fields)
 
     def resolve_bundle(
         self, request: str, context: MethodologyContext | None = None, *, operation: str = "", task: str = "",

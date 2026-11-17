@@ -2,7 +2,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from conftest import connection_records
+from conftest import matcher_payload
 
 from modules.techniques.benchmark import RetrievalCase, compare, evaluate_workflow, main
 
@@ -32,10 +32,10 @@ def test_workflow_actual_reuse_generation_and_feedback(scripted_service, tmp_pat
 
     def runner(role, prompt, tools):
         if role == "technique_trigger_matcher":
-            return json.dumps({"trigger_ids": [trigger], "reason": "Observed token handling", "support": [
+            return json.dumps(matcher_payload({"trigger_ids": [trigger], "reason": "Observed token handling", "support": [
                 {"trigger_id": trigger, "subject_ids": ["assigned"],
-                 "connections": connection_records(prompt, ["benchmark:source"]),
-                 "observation_references": ["benchmark:source"]}]})
+                 "connections": [],
+                 "observation_references": ["benchmark:source"]}]}))
         return original(role, prompt, tools)
 
     state.service.runner = runner

@@ -1,0 +1,72 @@
+{
+  "scope": "Isolated HTTP legitimate-sharing pilot using production automatic delivery; no experiment context wrapper",
+  "requests": 36,
+  "controller_status": "done",
+  "accepted_references": [
+    "artifact:artifacts/task_evidence/94253de173650cac/result-ea4476836b415ab6.json"
+  ],
+  "accepted_payload_sha256": "28b295a3ab931183755b2c70d17565f0648ae3908a8a7fe9572bbd5e7df13d31",
+  "accepted_decision": {
+    "classification": "no_violation_observed",
+    "evidence_ids": [
+      "obs-1",
+      "obs-2",
+      "obs-3",
+      "obs-4",
+      "obs-5",
+      "obs-6"
+    ],
+    "explanation": "Identity bindings: session-red -> A, session-blue -> B (obs-1). Policy: A permissions [A,B], B permissions [B] (obs-2). Own-account baselines: session-red/A selector A returns object owner A value record-A with error not authorized (obs-3); session-blue/B selector B returns object owner B value record-B with error not authorized (obs-5). Cross-account comparisons: session-red/A selector B returns object owner B value record-B (obs-4) which is permitted by policy for A; session-blue/B selector A returns no object, error not authorized (obs-6) which matches policy denial for B. All observed disclosures align with policy expectations; no policy deviation observed. Request count 4 used within max_requests 8."
+  },
+  "explanation_review": "Supported: returned data is compared to explicit caller permissions despite misleading denial labels",
+  "automatic_delivery_events": [
+    {
+      "status": "selected",
+      "revision_id": null
+    },
+    {
+      "status": "delivered",
+      "revision_id": "73c8a6b9-8c05-5aaa-9345-029736792841"
+    }
+  ],
+  "use": {
+    "revision_id": "73c8a6b9-8c05-5aaa-9345-029736792841",
+    "score": 1,
+    "reason": "The delivered guidance describes header-selector authorization comparison with policy, identity and controls. The task deliverables show identity observation, policy observation and four request_account observations covering own-account and cross-account accesses for both sessions using the X-Account selector, which is a concrete application of the comparison methodology. This establishes a demonstrated methodological correspondence.",
+    "delivery_mode": "automatic_selected_document",
+    "snapshot_sha256": "22fd7cc0e310fa4fa44b15ecdb26d06346a979673039f3b74ee30061bad83a8d"
+  },
+  "exact_snapshot_in_provider_inputs": [
+    "request-007.json",
+    "request-009.json",
+    "request-011.json",
+    "request-013.json",
+    "request-015.json",
+    "request-017.json",
+    "request-019.json",
+    "request-021.json",
+    "request-022.json",
+    "request-023.json",
+    "request-024.json",
+    "request-025.json",
+    "request-026.json",
+    "request-027.json",
+    "request-028.json",
+    "request-029.json",
+    "request-030.json",
+    "request-031.json"
+  ],
+  "feedback_reviews": [
+    {
+      "proposed_decision": 1,
+      "correction_number": 0,
+      "final_disposition": "accepted"
+    }
+  ],
+  "limitations": [
+    "One synthetic HTTP case, not a general efficacy estimate",
+    "Live pilot preceded the final optional-replay fitting safeguard; final capacity/omission paths verified offline",
+    "No tight live input boundary exercised",
+    "No real target requests or global catalog feedback writes by the pilot"
+  ]
+}

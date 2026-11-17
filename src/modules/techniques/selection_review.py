@@ -7,10 +7,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class Passage(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    passage_id: int = Field(description="Use the exact one-based ID of the passage containing the quote.")
+    passage_id: int = Field(description="Use the exact one-based ID of the passage in the submitted revision.")
     quote: str = Field(
-        min_length=1,
-        description="A short exact contiguous substring of that passage. Preserve punctuation and whitespace; "
+        default="",
+        description="Optional legacy quote. New reviews should return passage_id only. If supplied, preserve whitespace; "
                     "do not paraphrase, add ellipses or quote across passage boundaries.",
     )
 
@@ -19,7 +19,7 @@ class RequirementJudgment(BaseModel):
     model_config = ConfigDict(extra="forbid")
     requirement_id: str
     verdict: Literal["covered", "conditional", "unmet"]
-    passages: list[Passage] = Field(min_length=1)
+    passages: list[Passage] = Field(default_factory=list)
     explanation: str = Field(min_length=1)
     missing_capability: str = ""
 
@@ -37,10 +37,12 @@ class SelectionReview(BaseModel):
         for row in self.judgments:
             if row.verdict == "unmet" and not row.missing_capability.strip():
                 raise ValueError("Unmet requirements need a missing requested capability")
+            if row.verdict != "unmet" and not row.passages:
+                raise ValueError("Covered and conditional judgments require a passage reference")
             for citation in row.passages:
                 if citation.passage_id not in passages:
                     raise ValueError("Review passage must quote the submitted revision")
-                if citation.quote not in passages[citation.passage_id]:
+                if citation.quote and citation.quote not in passages[citation.passage_id]:
                     matches = [key for key, text in passages.items() if citation.quote in text]
                     if len(matches) != 1:
                         raise ValueError("Review passage must quote the submitted revision")
@@ -53,5 +55,13 @@ class SelectionReview(BaseModel):
 
 def document_passages(markdown):
     """Number bounded passages without dropping characters, even for single-line documents."""
-    return {index + 1: markdown[start:start + 1600]
-            for index, start in enumerate(range(0, len(markdown), 1600))}
+    passages = {}
+    start = 0
+    while start < len(markdown):
+        end = min(start + 1600, len(markdown))
+        boundary = markdown.rfind("\n", start + 800, end)
+        if end < len(markdown) and boundary >= 0:
+            end = boundary + 1
+        passages[len(passages) + 1] = markdown[start:end]
+        start = end
+    return passages

@@ -124,10 +124,15 @@ def test_unsupported_native_falls_back_without_repeating_investigation_and_is_ca
     assert invoke_structured(Agent(model=second, callback_handler=None), "Decide", Answer).structured_output.values == [1, 2]
 
 
-def test_invalid_native_output_retains_evidence_for_caller_owned_correction():
-    model = Provider(failures=[ValueError("malformed array")])
+@pytest.mark.parametrize("failure", [ValueError("malformed array"),
+                                     pytest.param("truncated", id="truncated")])
+def test_invalid_native_output_retains_evidence_for_caller_owned_correction(failure):
+    from strands.types.exceptions import MaxTokensReachedException
+
+    failure = MaxTokensReachedException("truncated") if failure == "truncated" else failure
+    model = Provider(failures=[failure])
     agent = Agent(model=model, callback_handler=None)
-    with pytest.raises(ValueError) as caught:
+    with pytest.raises(type(failure)) as caught:
         invoke_structured(agent, "Inspect current evidence", Answer, investigate=True)
     prompt = retained_finalization_prompt("Inspect current evidence", caught.value)
     assert "boundary remains conditional" in prompt

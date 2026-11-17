@@ -1,0 +1,10 @@
+{
+  "status": "preliminary_assistant_observations_not_human_adjudication",
+  "document_sha256": "dfef765bf0a929543d3f89690aa433603545d128d92943b50198b132d03259cc",
+  "observations": [
+    "Body contains literal <|message|> token and largely collapsed line breaks, affecting Markdown headings and code rendering.",
+    "Illustrative Python loads JSON policy then uses tuple dictionary lookup; normal JSON object keys cannot be tuples, so the example needs a normalization step or a different policy schema.",
+    "Illustrative classifier omits identity-attestation and policy-time checks that the surrounding method requires; draft labels it illustrative and says to adapt schemas and attestation checks."
+  ],
+  "scope": "First network draft only; no final quality or usefulness verdict"
+}

@@ -170,19 +170,84 @@ def test_native_fallback_only_for_transport_unavailability(runner_factory, tmp_p
     assert any(row.get("fallback_reason") == "native_unsupported" for row in rows) is fallback
 
 
-def test_author_schema_excludes_controller_fields_and_preserves_markdown(scripted_service, runner_factory):
+@pytest.mark.parametrize("provider", ["ollama", "bedrock"], ids=["native", "schema-tool"])
+@pytest.mark.parametrize("line_output", [False, True], ids=["legacy-string", "markdown-lines"])
+def test_author_schema_excludes_controller_fields_and_preserves_markdown(
+    scripted_service, runner_factory, provider, line_output,
+):
     service = scripted_service.service
     body = '# Guidance\n```javascript\nconst value = "quoted";\n```\n\\path\n'
     metadata = {"title": "Source review", "purpose": "Trace input", "applicability": ["Source available"],
                 "phases": ["analysis"], "triggers": []}
-    runner, model = runner_factory([{"metadata": metadata, "body": body}])
+    runner, model = runner_factory(
+        [{"metadata": metadata, "body": body.split("\n") if line_output else body}], provider=provider,
+    )
     service.runner = runner
     authored = service._json("technique_author", "Write read-only guidance", AuthoredTechnique)
     assert authored.body == body and authored.metadata.sources == []
     assert authored.metadata.active is True
-    assert model.calls[0][1] is AuthoredOutput
+    if provider == "ollama":
+        assert model.calls[0][1] is AuthoredOutput
+    else:
+        assert model.calls[0][1][0]["name"] == "AuthoredOutput"
+        assert model.calls[0][1][0]["inputSchema"]["json"]["properties"]["body"]["type"] == "array"
     fields = AuthoredOutput.model_json_schema()["$defs"]["AuthorMetadata"]["properties"]
     assert set(fields) == {"title", "purpose", "applicability", "phases", "triggers"}
+    wire_body = AuthoredOutput.model_json_schema()["properties"]["body"]
+    assert wire_body["type"] == "array" and wire_body["items"]["type"] == "string"
+    assert "one line" in wire_body["description"]
+
+
+@pytest.mark.parametrize("body", [[], ["", "  "], "  ", [1], {"invalid": "draft"}, None])
+def test_author_line_contract_rejects_empty_or_invalid_bodies(body):
+    with pytest.raises(ValueError):
+        AuthoredOutput.model_validate({
+            "metadata": {"title": "Review", "purpose": "Compare controls", "applicability": ["Review"],
+                         "phases": ["analysis"]},
+            "body": body,
+        })
+
+
+def test_author_line_schema_survives_truncation_recovery(runner_factory, monkeypatch, scripted_service):
+    from strands.types.exceptions import MaxTokensReachedException
+
+    from modules.config.models.generation_budget import GenerationRequest
+    from modules.techniques import structured_retry
+
+    body = ["# Method", "", "1. Compare the allowed and denied controls.", "", "```python", "print('ok')", "```"]
+    metadata = {"title": "Comparison", "purpose": "Compare controls", "applicability": ["Review"],
+                "phases": ["analysis"]}
+    runner, model = runner_factory([MaxTokensReachedException("Truncated"), {"metadata": metadata, "body": body}])
+    model._cyber_llm_role = "technique_author"
+    monkeypatch.setattr(structured_retry, "schema_answer_tokens", lambda *args: 1024)
+    monkeypatch.setattr(structured_retry, "safe_estimate_tokens", lambda agent: 100)
+    monkeypatch.setattr(structured_retry, "model_generation_request", lambda *args, **kwargs: GenerationRequest(
+        context_tokens=48000, input_tokens=100, preferred_tokens=4096, answer_tokens=1024, output_ceiling=16384,
+    ))
+    scripted_service.service.runner = runner
+    result = scripted_service.service._json("technique_author", "Frozen request and source evidence", AuthoredTechnique)
+    assert result.body == "\n".join(body)
+    assert len(model.calls) == 2
+    for call in model.calls:
+        assert "Frozen request and source evidence" in str(call[2])
+        declared = json.loads(call[-1].splitlines()[-1])
+        assert declared["properties"]["body"]["type"] == "array"
+        assert declared == AuthoredOutput.model_json_schema()
+
+
+def test_author_line_contract_counts_in_prompt_fitting(monkeypatch, runner_factory):
+    runner, model = runner_factory([])
+    measured = []
+
+    def estimate(*args, **kwargs):
+        measured.append(kwargs)
+        return 40_001
+
+    monkeypatch.setattr(roles, "estimate_prompt_tokens", estimate)
+    with pytest.raises(ValueError, match="input exceeds configured prompt limit"):
+        runner.structured("technique_author", "Frozen evidence", AuthoredOutput, [])
+    assert not model.calls
+    assert json.loads(measured[0]["system_prompt"].splitlines()[-1]) == AuthoredOutput.model_json_schema()
 
 
 @pytest.mark.parametrize("subject", ["https://assigned.invalid", "tcp://assigned.invalid:443", "/src/handler.py"])
@@ -228,7 +293,7 @@ def test_missing_or_invalid_sdk_output_never_falls_back_to_text(monkeypatch, mis
     monkeypatch.setattr(roles, "create_strands_model", lambda *_: object())
     monkeypatch.setattr(roles, "model_uses_server_side_state", lambda _: False)
     monkeypatch.setattr(roles, "create_agent_with_stateful_retry", lambda *_: SimpleNamespace())
-    monkeypatch.setattr(roles, "invoke_structured",
+    monkeypatch.setattr(roles, "invoke_technique_structured",
                         lambda *_args, **_kwargs: SimpleNamespace(structured_output=missing))
     with pytest.raises(ValueError):
         roles.TechniqueRoleRunner("ollama", "fixture").structured("technique_judge", "Select", Decision, [])
@@ -360,7 +425,7 @@ def test_native_author_correction_preserves_rejected_draft_and_research(scripted
     assert revision and original["body"] in rendered
     assert len(state.research_calls) == 1 and len(model.calls) == 2
     correction = model.calls[-1][2][0]["content"][0]["text"]
-    assert json.dumps(support_record(bad)) in correction and "body" in correction and "string_type" in correction
+    assert json.dumps(support_record(bad)) in correction and "body" in correction and "list_type" in correction
 
 
 @pytest.mark.parametrize("provider", ["ollama", "bedrock"], ids=["native", "schema-tool"])
@@ -603,7 +668,7 @@ def test_source_evidence_contract_survives_transport(runner_factory, scripted_se
 def test_planning_review_correction_assembled_transport(
     runner_factory, scripted_service, monkeypatch, provider, subject,
 ):
-    from modules.techniques.bundles import PlannerOutput, PlanReview
+    from modules.techniques.bundles import BundlePlanReview, PlanCorrection, PlannerOutput
 
     state = scripted_service
     legacy = state.service.runner
@@ -616,13 +681,17 @@ def test_planning_review_correction_assembled_transport(
     fixed = {"components": [{"id": str(i), "request": f"{subject} {part}", **shared}
                             for i, part in enumerate(["baseline", "boundary checks"])]}
     runner, model = runner_factory([
-        plan_payload(bad), {"approved": False, "reason": "Separate independently reusable methods"},
-        plan_payload(fixed), {"approved": True, "reason": "All requested methods preserved"},
+        plan_payload(bad), {"approved": False, "reason": "Separate independently reusable methods", "issues": [
+            {"rule": "decomposition", "component_ids": ["component-1"],
+             "input_references": ["original_request:1"], "correction": "Separate independent methods"}]},
+        {"edits": [{"action": "replace", "component_ids": ["component-1"],
+                    "replacements": plan_payload(fixed)["components"]}]},
+        {"approved": True, "reason": "All requested methods preserved"},
     ], provider)
 
     class TypedRunner:
         def structured(self, role, prompt, schema, tools):
-            if schema in (PlannerOutput, PlanReview):
+            if schema in (PlannerOutput, PlanCorrection, BundlePlanReview):
                 return runner.structured(role, prompt, schema, tools)
             return schema.model_validate_json(legacy(role, prompt, tools))
 
@@ -635,12 +704,16 @@ def test_planning_review_correction_assembled_transport(
     assert subject in assembled and "must not become document requirements" in assembled
     assert "Separate independently reusable methods" in str(model.calls[2])
     assert "Rejected plan" in str(model.calls[2])
-    assert "Reject under-splitting" in str(model.calls[1])
+    assert "Check coverage of independent methods" in str(model.calls[1])
     assert "planner_output" in str(model.calls[1])
-    assert "controller-derived persisted metadata" in str(model.calls[1])
+    assert "Component IDs are" in str(model.calls[1])
     assert "not its source category alone" in str(model.calls[1])
     assert "phase requirements and applicable procedural details" in str(model.calls[1])
-    assert "do not require input_references in that derived section" in str(model.calls[1])
+    assert "review_history" in str(model.calls[1])
+    for call in model.calls:
+        user = str([message for message in call[2] if message["role"] == "user"])
+        assert "Components represent independently reusable requested methods" not in user
+        assert "Components represent independently reusable requested methods" in str(call[-1])
 
 
 @pytest.mark.parametrize(
@@ -1157,3 +1230,72 @@ def test_publication_sdk_has_no_model_repair_category(runner_factory, scripted_s
                     [{"url": "https://vendor.example/advisory", "text": "Access-control background."}],
                     ["https://vendor.example/advisory"])
     assert not result.approved and result.issues[0].category == "authored_content"
+
+
+@pytest.mark.parametrize("provider", ["ollama", "bedrock"])
+@pytest.mark.parametrize("role", ["technique_planner", "technique_plan_reviewer", "technique_correction"])
+def test_role_instructions_are_system_content_and_requests_are_user_data(runner_factory, provider, role):
+    from modules.techniques.bundles import BundlePlanReview, PlanCorrection, PlannerOutput
+
+    if role == "technique_planner":
+        schema = PlannerOutput
+        payload = {"components": [{"request": "Compare HTTP behavior", "input_references": ["original_request:1"],
+            "requirements": [{"description": "Compare controls", "kind": "authored_deliverable",
+                              "input_references": ["original_request:1"]}]}]}
+    elif role == "technique_plan_reviewer":
+        schema, payload = BundlePlanReview, {"approved": True, "reason": "Requested methods preserved"}
+    else:
+        schema, payload = PlanCorrection, {"edits": [{"action": "remove", "component_ids": ["component-2"]}]}
+    runner, model = runner_factory([payload], provider)
+    prompt = roles.RolePrompt("CONTROLLER_POLICY Keep a flat plan", '{"original_request": "REQUEST_DATA"}')
+    result = runner.structured("technique_planner" if role == "technique_correction" else role,
+                               prompt, schema, [])
+    assert isinstance(result, schema)
+    user = str([message for message in model.calls[0][2] if message["role"] == "user"])
+    assert "REQUEST_DATA" in user and "CONTROLLER_POLICY" not in user
+    system = str(model.calls[0][-1])
+    assert "CONTROLLER_POLICY" in system and "REQUEST_DATA" not in system
+    assert "CONTROLLER_POLICY" in str(prompt) and "REQUEST_DATA" in str(prompt)
+
+
+@pytest.mark.parametrize("provider", ["ollama", "bedrock"])
+def test_role_prompt_preserves_integrity_and_counts_system_policy_once(runner_factory, monkeypatch, provider):
+    from modules.techniques.review_integrity import bind_review_prompt
+
+    runner, model = runner_factory([{"selected_id": None, "reason": "No match"}], provider)
+    record = {"original_request": "REQUEST_DATA"}
+    prompt = bind_review_prompt(roles.RolePrompt("CONTROLLER_POLICY", json.dumps(record)), [record])
+    measured = []
+
+    def estimate(*args, **kwargs):
+        measured.append(kwargs)
+        return 100
+
+    monkeypatch.setattr(roles, "estimate_prompt_tokens", estimate)
+    assert runner.structured("technique_judge", prompt, Decision, []).selected_id is None
+    assert "CONTROLLER_POLICY" in measured[0]["system_prompt"]
+    assert measured[0]["extra_content"] == json.dumps(record)
+    assert len(model.calls) == 1
+
+
+def test_role_system_policy_survives_native_truncation_recovery(runner_factory, monkeypatch):
+    from strands.types.exceptions import MaxTokensReachedException
+
+    from modules.config.models.generation_budget import GenerationRequest
+    from modules.techniques import structured_retry
+
+    runner, model = runner_factory([MaxTokensReachedException("Truncated"),
+                                   {"selected_id": None, "reason": "Complete decision"}])
+    model._cyber_llm_role = "technique_judge"
+    monkeypatch.setattr(structured_retry, "schema_answer_tokens", lambda *args: 1024)
+    monkeypatch.setattr(structured_retry, "safe_estimate_tokens", lambda agent: 100)
+    monkeypatch.setattr(structured_retry, "model_generation_request", lambda *args, **kwargs: GenerationRequest(
+        context_tokens=48000, input_tokens=100, preferred_tokens=4096, answer_tokens=1024, output_ceiling=16384,
+    ))
+    prompt = roles.RolePrompt("CONTROLLER_POLICY", '{"original_request": "REQUEST_DATA"}')
+    assert runner.structured("technique_judge", prompt, Decision, []).selected_id is None
+    assert len(model.calls) == 2
+    for call in model.calls:
+        assert "CONTROLLER_POLICY" in str(call[-1])
+        assert "CONTROLLER_POLICY" not in str([m for m in call[2] if m["role"] == "user"])
+        assert "REQUEST_DATA" in str(call[2])

@@ -3,7 +3,7 @@
 import json
 
 import pytest
-from conftest import assessment_output, critique_result
+from conftest import critique_result
 
 from modules.techniques.coverage import Attribution, Requirement, SourceSelection, Support
 from modules.techniques.critique import (
@@ -196,23 +196,20 @@ def test_semantically_vague_or_unsupported_critique_has_one_correction(scripted_
     assert not service.repository.revisions()
 
 
-def test_invalid_critique_correction_consumes_no_author_attempt(scripted_service):
+
+def test_legacy_empty_advice_skips_rewrite(scripted_service):
     state = scripted_service
     original = state.service.runner
     critics = []
-
     def runner(role, prompt, tools):
         if role == "technique_critic":
             critics.append(prompt)
-            return json.dumps({"approved": len(critics) > 1, "reason": "No issues",
-                               "no_security_checks_reason": "No separately enumerated checks in scripted draft"})
+            return '{"approved":false,"reason":"No suggestions"}'
         return original(role, prompt, tools)
-
     state.service.runner = runner
-    state.service.get("Boundary controls")
-    assert len(critics) == 2
-    assert [role for role, _, _ in state.calls].count("technique_author") == 1
-    assert "rejection requires concrete" in critics[1]
+    revision, _ = state.service.get("Boundary controls")
+    assert revision and len(critics) == 1
+    assert sum(role == "technique_author" for role, _, _ in state.calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -271,48 +268,24 @@ def test_attribution_contract_correction_then_success(scripted_service):
     )
 
 
-def test_mixed_issues_replace_stale_author_and_attribution_requests(scripted_service):
+
+def test_mixed_advice_is_forwarded_together_without_research_repair(scripted_service):
     state = scripted_service
-    state.grounding = "source_required"
     original = state.service.runner
-    critics = []
-    events = []
-    state.service.events.callback = events.append
-
-    def research(_):
-        url = f"https://vendor.example/source-{len(state.research_calls)}"
-        state.research_calls.append(url)
-        state.source_urls = [url]
-        return [{"url": url, "title": "Primary", "text": "Boundary support"}]
-
+    authors, critics = [], []
     def runner(role, prompt, tools):
+        if role == "technique_author":
+            authors.append(prompt)
         if role == "technique_critic":
             critics.append(prompt)
-            if len(critics) > 1:
-                return critique_result(True)
-            issues = [
-                issue(category=category, id=category, source_urls=state.source_urls, draft_excerpt="")
-                for category in ["authored_content", "source_attribution", "research_coverage"]
-            ]
-            return Critique(
-                no_security_checks_reason="No separately enumerated security checks in this scripted draft",
-                approved=False,
-                reason="Review",
-                issues=issues,
-            ).model_dump_json()
+            return json.dumps({"summary":"Improve", "recommendations":["Clarify the method", "Clarify attribution"]})
         return original(role, prompt, tools)
-
-    state.service.research = research
     state.service.runner = runner
-    state.service.get("Boundary controls")
-    roles = [role for role, _, _ in state.calls]
-    assert roles.count("technique_author") == 1
-    assert "technique_attribution_repair" not in roles
-    assert len(state.research_calls) == 2
-    event = next(row for row in events if row.get("owning_stage"))
-    assert event["owning_stage"] == "research_coverage"
-    assert event["author_attempts"] == 1 and event["research_batches"] == 1
-    assert event["source_selection_round"] == 1 and event["attribution_repairs"] == 0
+    state.service.get("Boundary guidance")
+    assert len(authors) == 2 and len(critics) == 1
+    assert all(text in authors[-1] for text in ["Clarify the method", "Clarify attribution"])
+    assert len(state.research_calls) == 1
+    assert not any(role == "technique_attribution_repair" for role, _, _ in state.calls)
 
 
 def test_native_attribution_contract_schema_is_narrow():
@@ -321,113 +294,43 @@ def test_native_attribution_contract_schema_is_narrow():
     assert schema["properties"]["attributions"]["maxItems"] == 1
 
 
-def test_seven_requirements_three_drafts_and_incomplete_attribution_response_preserve_work(scripted_service):
+
+def test_all_assigned_requirements_survive_advisory_revision(scripted_service):
     state = scripted_service
     original = state.service.runner
-    requirements = [Requirement(id=f"r{index}", description=f"Boundary requirement {index}") for index in range(7)]
-    authors, critics, repairs = [], [], []
-
+    requirements = [Requirement(id=f"r{i}", description=f"Boundary requirement {i}") for i in range(7)]
+    authors = []
     def runner(role, prompt, tools):
-        if role in {"technique_source_assessor", "technique_requirement_assessor"}:
-            result = json.loads(original(role, prompt, tools))
-            result["coverage"] = [
-                {"requirement_id": row.id, "source_urls": [URL], "explanation": "Primary boundary support", "gaps": []}
-                for row in requirements
-            ]
-            return assessment_output(role, prompt, result)
         if role == "technique_author":
             authors.append(prompt)
         if role == "technique_critic":
-            critics.append(prompt)
-            if len(critics) == 4:
-                return critique_result(True)
-            category = "source_attribution" if len(critics) == 3 else "authored_content"
-            return Critique(
-                no_security_checks_reason="No separately enumerated security checks in this scripted draft",
-                approved=False,
-                reason="Boundary control",
-                issues=[
-                    issue(
-                        category=category,
-                        requirement_ids=["r0"],
-                        draft_excerpt="",
-                    )
-                ],
-            ).model_dump_json()
-        if role == "technique_attribution_repair":
-            repairs.append(prompt)
-            if len(repairs) == 1:
-                return json.dumps(
-                    {"attributions": [{"url": URL, "reason": "Bounded"}], "coverage": [{"requirement_id": "r0"}]}
-                )
+            return '{"summary":"Improve","recommendations":["Clarify the interpretation"]}'
         return original(role, prompt, tools)
-
     state.service.runner = runner
-    _, markdown = state.service.get("Boundary guidance", requirements=requirements)
-    assert len(authors) == 3 and len(critics) == 4 and len(repairs) == 2
+    _, text = state.service.get("Boundary guidance", requirements=requirements)
+    assert len(authors) == 2
+    for requirement in requirements:
+        assert all(requirement.description in prompt for prompt in authors)
+        assert requirement.id in text
     assert len(state.research_calls) == 1
-    assert all(f"r{index}" in markdown for index in range(7))
-    # The final assembled draft changes provenance only; authored Markdown remains byte-identical.
-    assert [line.split(",body.line[", 1)[1] for line in critics[-1].splitlines() if ",body.line[" in line] == [
-        line.split(",body.line[", 1)[1] for line in critics[-2].splitlines() if ",body.line[" in line
-    ]
-    assert "Primary method support" not in markdown
 
 
-@pytest.mark.parametrize("changed", [True, False, "attribution_only"])
-def test_research_only_resets_attribution_allowance_on_changed_validated_assessment(
-    scripted_service, monkeypatch, changed
-):
+
+@pytest.mark.parametrize("category", ["research_coverage", "source_attribution"])
+def test_source_advice_does_not_reset_validated_source_work(scripted_service, monkeypatch, category):
     state = scripted_service
-    state.grounding = "source_required"
     original = state.service.runner
-    critics, repairs = [], []
-    original_research = state.service._research_coverage
-
-    def research(*args, **kwargs):
-        if len(args) < 3:
-            return original_research(*args, **kwargs)
-        documents, retained, batch = args[2:5]
-        if changed == "attribution_only":
-            retained = retained.model_copy(
-                update={
-                    "attributions": [
-                        Attribution(url=row.url, reason="Research changed attribution wording only")
-                        for row in retained.attributions
-                    ]
-                }
-            )
-        elif changed:
-            retained = retained.model_copy(update={"reason": "New validated research assessment"})
-        return documents, retained, batch + 1
-
-    def runner(role, prompt, tools):
-        if role == "technique_critic":
-            critics.append(prompt)
-            count = len(critics)
-            if count > 3:
-                return critique_result(True)
-            category = "research_coverage" if count == 2 else "source_attribution"
-            return Critique(
-                no_security_checks_reason="No separately enumerated security checks in this scripted draft",
-                approved=False,
-                reason="Review",
-                issues=[issue(category=category, draft_excerpt="")],
-            ).model_dump_json()
-        if role == "technique_attribution_repair":
-            repairs.append(prompt)
-        return original(role, prompt, tools)
-
-    monkeypatch.setattr(state.service, "_research_coverage", research)
-    state.service.runner = runner
-    if changed is True:
-        state.service.get("Boundary guidance")
-        assert len(repairs) == 2
-    else:
-        with pytest.raises(ValueError, match="Source attribution unresolved after one repair"):
-            state.service.get("Boundary guidance")
-        assert len(repairs) == 1
-    assert [role for role, _, _ in state.calls].count("technique_author") == 1
+    research = state.service._research_coverage
+    calls = []
+    def retained(*args, **kwargs):
+        calls.append(args)
+        return research(*args, **kwargs)
+    monkeypatch.setattr(state.service, "_research_coverage", retained)
+    state.service.runner = lambda role, prompt, tools: (critique_result(False, category)
+        if role == "technique_critic" else original(role, prompt, tools))
+    state.service.get("Boundary guidance")
+    assert len(calls) == len(state.research_calls) == 1
+    assert sum(role == "technique_author" for role, _, _ in state.calls) == 2
 
 
 def test_attribution_contract_correction_allowance_is_shared_by_affected_sources(scripted_service):
@@ -493,26 +396,18 @@ def test_complete_validated_author_feedback_reaches_repair_without_diagnostic_tr
     assert correction in authors[1]
 
 
-def test_persistent_invalid_critique_retains_authored_draft_diagnostic(scripted_service, tmp_path):
-    from modules.techniques.debug import TechniqueExports
 
+def test_unavailable_advice_retains_valid_document_and_diagnostic(scripted_service):
     state = scripted_service
     original = state.service.runner
-    state.service.exports = TechniqueExports(str(tmp_path))
     events = []
     state.service.events.callback = events.append
-    state.service.runner = lambda role, prompt, tools: (
-        json.dumps({"approved": False, "reason": "Vague"})
-        if role == "technique_critic"
-        else original(role, prompt, tools)
-    )
-    with pytest.raises(ValueError, match="Publication review unavailable"):
-        state.service.get("Boundary guidance")
-    event = next(row for row in events if row.get("stage") == "publication_review")
-    assert event["author_attempts"] == 1
-    snapshot = json.loads((tmp_path / event["snapshot_path"]).read_text())
-    assert "Check assumptions and controls" in snapshot["response"]
-    assert not state.service.repository.revisions()
+    state.service.runner = lambda role, prompt, tools: ("invalid review" if role == "technique_critic"
+                                                       else original(role, prompt, tools))
+    revision, text = state.service.get("Boundary guidance")
+    assert state.service.repository.get(revision)["active"] and "Check assumptions" in text
+    assert any(row.get("status") == "advice_unavailable" for row in events)
+    assert sum(role == "technique_author" for role, _, _ in state.calls) == 1
 
 
 def test_invalid_excerpt_correction_requests_literal_draft_text(scripted_service):
@@ -769,39 +664,16 @@ def test_controller_correction_retains_lookup_without_reopening_tools(scripted_s
     assert len(calls) == 2
 
 
-@pytest.mark.parametrize("persistent", [False, True])
-def test_grounding_complaint_without_evidence_cannot_trigger_repair(scripted_service, persistent):
+
+def test_source_complaint_is_advice_not_a_research_or_publication_veto(scripted_service):
     state = scripted_service
     original = state.service.runner
-    critics = []
-    events = []
-    state.service.events.callback = events.append
-
-    def runner(role, prompt, tools):
-        if role == "technique_critic":
-            critics.append(prompt)
-            if len(critics) == 2 and not persistent:
-                return json.dumps({"approved": True, "reason": "No grounded defects", "issues": [],
-                                   "no_security_checks_reason": "No security checks in scripted draft"})
-            return json.dumps({"approved": False, "reason": "Attribution overstates support", "issues": [
-                issue(id="source-disclaimer", draft_excerpt="", absence_of_support="").model_dump(),
-            ]})
-        return original(role, prompt, tools)
-
-    state.service.runner = runner
-    if persistent:
-        with pytest.raises(ValueError, match="needs inspected source passages"):
-            state.service.get("Boundary controls")
-        assert not state.service.repository.revisions()
-    else:
-        state.service.get("Boundary controls")
-    assert len(critics) == 2 and "needs inspected source passages" in critics[1]
-    assert [role for role, _, _ in state.calls].count("technique_author") == 1
-    assert not any(role == "technique_attribution_repair" for role, _, _ in state.calls)
+    state.service.runner = lambda role, prompt, tools: (critique_result(False, "research_coverage")
+        if role == "technique_critic" else original(role, prompt, tools))
+    revision, _ = state.service.get("Boundary controls")
+    assert state.service.repository.get(revision)["active"]
     assert len(state.research_calls) == 1
-    if persistent:
-        failed = next(row for row in events if row.get("stage") == "publication_review")
-        assert failed["author_attempts"] == 1
+    assert sum(role == "technique_author" for role, _, _ in state.calls) == 2
 
 
 @pytest.mark.parametrize("location", ["metadata", "body", "example"])
@@ -825,9 +697,7 @@ def test_target_detail_issue_repairs_authorship_without_research_loss(scripted_s
             return json.dumps(payload)
         if role == "technique_critic":
             critics.append(prompt)
-            assert "decoded values" in prompt and "incidental target identifiers" in prompt
-            assert "reserved example domains" in prompt
-            assert "expected legitimate behavior" in prompt
+            assert "recommendations" in prompt
             if len(critics) == 1:
                 return Critique(
                     no_security_checks_reason="No separately enumerated security checks in this scripted draft",
@@ -854,7 +724,7 @@ def test_target_detail_issue_repairs_authorship_without_research_loss(scripted_s
     state.service.runner = runner
     revision, _ = state.service.get("JWT handling")
     assert marker not in state.service.store.render(revision)
-    assert len(authors) == len(critics) == 2
+    assert len(authors) == 2 and len(critics) == 1
     assert len(state.research_calls) == 1
     assert "https://vendor.example/advisory" in state.service.store.render(revision)
 

@@ -8,7 +8,10 @@ result under this module's `techniques/` directory. Import occurs when this modu
 > Produce one self-contained Markdown security technique for the `ctf` module concerning
 > **[describe the method]**. Research a target of three actual source documents, prefer primary
 > sources, and independently judge which apply. One authoritative source may suffice if its limits
-> are explicit. Use an author/critic review and revise before returning the final document.
+> are explicit. Draft once and obtain one advisory critic's improvement recommendations.
+> If there are no recommendations, accept the draft. Otherwise apply useful advice in one author
+> revision, then accept without another critique. The critic does not approve or reject authorship.
+> The executor adapts this guidance to its case rather than following a playbook verbatim.
 >
 > Start with YAML frontmatter containing `schema_version: 1`, `title`, `purpose`, `applicability`
 > (list), `phases` (list), `active: true`, `triggers` (list), `sources` (list), and `source_coverage`.

@@ -293,8 +293,8 @@ def test_preservation_findings_require_consistent_decision(approved, subject, ad
                                 subject_preserved=subject,
                                 mechanisms_preserved=True, deliverables_preserved=True,
                                 additions=additions, omissions=[])
-    with pytest.raises(ValueError, match="agree with all findings"):
-        review.validate_decision()
+    review.validate_decision()
+    assert review.approved == (subject and not additions)
 
 
 @pytest.mark.parametrize("persistent", [False, True])
@@ -399,3 +399,22 @@ def source_required_fixture_requests(request):
     # Explicitly retain mandatory-evidence semantics for these legacy research tests.
     if "scripted_service" in request.fixturenames:
         request.getfixturevalue("scripted_service").grounding = "source_required"
+
+
+@pytest.mark.parametrize("restricted", [False, True])
+def test_phase_framing_only_exposes_conflict_when_restrictions_exist(scripted_service, monkeypatch, restricted):
+    from modules.techniques.alignment import AlignmentOutput, FramingOutput, align_request
+
+    schemas = []
+
+    def align(role, prompt, schema, tools=None):
+        schemas.append(schema)
+        return schema(adjusted_request="HTTP comparison", reason="Preserved method")
+
+    monkeypatch.setattr(scripted_service.service, "_json", align)
+    align_request(scripted_service.service, "HTTP comparison", LookupContext(
+        phase_contexts=["hypothesis_generation"],
+        methodology_constraints=["No live execution"] if restricted else [],
+    ))
+    assert schemas == [AlignmentOutput if restricted else FramingOutput]
+    assert FramingOutput.model_json_schema()["properties"]["conflict"]["type"] == "null"

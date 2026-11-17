@@ -355,12 +355,12 @@ def test_feedback_and_independent_review_preserve_complete_serialized_results(sc
 
     state.service.runner = run
     state.service.evaluate("op", "task", context)
-    for role, delimiter in [("technique_evaluator", "Task results:\n"),
-                            ("technique_feedback_reviewer", "Observed results: ")]:
+    for role in ["technique_evaluator", "technique_feedback_reviewer"]:
         prompt = next(prompt for selected, prompt in calls if selected == role)
-        payload = json.loads(prompt.split(delimiter, 1)[1].split("\n", 1)[0])
-        assert payload == {"observed_results": context}
-        assert json.loads(payload["observed_results"]) == value
+        payload = json.loads(prompt.split('{"evidence_references":', 1)[1].split("\n", 1)[0][:-1])
+        result = "\n".join(value for key, value in payload.items() if key.startswith("result:"))
+        assert result == context
+        assert json.loads(result) == value
     assert not state.service.repository.pending_uses("op", "task")
 
 
@@ -405,3 +405,34 @@ def test_target_subject_fallback_has_valid_assigned_identity(scripted_service, t
     tools = bind_task_techniques(runtime, SimpleNamespace(phases=[phase], targets=targets), task, [])
     context = tools[0]._cyber_technique_context
     assert context.lookup.subjects == [{"id": "assigned", "target_id": "assigned", "kind": kind, "value": value}]
+
+
+@pytest.mark.parametrize("recorded", [False, True])
+def test_feedback_context_includes_task_baseline_and_observed_order(recorded):
+    from unittest.mock import Mock
+
+    from modules.tools.memory import AcceptanceBasis, AcceptanceContract, AcceptanceCriterion, EvidenceRequirement
+
+    acceptance = AcceptanceContract(
+        mode="coverage", basis=AcceptanceBasis(kind="snapshot", description="Frozen subject",
+                                               source_refs=("artifact:inventory.json",)),
+        criteria=(AcceptanceCriterion(id="method", description="Record prerequisites and future checks",
+                                      evidence_requirements=(EvidenceRequirement(kind="hypothesis_set"),)),),
+    )
+    service = SimpleNamespace(evaluate=Mock())
+    runtime = SimpleNamespace(technique_service=service, operation_id="op")
+    task = SimpleNamespace(task_uid="task", objective="Compare ownership", status="done", evidence=[],
+                           acceptance=acceptance)
+    outcome = SimpleNamespace(tool_name="reader", success=True, output_summary="Observed ownership", artifact_refs=())
+    if recorded:
+        outcome.sequence = 7
+        outcome.recovery_role = "diagnostic"
+    evaluate_task_techniques(runtime, task, "Task evaluated", [outcome])
+    context = json.loads(service.evaluate.call_args.args[2])
+    assert context["task_contract"] == {
+        "provenance": "frozen_task_acceptance", "value": acceptance.to_dict(),
+    }
+    assert context["reason_provenance"] == "controller_task_evaluation"
+    assert context["outcomes"][0]["sequence"] == (7 if recorded else 1)
+    assert context["outcomes"][0]["sequence_provenance"] == ("recorded" if recorded else "list_order")
+    assert context["outcomes"][0]["recovery_role"] == ("diagnostic" if recorded else "unknown")

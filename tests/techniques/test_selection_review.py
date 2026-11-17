@@ -57,3 +57,20 @@ def test_numbered_passages_preserve_single_line_and_unicode():
     passages = document_passages(text)
     assert "".join(passages.values()) == text
     assert list(passages) == [1, 2, 3]
+
+
+def test_controller_resolves_passage_without_model_quote():
+    result = review(passages=[{"passage_id": 1}])
+    result.validate_references([{"id": "method"}], {1: "Compare versions"})
+    assert result.reusable
+
+
+def test_absent_requested_capability_does_not_need_nonexistent_quote():
+    result = review("unmet", passages=[])
+    result.validate_references([{"id": "method"}], {1: "Other procedure"})
+    assert not result.reusable
+
+
+def test_covered_requirement_requires_a_real_passage():
+    with pytest.raises(ValueError, match="require a passage"):
+        review(passages=[]).validate_references([{"id": "method"}], {1: "Other"})

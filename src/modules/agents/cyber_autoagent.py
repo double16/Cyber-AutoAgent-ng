@@ -1272,6 +1272,9 @@ def create_agent(
         technique_context = getattr(selected_tool, "_cyber_technique_context", None)
         if technique_context is not None:
             agent_kwargs["hooks"] = [*(agent_kwargs["hooks"] or []), TechniqueObservationHook(technique_context)]
+            from modules.techniques.delivery import automatic_delivery_hooks
+
+            agent_kwargs["hooks"].extend(automatic_delivery_hooks(technique_context, agent_type))
     if model_uses_server_side_state(model):
         agent_logger.info(
             "Skipping local conversation manager for stateful model '%s'; "

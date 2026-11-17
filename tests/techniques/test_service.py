@@ -152,19 +152,21 @@ def test_unknown_revision_and_source_selections_are_rejected(scripted_service):
         state.service.get("JWT")
 
 
-def test_insufficient_source_and_rejected_critique_do_not_publish(scripted_service):
-    scripted_service.grounding = "source_required"
+
+def test_source_validation_still_blocks_but_critic_advice_does_not(scripted_service):
     state = scripted_service
+    state.grounding = "source_required"
     state.authoritative = False
     with pytest.raises(ValueError, match="coverage exhausted"):
         state.service.get("JWT")
     assert not state.service.repository.revisions()
+    assert not any(role == "technique_author" for role, _, _ in state.calls)
     state.authoritative = True
     state.approve = False
-    with pytest.raises(ValueError, match="3 attempts at critique"):
-        state.service.get("JWT")
-    assert len([role for role, _, _ in state.calls if role == "technique_author"]) == 3
-    assert not state.service.repository.revisions()
+    revision, _ = state.service.get("JWT")
+    assert state.service.repository.get(revision)["active"]
+    assert sum(role == "technique_author" for role, _, _ in state.calls) == 2
+    assert sum(role == "technique_critic" for role, _, _ in state.calls) == 1
 
 
 def test_invalid_authored_document_and_sources_do_not_publish(scripted_service, markdown):
@@ -395,11 +397,12 @@ def test_author_repairs_json_and_preserves_original_markdown(scripted_service, t
     assert len(list((tmp_path / "techniques" / "builds").glob("*/attempt-*.json"))) == 1
 
 
-def test_mixed_failures_report_final_stage_and_redact_critic_reason(scripted_service, tmp_path):
+
+def test_format_repair_and_advisory_revision_redact_critic_context(scripted_service, tmp_path):
     from modules.techniques.debug import TechniqueExports
 
     state = scripted_service
-    runner = state.service.runner
+    original = state.service.runner
     attempts = []
     state.service.private_values = ("internal-target.example",)
     state.service.exports = TechniqueExports(str(tmp_path))
@@ -407,128 +410,75 @@ def test_mixed_failures_report_final_stage_and_redact_critic_reason(scripted_ser
     def run(role, prompt, tools):
         if role == "technique_author":
             attempts.append(prompt)
-            return "bad JSON" if len(attempts) == 1 else runner(role, prompt, tools)
+            if len(attempts) == 1:
+                return "bad JSON"
         if role == "technique_critic":
             return critique_result(reason="Fix internal-target.example controls")
-        return runner(role, prompt, tools)
+        return original(role, prompt, tools)
 
     state.service.runner = run
-    with pytest.raises(ValueError, match="3 attempts at critique") as error:
-        state.service.get("JWT")
-    assert "internal-target.example" not in str(error.value)
-    assert "[operation-specific]" in str(error.value)
-    assert "Fix [operation-specific] controls" in attempts[2]
-    assert not state.service.repository.revisions()
-    assert len(list((tmp_path / "techniques" / "builds").glob("*/attempt-*.json"))) == 3
+    revision, _ = state.service.get("JWT")
+    assert revision and len(attempts) == 3
+    assert "internal-target.example" not in attempts[-1]
+    assert "[operation-specific]" in attempts[-1]
+    assert len(list((tmp_path / "techniques" / "builds").glob("*/attempt-*.json"))) == 1
 
 
-@pytest.mark.parametrize(
-    "category,expected_authors,expected_research",
-    [
-        ("authored_content", 2, 1),
-        ("request_coverage", 2, 1),
-        ("source_attribution", 1, 1),
-        ("research_coverage", 1, 2),
-    ],
-)
-def test_critique_routes_repairs_to_owning_stage(scripted_service, category, expected_authors, expected_research):
-    state = scripted_service
-    if category == "research_coverage":
-        state.grounding = "source_required"
-    original = state.service.runner
-    critiques = []
-    selections = []
-    retained = []
-    original_research = state.service._research_coverage
 
-    def coverage(*args, **kwargs):
-        assert kwargs.get("require_complete_support", False) is bool(retained)
-        result = original_research(*args, **kwargs)
-        retained.append(result[1])
-        return result
-
-    def research(request):
-        state.research_calls.append(request)
-        state.source_urls = [f"https://vendor.example/source-{len(state.research_calls)}"]
-        return [{"url": state.source_urls[0], "title": "Advisory", "text": "Primary support"}]
-
-    def runner(role, prompt, tools):
-        if role == "technique_critic":
-            critiques.append(prompt)
-            return critique_result(len(critiques) > 1, category, "Fix coverage", state.source_urls)
-        if role == "technique_source_assessor":
-            selections.append(prompt)
-        return original(role, prompt, tools)
-
-    state.service.research = research
-    state.service._research_coverage = coverage
-    state.service.runner = runner
-    revision, markdown = state.service.get("JWT handling")
-    assert revision and "Check assumptions" in markdown
-    assert len([row for row in state.calls if row[0] == "technique_author"]) == expected_authors
-    assert len(state.research_calls) == expected_research
-    assert len(critiques) == 2
-    if category == "research_coverage":
-        assert len(retained[-1]._decisions) == len(retained[-1]._documents) == 2
-        assert set(retained[0].selected_urls).issubset(retained[-1].selected_urls)
-        assert retained[-1]._evidence["method"]
-    if category == "source_attribution":
-        assert len(selections) == 1
-        assert any(role == "technique_attribution_repair" and "Fix coverage" in prompt
-                   for role, prompt, _ in state.calls)
-    if category in {"source_attribution", "research_coverage"}:
-        assert all('"source_passages"' in prompt for prompt in critiques)
-        assert "Primary support" in critiques[-1]
-        assert [line.split(",body.line[", 1)[1] for line in critiques[0].splitlines() if ",body.line[" in line] == [
-            line.split(",body.line[", 1)[1] for line in critiques[1].splitlines() if ",body.line[" in line
-        ]
-
-
-@pytest.mark.parametrize(
-    "category,message",
-    [
-        ("source_attribution", "after one repair"),
-        ("research_coverage", "Research coverage exhausted"),
-    ],
-)
-def test_owned_repair_exhaustion_is_explicit_without_reauthoring(scripted_service, category, message):
-    state = scripted_service
-    if category == "research_coverage":
-        state.grounding = "source_required"
-    original = state.service.runner
-
-    def runner(role, prompt, tools):
-        if role == "technique_critic":
-            return critique_result(False, category, "Unsupported requirement", state.source_urls)
-        return original(role, prompt, tools)
-
-    state.service.runner = runner
-    with pytest.raises(ValueError, match=message):
-        state.service.get("JWT handling")
-    assert [role for role, _, _ in state.calls].count("technique_author") == 1
-    assert not state.service.repository.revisions()
-
-
-def test_attribution_repair_cannot_replace_coverage(scripted_service):
+@pytest.mark.parametrize("category", ["authored_content", "request_coverage", "source_attribution", "research_coverage"])
+def test_all_critic_categories_are_advice_without_reopening_sources(scripted_service, category):
     state = scripted_service
     original = state.service.runner
-    repairs = []
-
+    critics = []
     def runner(role, prompt, tools):
         if role == "technique_critic":
-            return critique_result(False, "source_attribution", "Inaccurate support", state.source_urls)
-        if role == "technique_attribution_repair":
-            repairs.append(prompt)
-            return json.dumps({"attributions": [{"url": state.source_urls[0], "reason": "Fixed"}],
-                               "coverage": [{"requirement_id": "method"}]})
+            critics.append(prompt)
+            return critique_result(False, category, "Useful improvement", state.source_urls)
         return original(role, prompt, tools)
-
     state.service.runner = runner
-    with pytest.raises(ValueError, match="Attribution repair invalid after one correction"):
-        state.service.get("JWT handling")
-    assert len(repairs) == 2
+    revision, text = state.service.get("JWT handling")
+    assert revision and "Check assumptions" in text
+    assert sum(role == "technique_author" for role, _, _ in state.calls) == 2
+    assert len(critics) == len(state.research_calls) == 1
+    assert not any(role == "technique_attribution_repair" for role, _, _ in state.calls)
+
+
+
+@pytest.mark.parametrize("category", ["source_attribution", "research_coverage"])
+def test_legacy_refusal_without_suggestions_accepts_initial(scripted_service, category):
+    state = scripted_service
+    original = state.service.runner
+    def runner(role, prompt, tools):
+        if role == "technique_critic":
+            return json.dumps({"approved": False, "category": category, "reason": "I refuse", "issues": []})
+        return original(role, prompt, tools)
+    state.service.runner = runner
+    revision, _ = state.service.get("JWT handling")
+    assert state.service.repository.get(revision)["active"]
+    assert sum(role == "technique_author" for role, _, _ in state.calls) == 1
     assert len(state.research_calls) == 1
-    assert not state.service.repository.revisions()
+
+
+
+def test_advice_cannot_replace_controller_owned_provenance(scripted_service):
+    state = scripted_service
+    original = state.service.runner
+    authors = []
+    def runner(role, prompt, tools):
+        if role == "technique_critic":
+            return critique_result(False, "source_attribution", "Revise attribution", state.source_urls)
+        output = original(role, prompt, tools)
+        if role == "technique_author":
+            authors.append(prompt)
+            payload = json.loads(output)
+            payload["metadata"]["sources"] = [{"url": "https://invented.example/source", "title": "Invented"}]
+            return json.dumps(payload)
+        return output
+    state.service.runner = runner
+    revision, _ = state.service.get("JWT")
+    assert len(authors) == 2
+    assert [s.url for s in state.service.store.document(revision).metadata.sources] == state.source_urls
+    assert len(state.research_calls) == 1
 
 
 def test_repairs_on_third_author_attempt_still_receive_exact_final_critique(scripted_service):
@@ -549,7 +499,7 @@ def test_repairs_on_third_author_attempt_still_receive_exact_final_critique(scri
 
     state.service.runner = runner
     _, markdown = state.service.get("JWT handling")
-    assert len(authors) == 3 and len(critics) == 2
+    assert len(authors) == 4 and len(critics) == 1
     assert "Check assumptions" in markdown
 
 
@@ -600,14 +550,13 @@ def test_research_readiness_does_not_approve_unfulfilled_draft_obligations(scrip
     state = scripted_service
     state.approve = False
     description = "Include a complete checklist with positive and negative controls"
-    with pytest.raises(ValueError, match="3 attempts at critique"):
-        state.service.get("HTTP controls", MethodologyContext(phase_contexts=["hypothesis_generation"]),
-                          requirements=[Requirement(id="method", description=description, kind=kind)])
+    revision, _ = state.service.get("HTTP controls", MethodologyContext(phase_contexts=["hypothesis_generation"]),
+                                    requirements=[Requirement(id="method", description=description, kind=kind)])
     for role in ("technique_author", "technique_critic"):
         prompts = [prompt for selected, prompt, _ in state.calls if selected == role]
-        assert len(prompts) == 3
+        assert len(prompts) == (2 if role == "technique_author" else 1)
         assert all(description in prompt and kind in prompt for prompt in prompts)
-    assert not state.service.repository.revisions()
+    assert state.service.repository.get(revision)["active"]
 
 
 @pytest.mark.parametrize("use_factory", [False, True])
@@ -691,7 +640,8 @@ def test_lookup_review_cache_invalidates_changed_inputs(scripted_service, monkey
 
     service = scripted_service.service
     candidates = [{"revision_id": "first"}]
-    document = SimpleNamespace(markdown="Complete procedure")
+    document = SimpleNamespace(markdown="Complete procedure", sha256="fixture",
+                               metadata=SimpleNamespace(model_dump=dict))
     monkeypatch.setattr(service, "_candidates", lambda *args: candidates)
     monkeypatch.setattr(service.store, "document", lambda *args: document)
     calls = []

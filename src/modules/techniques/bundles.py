@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, model_validator
 
 from modules.techniques.alignment import PHASE_OBJECTIVES, RequestAlignment, align_request
 from modules.techniques.context import LookupDecision
@@ -48,6 +48,81 @@ class PlannedComponent(BaseModel):
 class PlannerOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     components: list[PlannedComponent] = Field(min_length=1, max_length=16)
+
+
+class ComponentEdit(BaseModel):
+    """One local correction against controller-assigned proposal IDs."""
+
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["remove", "merge", "replace"]
+    component_ids: list[str] = Field(min_length=1)
+    replacements: list[PlannedComponent] = Field(default_factory=list)
+
+
+class PlanCorrection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    edits: list[ComponentEdit] = Field(min_length=1)
+
+
+def apply_correction(output, correction):
+    """Apply independent edits atomically; unchanged model values retain their provenance."""
+    known = {f"component-{i}": item for i, item in enumerate(output.components, 1)}
+    consumed = set()
+    replacements = {}
+    for edit in correction.edits:
+        ids = edit.component_ids
+        if len(set(ids)) != len(ids) or any(key not in known or key in consumed for key in ids):
+            raise ValueError("Unknown, repeated or conflicting correction component")
+        if edit.action == "remove":
+            if edit.replacements:
+                raise ValueError("Removal cannot supply replacements")
+        elif edit.action == "merge":
+            if len(ids) < 2 or len(edit.replacements) != 1:
+                raise ValueError("Merge requires multiple components and one replacement")
+        elif len(ids) != 1 or not edit.replacements:
+            raise ValueError("Replace requires one component and nonempty replacements")
+        consumed.update(ids)
+        first = min(ids, key=lambda key: list(known).index(key))
+        replacements[first] = edit.replacements
+    components = []
+    for key, item in known.items():
+        components.extend(replacements.get(key, [] if key in consumed else [item]))
+    return PlannerOutput(components=components)
+
+
+def deduplicate_plan(output):
+    """Group identical method requests without discarding distinct obligations or provenance."""
+    groups = {}
+    for item in output.components:
+        groups.setdefault(item.request, []).append(item)
+    components = []
+    for items in groups.values():
+        retained = None
+        for item in items:
+            incoming = {}
+            for row in item.requirements:
+                key = (row.description, row.kind, row.grounding)
+                if key not in incoming:
+                    incoming[key] = row.model_copy(deep=True)
+                else:
+                    incoming[key].input_references = list(dict.fromkeys(
+                        incoming[key].input_references + row.input_references,
+                    ))
+            existing = ({(row.description, row.kind, row.grounding): row for row in retained.requirements}
+                        if retained is not None else {})
+            # Preserve the existing schema bound without silently dropping obligations.
+            if retained is None or len(existing.keys() | incoming.keys()) > 16:
+                retained = item.model_copy(deep=True, update={"requirements": list(incoming.values())})
+                components.append(retained)
+                continue
+            retained.input_references = list(dict.fromkeys(retained.input_references + item.input_references))
+            for key, source in incoming.items():
+                if key in existing:
+                    target = existing[key]
+                    target.input_references = list(dict.fromkeys(target.input_references + source.input_references))
+                else:
+                    retained.requirements.append(source.model_copy(deep=True))
+    return PlannerOutput.model_validate({"components": [item.model_dump() for item in components]})
 
 
 class InputRecord(BaseModel):
@@ -104,6 +179,39 @@ class PlanReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
     approved: StrictBool
     reason: str = Field(min_length=1, max_length=2000)
+
+
+class PlanIssue(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    rule: Literal["decomposition", "overlap", "omission", "invented_requirement", "grounding"]
+    component_ids: list[str] = Field(min_length=1)
+    input_references: list[str] = Field(min_length=1)
+    correction: str = Field(min_length=1)
+
+
+class BundlePlanReview(PlanReview):
+    issues: list[PlanIssue] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def consistent_decision(self):
+        if self.approved == bool(self.issues):
+            raise ValueError("Approval requires no issues; rejection requires structured issues")
+        return self
+
+
+DECOMPOSITION_POLICY = (
+    "Default to one cohesive method; separate methods when their independently useful procedures differ. "
+    "Prompt injection/jailbreak, tool-mediated SSRF, mass assignment and CVE validation can be "
+    "independent methods even on the same endpoint. Preserve all requested mechanisms in either grouping. "
+    "Extraction, prerequisites, criteria mapping and validation are steps within one CVE method. "
+    "SQL injection testing and TLS configuration assessment are independently useful methods. "
+    "Components represent independently reusable requested methods. Preconditions, procedural "
+    "steps, controls, payloads and evidence expectations are requirements within a method. "
+    "A list of mechanisms does not automatically determine component count. Choose cohesive or "
+    "independent methods according to their purpose. Never include an umbrella component whose "
+    "coverage duplicates its constituent components. Requirements within one method do not form "
+    "independent components. "
+)
 
 
 class Delivered(BaseModel):
@@ -170,22 +278,15 @@ def requirement_origin_error(plan, request, context):
 
 
 def resolve_bundle(service, request, context=None, operation="", task="") -> TechniqueBundle:
+    from modules.techniques.roles import RolePrompt
+
     request = request.strip()
     service._validate_request(request)
     alignment, context = align_request(service, request, context)
-    planning_rules = (
-        "Identify independently reusable methodology requests, not procedural steps. "
-        "Split requested methods that independently produce useful guidance, even when they share an "
-        "endpoint, subject or phase. Never split merely because a method is broad, "
-        "complex, has multiple steps or intermediate artifacts. Extraction, prerequisite identification, "
-        "criteria mapping and validation form ONE CVE applicability methodology. SQL injection testing "
-        "and TLS configuration assessment are two separately requested methods. Preserve ALL requested "
-        "mechanisms and deliverables without inventing summary documents, matrices or CWE requirements. "
-        "For an LLM endpoint request covering prompt injection, jailbreak, tool-mediated SSRF, JSON mass"
-        " assignment and CVE validation, use four methods: prompt injection/jailbreak; SSRF; mass "
-        "assignment; CVE applicability/validation. This is an example, not a fixed component count. "
-        "Carry shared requested deliverables into each applicable component. Separate independently "
-        "assessable obligations. Planner instructions, including citing original request excerpts, are "
+    planning_rules = DECOMPOSITION_POLICY + (
+        "Preserve requested mechanisms and deliverables. "
+        "Carry shared requested deliverables into each applicable component. Keep assessable obligations "
+        "within their method. Planner instructions, including citing original request excerpts, are "
         "provenance rules and must not become document requirements unless the user requested them. "
         "The original request defines methods and explicit deliverables. Central phase-objective records "
         "and explicit restriction records are authoritative methodology inputs, not planner instructions. "
@@ -206,28 +307,45 @@ def resolve_bundle(service, request, context=None, operation="", task="") -> Tec
     )
     records = input_records(request, context)
     planning_rules += (
+        "Plan the methodology preserving original mechanisms and explicit deliverables. "
+        "Reference IDs are controller bookkeeping, never research or authoring requirements. "
+        "When correcting a supplied proposal, apply local edits using component-N IDs in its current order. "
+        "Preserve unchanged components. Replace can split a component when requested coverage is missing. "
+        "Python applies edits atomically, then reviews the complete resulting plan.\n"
+    )
+    planning_inputs = (
         json_payload("authoritative_inputs", [
             {"id": identifier, **origin.model_dump()} for identifier, origin in records.items()
         ]) + f"\nPhase-aligned request (framing only): {alignment.adjusted_request}\n"
-        "Plan the methodology preserving original mechanisms and explicit deliverables. "
-        "Reference IDs are controller bookkeeping, never research or authoring requirements.\n"
     )
     correction = ""
+    review_history = []
+    previous_output = None
     for attempt in range(2):
         with service.events.stage("planning"):
             try:
-                output = service._json(
+                # Legacy injected text runners retain their full-plan response contract.
+                use_edits = previous_output is not None and callable(getattr(service.runner, "structured", None))
+                response = service._json(
                     "technique_planner",
-                    planning_rules + f"Original request: {request}\n" + correction,
-                    PlannerOutput,
+                    RolePrompt(planning_rules, planning_inputs + f"Original request: {request}\n" + correction),
+                    PlanCorrection if use_edits else PlannerOutput,
                 )
+                output = apply_correction(previous_output, response) if use_edits else response
+                output = deduplicate_plan(output)
+                if previous_output is not None:
+                    service.events.emit(
+                        "technique_plan_corrected", before_count=len(previous_output.components),
+                        after_count=len(output.components),
+                        edit_kinds=[edit.action for edit in response.edits] if use_edits else ["legacy_replacement"],
+                    )
             except ValueError as error:
                 findings = ([
                     {"field": ".".join(map(str, row["loc"])), "problem": row["msg"]}
                     for row in error.errors(include_input=False, include_url=False)
                 ] if isinstance(error, ValidationError) else [{"field": "planner_output", "problem": str(error)}])
                 service.events.emit(
-                    "technique_plan_rejected", correction_attempt=attempt,
+                    "technique_plan_rejected", correction_attempt=attempt, rejection_kind="contract",
                     reason=service._safe_feedback(str(error)),
                     validation_findings=[{**row, "problem": service._safe_feedback(row["problem"], limit=None)}
                                          for row in findings],
@@ -240,53 +358,72 @@ def resolve_bundle(service, request, context=None, operation="", task="") -> Tec
         with service.events.stage("plan_review"):
             review = service._json(
                 "technique_plan_reviewer",
-                "Independently check the plan adds no unrelated requirements and preserves each requested "
-                "methodology. Review planner_output using its input_references. The components section is "
-                "controller-derived persisted metadata: Python resolves references into origins and assigns "
-                "IDs and purposes; do not require input_references in that derived section. "
-                "Check each component request itself preserves its subject, mechanisms and explicit "
-                "deliverables, not only its purpose and requirements. Check requirement classifications: "
-                "facts need factual_support, procedures need authored_deliverable, restrictions need constraint. "
-                "Separately check grounding: source_required must correspond to explicit requested citations "
-                "or source-dependent facts such as affected versions, quotations or vendor statements. "
-                "General knowledge and original procedures use knowledge_allowed. "
-                "Requirements within one component may separately describe preconditions, steps, expectations "
-                "and evidence; this is not method splitting. Not automatically required does not mean "
-                "prohibited. Reject under-splitting independent methods, omitted obligations and requirements "
-                "derived from "
-                "planner instructions. Reject invented prohibitions or omitted useful deliverables. "
-                "Judge each requirement's relevance, not its source category alone. A central phase-objective "
-                "record is authoritative methodology input, distinct from planner instructions. Relevant "
-                "phase requirements and applicable procedural details, payloads or checklists do not require "
-                "an explicit user request. Reject unrelated mandatory artifacts and prohibitions. "
-                "Check every requirement origin semantically "
-                "justifies the obligation, not merely that the excerpt exists. Rejection must name the "
-                "affected method or requirement and the requested "
-                "correction. Reject phase-only requests. Reject splitting one workflow into supporting steps or "
-                "invented deliverables. "
-                + planning_rules
-                + f"Original request: {request}\n"
-                + json_payload("planner_output", output.model_dump()) + "\n"
-                + json_payload("components", [item.model_dump() for item in plan.components]),
-                PlanReview,
+                RolePrompt(
+                    "Independently check the plan adds no unrelated requirements and preserves each requested "
+                    "methodology. Review planner_output using its input_references. Component IDs are "
+                    "component-N, assigned by Python in proposal order starting at one. "
+                    "Check each component request itself preserves its subject, mechanisms and explicit "
+                    "deliverables, not only its purpose and requirements. Check requirement classifications: "
+                    "facts need factual_support, procedures need authored_deliverable, restrictions need constraint. "
+                    "Separately check grounding: source_required must correspond to explicit requested citations "
+                    "or source-dependent facts such as affected versions, quotations or vendor statements. "
+                    "General knowledge and original procedures use knowledge_allowed. "
+                    "Requirements within one component may separately describe preconditions, steps, expectations "
+                    "and evidence; this is not method splitting. Not automatically required does not mean "
+                    "prohibited. Check coverage of independent methods, omitted obligations and requirements "
+                    "derived from "
+                    "planner instructions. Reject invented prohibitions or omitted useful deliverables. "
+                    "Judge each requirement's relevance, not its source category alone. A central phase-objective "
+                    "record is authoritative methodology input, distinct from planner instructions. Relevant "
+                    "phase requirements and applicable procedural details, payloads or checklists do not require "
+                    "an explicit user request. Reject unrelated mandatory artifacts and prohibitions. "
+                    "Check every requirement origin semantically "
+                    "justifies the obligation, not merely that the excerpt exists. Rejection must name the "
+                    "affected method or requirement and the requested "
+                    "correction. Reject phase-only requests. Reject splitting one workflow into supporting steps or "
+                    "invented deliverables. "
+                    + DECOMPOSITION_POLICY
+                    + "Review the proposal; do not generate a replacement plan. Identify structured issues "
+                    "using component-N IDs and supplied input references. Previous feedback is advisory. "
+                    "Assess whether each previous issue was resolved. Explain any changed recommendation "
+                    "in reason, identifying new information or the previous mistaken interpretation. ",
+                    json_payload("authoritative_inputs", [
+                        {"id": identifier, **origin.model_dump()} for identifier, origin in records.items()
+                    ])
+                    + json_payload("review_history", review_history)
+                    + json_payload("validation_findings", findings)
+                    + f"Original request: {request}\n"
+                    + json_payload("planner_output", output.model_dump()),
+                ),
+                BundlePlanReview,
             )
+        for issue in review.issues:
+            if any(ref not in records for ref in issue.input_references):
+                raise ValueError("Review issue contains unknown input reference")
+            if any(identifier not in {item.id for item in plan.components} for identifier in issue.component_ids):
+                raise ValueError("Review issue contains unknown component")
+        review_history.append({"proposal": output.model_dump(), "review": review.model_dump()})
         if not review.approved:
             findings.append({"field": "semantic_review", "problem": review.reason})
         if not findings:
             break
         reason = "; ".join(row["field"] + ": " + row["problem"] for row in findings)
         service.events.emit("technique_plan_rejected", correction_attempt=attempt,
+                            rejection_kind="semantic" if not review.approved else "validation",
                             reason=service._safe_feedback(reason),
                             validation_findings=[{**row, "problem": service._safe_feedback(row["problem"], limit=None)}
                                                  for row in findings],
+                            issues=[issue.model_dump() for issue in review.issues],
                             components=[item.model_dump() for item in plan.components])
         if attempt:
             raise ValueError("Technique planning left unresolved request coverage: " + service._safe_feedback(reason))
+        previous_output = output
         correction = (
             "Rejected plan (untrusted): "
             + output.model_dump_json()
             + "\nRepair planning: "
             + json_payload("validation_findings", findings)
+            + json_payload("review_issues", [issue.model_dump() for issue in review.issues])
         )
     service.events.emit("technique_plan_accepted", components=[item.model_dump() for item in plan.components])
     bundle = TechniqueBundle(alignment=alignment)

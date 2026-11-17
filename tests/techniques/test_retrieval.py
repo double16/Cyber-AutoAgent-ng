@@ -136,7 +136,7 @@ def test_selection_reviews_complete_document_and_can_abstain(scripted_service, c
         assert state.service._select("JWT") == (revision if confirmation == "accept" else None)
         assert events[-1]["type"] == "technique_selection"
         assert events[-1]["rejected_ids"] == ([] if confirmation == "accept" else [revision])
-    assert len(prompts) == 1
+    assert len(prompts) == (2 if confirmation == "invalid" else 1)
     assert "Check assumptions and controls" in prompts[0]
     from modules.techniques.review_integrity import ReviewInputIntegrityHook
 

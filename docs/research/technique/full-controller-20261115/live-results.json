@@ -1,0 +1,111 @@
+{
+  "requests": {
+    "original": 69,
+    "extension": 69,
+    "total": 138,
+    "approved": 169,
+    "unused": 31,
+    "interrupted_attempt": 8
+  },
+  "outcomes": [
+    {
+      "mode": "unknown",
+      "arm": "lookup",
+      "task_status": "partial_failure",
+      "task_reason": "Evidence prerequisite recovery did not produce a valid durable artifact.",
+      "requests": 43,
+      "tool_calls": {
+        "TaskPromptOutput": 1,
+        "TaskPromptChecklistOutput": 1,
+        "inspect_context": 2,
+        "tool_catalog": 2,
+        "get_technique": 1,
+        "request_account": 2,
+        "record_task_acceptance": 1
+      },
+      "acceptance_records": 0,
+      "observation_count": 4,
+      "source": "outputs/technique_review_trials/full-controller-20261115/00/controller-outcome.json",
+      "catalog_revisions": 64,
+      "use_receipts": 0
+    },
+    {
+      "mode": "unknown",
+      "arm": "none",
+      "task_status": "done",
+      "task_reason": "Frozen acceptance criterion classification is satisfied with observation disposition. Evidence artifact artifacts/result.json and task evidence artifacts/task_evidence/94253de173650cac/result-70af924ff7264d84.json record a published comparison classification for target-1 fixture with identity context obs-1 and policy unavailable obs-2, and request_account evidences obs-3 and obs-4 showing principal-specific responses. The published classification is inconclusive without policy metadata, which meets the requirement to publish an evidence-backed comparison classification for independent assessment without claiming a confirmed finding. Controller execution-gate reports satisfied with no unresolved requirements.",
+      "correct_classification": true,
+      "valid_evidence_ids": true,
+      "decisive_probe": false,
+      "discovery_evidence": true,
+      "supported_correct": false,
+      "requests": 18,
+      "tool_calls": {
+        "TaskPromptOutput": 1,
+        "TaskPromptChecklistOutput": 1,
+        "tool_catalog": 7,
+        "inspect_context": 2,
+        "request_account": 2,
+        "publish_result": 1,
+        "record_task_acceptance": 1,
+        "WorkflowDecisionOutput": 1
+      },
+      "acceptance_records": 1,
+      "observation_count": 4,
+      "source": "outputs/technique_review_trials/full-controller-20261115/01/controller-outcome.json",
+      "classification": "inconclusive"
+    },
+    {
+      "mode": "shared",
+      "arm": "none",
+      "task_status": "done",
+      "task_reason": "Frozen acceptance criterion classification is satisfied with observation disposition. Artifact artifacts/result.json contains an evidence-backed comparison classification 'inconclusive' derived from fixture context obs-1, obs-2 and account queries obs-3 to obs-6, published for independent review without claiming a confirmed finding. Execution gate reports satisfied and no execution requirements remain. Evidence supports the required artifact publication.",
+      "correct_classification": false,
+      "valid_evidence_ids": true,
+      "decisive_probe": true,
+      "discovery_evidence": true,
+      "supported_correct": false,
+      "requests": 24,
+      "tool_calls": {
+        "TaskPromptOutput": 1,
+        "TaskPromptChecklistOutput": 1,
+        "tool_catalog": 6,
+        "inspect_context": 3,
+        "request_account": 4,
+        "publish_result": 1,
+        "record_task_acceptance": 2,
+        "read_artifact": 1,
+        "WorkflowDecisionOutput": 1
+      },
+      "acceptance_records": 1,
+      "observation_count": 6,
+      "source": "outputs/technique_review_trials/full-controller-extension-20261115/02/controller-outcome.json",
+      "classification": "inconclusive"
+    },
+    {
+      "mode": "shared",
+      "arm": "lookup",
+      "task_status": "partial_failure",
+      "task_reason": "Evidence prerequisite recovery did not produce a valid durable artifact.",
+      "requests": 45,
+      "tool_calls": {
+        "TaskPromptOutput": 1,
+        "TaskPromptChecklistOutput": 1,
+        "tool_catalog": 33,
+        "inspect_context": 2,
+        "record_task_acceptance": 1
+      },
+      "acceptance_records": 0,
+      "observation_count": 2,
+      "source": "outputs/technique_review_trials/full-controller-extension-20261115/03/controller-outcome.json",
+      "catalog_revisions": 64,
+      "use_receipts": 0
+    }
+  ],
+  "limitations": [
+    "One case per condition and arm; no statistical efficacy estimate",
+    "Synthetic filesystem fixture adapter; no external target I/O or whole-operation planning",
+    "Controller completion measures artifact publication; independent fixture grading separately checks probe and classification correctness",
+    "Interrupted shared/no-lookup attempt retained and restarted in fresh isolated folder; completed failures not rerun"
+  ]
+}

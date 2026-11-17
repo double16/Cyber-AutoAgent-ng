@@ -247,7 +247,8 @@ def test_feedback_uses_frozen_delivery_after_lifecycle_changes(scripted_service,
     monkeypatch.setattr(state.service.store, "render", lambda *a, **kw: "Later lifecycle state")
     state.service.evaluate("op", "task", "Observed controlled application")
     evaluator = next(p for r, p, _ in state.calls if r == "technique_evaluator")
-    assert frozen[0] in evaluator
+    references = json.loads(evaluator.split('{"evidence_references":', 1)[1].split("\n", 1)[0][:-1])
+    assert "\n".join(value for key, value in references.items() if key.startswith("guidance:")) + "\n" == frozen[0]
     assert "Later lifecycle state" not in evaluator
     assert "Delivery snapshot: recorded" in evaluator
 
@@ -343,7 +344,7 @@ def test_feedback_reviewer_contract_and_disagreement_share_one_allowance(scripte
     assert state.service.repository.pending_uses("op", "task")
     if contract_first:
         repair = [prompt for role, prompt in calls if role == "technique_feedback_reviewer"][1]
-        assert "Validation failure" in repair and "Independently check purpose" in repair
+        assert "Validation failure" in repair and "Check purpose" in repair
         assert "Return ContributionFeedback findings" not in repair
 
 

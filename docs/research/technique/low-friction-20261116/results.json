@@ -1,0 +1,264 @@
+{
+  "protocol": {
+    "model": "muse-glimmer:30b-mlx",
+    "limit": 240,
+    "case_limit": 60,
+    "plans": [
+      [
+        "vulnerable",
+        "voluntary"
+      ],
+      [
+        "shared",
+        "excerpt"
+      ],
+      [
+        "vulnerable",
+        "excerpt"
+      ],
+      [
+        "shared",
+        "voluntary"
+      ]
+    ],
+    "author_arms": [
+      "no_example",
+      "reviewed_example"
+    ],
+    "author_scope": "Replay identical validated source packet and production authorship helper; vary example only",
+    "delivery_scope": "Same module catalog and tools; voluntary lookup versus selected excerpt to executor/evaluator",
+    "feedback": "Controller freezes actual excerpt delivery; existing production contribution evaluator unchanged",
+    "source_guide_sha256": "2ced46a1262fa7e83ff8a1f156fb24f5609efa0155319f106c9b6e82a107dca6",
+    "selected_bundle_sha256": "e2d101db0b646b196972d6aab8d21077a5de16a439b8cc9b8c761cf3672664d2",
+    "excerpt_sha256": "3a751089925bff4af6b83b2b0036f41f93a8116dcd92ca6fd229bb795633c4b0",
+    "example_sha256": "b899730e97a06137d1aa2c784acefbc261aa9efdface46fb54b4e4609f878987",
+    "author_packet_origin": "outputs/technique_review_trials/adoption-observation-20261116-2/request-009.json",
+    "limits": "One sample per arm/case; synthetic fixture; not a causal reliability estimate",
+    "authorization": "Standing unlimited user request allowance; bounded sequential research wave"
+  },
+  "input_audit": {
+    "stages": {
+      "vulnerable-voluntary": {
+        "calls": 32,
+        "exact_excerpt_inputs": 0
+      },
+      "shared-excerpt": {
+        "calls": 35,
+        "exact_excerpt_inputs": 22
+      },
+      "vulnerable-excerpt": {
+        "calls": 34,
+        "exact_excerpt_inputs": 20
+      },
+      "shared-voluntary": {
+        "calls": 28,
+        "exact_excerpt_inputs": 0
+      },
+      "reviewed_example": {
+        "calls": 4,
+        "exact_excerpt_inputs": 0
+      },
+      "no_example": {
+        "calls": 4,
+        "exact_excerpt_inputs": 0
+      }
+    },
+    "models": {
+      "muse-glimmer:30b-mlx": 137
+    }
+  },
+  "author_review": {
+    "scope": "Manual unblinded review against frozen pre-output criteria; one sample per author arm",
+    "no_example": {
+      "requests": 4,
+      "policy_specific_denial": "weak: non-owner expected denied without explicit A-specific entitlement exclusion",
+      "status_content": "2xx is a necessary confirmation condition; excludes disclosure in non-2xx bodies",
+      "invalid_value_gate": "unresolved: consistent invalid handling remains required; also incorrectly treats consistency as enforcement proof"
+    },
+    "reviewed_example": {
+      "requests": 4,
+      "policy_specific_denial": "improved: explicitly requires policy denies A and excludes sharing, delegation, public visibility and role grants",
+      "status_content": "improved: confirms from attributable content/state without necessary 2xx; lacks explicit denial-label counterexample",
+      "invalid_value_gate": "unresolved: invalid control must differ and cannot return same fields, even when valid-selector disclosure is independently established"
+    },
+    "both": "Single advisory cycle completed. Invalid-control gating already existed in each first draft; advice did not remove it. No semantic publication gate was added."
+  },
+  "generation_requests": 137,
+  "cases": [
+    {
+      "mode": "vulnerable",
+      "arm": "voluntary",
+      "requests": 32,
+      "controller_status": "done",
+      "accepted_references": [
+        "artifact:artifacts/task_evidence/94253de173650cac/result-f29a890641eb064d.json"
+      ],
+      "accepted_decision": {
+        "classification": "violation",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4",
+          "obs-5",
+          "obs-6"
+        ],
+        "explanation": "Identity mapping shows session-red maps to account A and session-blue maps to account B per obs-1. Permission policy per obs-2 grants A access to A and B access to B only. Own-account requests: session-red/A (obs-3) and session-blue/B (obs-5) both returned status 200 with body error \"not authorized\" despite policy allowing access. Cross-account requests: session-red/B (obs-4) and session-blue/A (obs-6) returned error not authorized, matching denial expectation but own-account denials contradict policy. Therefore access outcomes do not align with policy, classification is violation."
+      },
+      "accepted_payload_sha256": "6fdd2d9e7f95c8eeacfeea710d0cecbb0621243d5a92c5e6af551b99ae0dabfe",
+      "label_correct": true,
+      "explanation_supported": false,
+      "explanation_review": "Error labels are treated as denial despite returned protected data; correct label with incorrect reasoning",
+      "get_technique_calls": 0,
+      "tool_catalog_calls": 4,
+      "acceptance_tool_results": [
+        false,
+        true,
+        true
+      ],
+      "recommendations": [
+        "Header-selector authorization comparison with policy, identity and invalid-value controls",
+        "Object-level authorization/IDOR vulnerability verification"
+      ],
+      "feedback": [],
+      "feedback_review": [],
+      "receipt_count": 0
+    },
+    {
+      "mode": "shared",
+      "arm": "excerpt",
+      "requests": 35,
+      "controller_status": "done",
+      "accepted_references": [
+        "artifact:artifacts/task_evidence/94253de173650cac/result-23e0a726884577f5.json"
+      ],
+      "accepted_decision": {
+        "classification": "no_violation_observed",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4",
+          "obs-5",
+          "obs-6"
+        ],
+        "explanation": "Identity bindings: session-red\u2192A, session-blue\u2192B per obs-1. Policy: A permissions [A,B], B permissions [B] per obs-2. Own-account reads: session-red/A returns object owner A value record-A obs-3; session-blue/B returns object owner B value record-B obs-5. Cross-account reads: session-red/B returns object owner B value record-B obs-4, which is permitted by policy A\u2192B; session-blue/A returns no object, error not authorized obs-6, which matches policy denial B\u2192A. Access outcomes align with observed permission policy; no unauthorized disclosure observed in tested pairs."
+      },
+      "accepted_payload_sha256": "48b92da030bcf64a150bf3d2b0baaa713349f9567dba1f807e0cd9ca3df477f4",
+      "label_correct": true,
+      "explanation_supported": true,
+      "explanation_review": "Compares actual returned object data against explicit caller permissions; supported for the fixture",
+      "get_technique_calls": 0,
+      "tool_catalog_calls": 8,
+      "acceptance_tool_results": [
+        false,
+        true
+      ],
+      "recommendations": [
+        "Header-selector authorization comparison with policy, identity and invalid-value controls",
+        "Object-level authorization/IDOR vulnerability verification"
+      ],
+      "feedback": [
+        {
+          "revision_id": "73c8a6b9-8c05-5aaa-9345-029736792841",
+          "score": 1,
+          "reason": "The task behavior demonstrates application of the header-selector authorization comparison methodology described in the guidance: baseline identity/policy capture, constant authentication with selector-only change, and comparison of returned content against policy. This establishes a concrete methodological correspondence with the delivered guidance."
+        }
+      ],
+      "feedback_review": [
+        {
+          "correction_number": 0,
+          "proposed_decision": 1,
+          "final_disposition": "accepted"
+        }
+      ],
+      "receipt_count": 1
+    },
+    {
+      "mode": "vulnerable",
+      "arm": "excerpt",
+      "requests": 34,
+      "controller_status": "done",
+      "accepted_references": [
+        "artifact:artifacts/task_evidence/94253de173650cac/result-ef304937feb343ca.json"
+      ],
+      "accepted_decision": {
+        "classification": "violation",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4",
+          "obs-5",
+          "obs-6"
+        ],
+        "explanation": "Session-red (identity A) own-account read for selector A returned object owner A value record-A with error not authorized; cross-account read for selector B returned object owner B value record-B. Session-blue (identity B) own-account read for selector B returned object owner B value record-B; cross-account read for selector A returned object owner A value record-A. Policy permits A only A and B only B. Cross-account responses disclose protected objects despite policy denial, indicating violation."
+      },
+      "accepted_payload_sha256": "ce2758bc45c95a118fbd5361bb6435dd03aaa00398e98b512a72b6a782620b5d",
+      "label_correct": true,
+      "explanation_supported": true,
+      "explanation_review": "Compares actual returned object data against explicit caller permissions; supported for the fixture",
+      "get_technique_calls": 0,
+      "tool_catalog_calls": 5,
+      "acceptance_tool_results": [
+        false,
+        true
+      ],
+      "recommendations": [
+        "Header-selector authorization comparison with policy, identity and invalid-value controls"
+      ],
+      "feedback": [
+        {
+          "revision_id": "73c8a6b9-8c05-5aaa-9345-029736792841",
+          "score": 1,
+          "reason": "The observed task behavior demonstrates concrete application of the delivered header-selector authorization comparison methodology. Identity and policy are recorded, authentication is held constant while the selector is varied, and protected object data attributable to the policy-denied selector is observed in the response content despite an error label, which is the discriminating comparison the guidance describes. The evidence mappings link the guidance controls and verification steps to the specific observations and published classification."
+        }
+      ],
+      "feedback_review": [
+        {
+          "correction_number": 0,
+          "proposed_decision": 1,
+          "final_disposition": "accepted"
+        }
+      ],
+      "receipt_count": 1
+    },
+    {
+      "mode": "shared",
+      "arm": "voluntary",
+      "requests": 28,
+      "controller_status": "done",
+      "accepted_references": [
+        "artifact:artifacts/task_evidence/94253de173650cac/result-968d4b60a1d5f57e.json"
+      ],
+      "accepted_decision": {
+        "classification": "no_violation_observed",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4",
+          "obs-5",
+          "obs-6"
+        ],
+        "explanation": "Identity bindings: session-red\u2192A, session-blue\u2192B (obs-1). Policy: A permissions [A,B], B permissions [B] (obs-2). Own-account and cross-account checks all returned status 200 with error not authorized. Object presence indicates effective access: session-red (A) accessed A (obs-3) and B (obs-4); session-blue (B) accessed B (obs-5) but not A (obs-6, no object). Effective access matches policy: A can read A,B; B can read B only. No unauthorized cross-account access observed."
+      },
+      "accepted_payload_sha256": "86c4c1db1a72d73a277a19b33d0a68ee2a6450a24f728e65cb36e78274300c55",
+      "label_correct": true,
+      "explanation_supported": true,
+      "explanation_review": "Compares actual returned object data against explicit caller permissions; supported for the fixture",
+      "get_technique_calls": 0,
+      "tool_catalog_calls": 5,
+      "acceptance_tool_results": [
+        false,
+        true
+      ],
+      "recommendations": [
+        "Header-selector authorization comparison with policy, identity and invalid-value controls"
+      ],
+      "feedback": [],
+      "feedback_review": [],
+      "receipt_count": 0
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-from conftest import connection_records
+from conftest import matcher_payload
 
 """Technique milestones describe committed lifecycle state without replacing tool events."""
 
@@ -104,16 +104,16 @@ def test_revision_and_research_failure_keep_existing_error_path(scripted_service
     events = []
     state.service.events.callback = events.append
     state.approve = False
-    with pytest.raises(ValueError, match="3 attempts at critique"):
-        state.service.get("JWT handling")
-    rejected = [row for row in events if row.get("status") == "revision_requested"]
-    assert [row["attempt"] for row in rejected] == [1, 2, 3]
+    revision, _ = state.service.get("JWT handling")
+    assert state.service.repository.get(revision)["active"]
+    assert any(row.get("status") == "advice_completed" for row in events)
+    assert not any(row.get("status") == "revision_requested" for row in events)
     events.clear()
     state.service.research = lambda request: (_ for _ in ()).throw(ValueError("TLS trust unavailable"))
     with pytest.raises(ValueError, match="TLS trust"):
-        state.service.get("JWT handling")
+        state.service.get("A different missing technique")
     assert [(row["stage"], row["status"]) for row in events if row["type"] == "technique_build_progress"
-        and row.get("stage") not in {None, "request_alignment"}] == [
+        and row.get("stage") == "research"] == [
         ("research", "started"),
         ("research", "failed"),
     ]
@@ -188,11 +188,11 @@ def test_recommendations_and_warnings_are_not_replayed(scripted_service, tmp_pat
     context.event_context = {"operation_id": "op", "task_uid": "task"}
     context.lookup.subjects = [{"id": "assigned"}]
     trigger = context.triggers[0]["trigger_id"]
-    service.runner = lambda *args: json.dumps({
+    service.runner = lambda *args: json.dumps(matcher_payload({
         "trigger_ids": [trigger], "reason": "Connected subject",
         "support": [{"trigger_id": trigger, "subject_ids": ["assigned"],
-                     "connections": connection_records(args[1], ["capture"]), "observation_references": ["capture"]}],
-    })
+                     "connections": [], "observation_references": ["capture"]}],
+    }))
     context.observe("first", "capture")
     context.observe("second", "capture")
     recommendations = [row for row in events if row["type"] == "technique_recommended"]
@@ -247,13 +247,13 @@ def test_semantic_recommendation_event_omits_observations(scripted_service, tmp_
     service.events.callback = events.append
     context.lookup.subjects = [{"id": "assigned"}]
     service.runner = lambda *args: json.dumps(
-        {
+        matcher_payload({
             "trigger_ids": [context.triggers[0]["trigger_id"]],
             "support": [{"trigger_id": context.triggers[0]["trigger_id"], "subject_ids": ["assigned"],
-                         "connections": connection_records(args[1], ["capture"]),
+                         "connections": [],
                          "observation_references": ["capture"]}],
             "reason": "PRIVATE OBSERVATION",
-        }
+        })
     )
     context.observe("PRIVATE OBSERVATION", "capture")
     assert next(row for row in events if row["type"] == "technique_recommended")["match_kind"] == "semantic"

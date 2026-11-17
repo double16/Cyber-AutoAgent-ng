@@ -1,0 +1,78 @@
+{
+  "model": "muse-glimmer:30b-mlx",
+  "provenance": "Synthetic production-framed source comparison, 2026-11-14; scripted replay tests contracts, not model reliability.",
+  "cases": [
+    {
+      "id": "supported_attribution",
+      "markdown": "---\nschema_version: 1\ntitle: Compare an observed access mode with documented policy\npurpose: Describe a source comparison\napplicability:\n- An authorized configuration snapshot and its documented policy are available\nphases:\n- analysis\ntriggers: []\nsources:\n- url: https://vendor.example/fictional-policy\n  title: Fictional policy fixture\n  retrieved_at: ''\n  selection_reason: The source states that the mode is strict.\nactive: true\nsource_coverage: 'Considered 1 fetched documents; selected 1. {\"requirements\": []}\n\n  Required-source obligations ready: True; references selected: 1. The retained fictional\n  policy states access mode strict.\n\n  Knowledge-allowed content is not source-verified. Reference readiness does not establish\n  document completeness or correctness.\n\n  {\"coverage\": []}'\n---\n\n# Compare an observed access mode with documented policy\n\n1. Obtain the authorized configuration snapshot and identify the entry called access_mode.\n2. Read the documented policy and record its expected access_mode and the source location.\n3. Read the observed access_mode from the snapshot without changing it. Retain the snapshot reference.\n4. Compare the documented and observed values. An equal value supports consistency with that policy;\n   a different value supports a mismatch requiring investigation, not an independently proven vulnerability.\n5. If either value is absent, record the comparison as unknown and identify the missing input.\n\nRecord the policy reference, snapshot reference, both values and the comparison result. This procedure\nperforms no target interaction and does not claim any observation has already been made.\n",
+      "documents": [
+        {
+          "url": "https://vendor.example/fictional-policy",
+          "title": "Fictional policy fixture",
+          "text": "Fictional policy fixture: the access mode is strict. The source makes no claim that the mode is permissive."
+        }
+      ],
+      "selected_urls": [
+        "https://vendor.example/fictional-policy"
+      ],
+      "review": {
+        "summary": "The reusable methodology describes a source comparison between an authorized configuration snapshot and documented policy for an access_mode entry. The steps obtain the snapshot, record the documented expected value with source location, read the observed value without modification, compare the two values, and handle absent inputs as unknown. The procedure explicitly avoids target interaction and does not assert that an observation has already been made. The metadata indicates applicability to an authorized snapshot and documented policy being available, and attribution references the retained fictional policy fixture. On the supplied criteria the method is technically coherent, distinguishes consistency from mismatch without claiming independent proof of vulnerability, and complies with the stated non-interaction restriction.",
+        "issues": [],
+        "suggestions": [
+          "Consider adding an explicit future verification note that the snapshot is obtained from an authorized, integrity-protected source before comparison, to make the prerequisite checkable in practice.",
+          "Populate metadata.sources[0].retrieved_at when a retrieval timestamp is available, to improve attribution completeness."
+        ]
+      },
+      "approved": true
+    },
+    {
+      "id": "contradictory_attribution",
+      "markdown": "---\nschema_version: 1\ntitle: Compare an observed access mode with documented policy\npurpose: Describe a source comparison\napplicability:\n- An authorized configuration snapshot and its documented policy are available\nphases:\n- analysis\ntriggers: []\nsources:\n- url: https://vendor.example/fictional-policy\n  title: Fictional policy fixture\n  retrieved_at: ''\n  selection_reason: The source states that the mode is permissive.\nactive: true\nsource_coverage: 'Considered 1 fetched documents; selected 1. {\"requirements\": []}\n\n  Required-source obligations ready: True; references selected: 1. The retained fictional\n  policy states access mode strict.\n\n  Knowledge-allowed content is not source-verified. Reference readiness does not establish\n  document completeness or correctness.\n\n  {\"coverage\": []}'\n---\n\n# Compare an observed access mode with documented policy\n\n1. Obtain the authorized configuration snapshot and identify the entry called access_mode.\n2. Read the documented policy and record its expected access_mode and the source location.\n3. Read the observed access_mode from the snapshot without changing it. Retain the snapshot reference.\n4. Compare the documented and observed values. An equal value supports consistency with that policy;\n   a different value supports a mismatch requiring investigation, not an independently proven vulnerability.\n5. If either value is absent, record the comparison as unknown and identify the missing input.\n\nRecord the policy reference, snapshot reference, both values and the comparison result. This procedure\nperforms no target interaction and does not claim any observation has already been made.\n",
+      "documents": [
+        {
+          "url": "https://vendor.example/fictional-policy",
+          "title": "Fictional policy fixture",
+          "text": "Fictional policy fixture: the access mode is strict. The source makes no claim that the mode is permissive."
+        }
+      ],
+      "selected_urls": [
+        "https://vendor.example/fictional-policy"
+      ],
+      "review": {
+        "summary": "The draft describes a source comparison method for comparing an observed access_mode from an authorized configuration snapshot with a documented policy. The procedural steps are clear and avoid target interaction. A material attribution mismatch exists between metadata and the retained source, and the source selection reason misrepresents what the source states.",
+        "issues": [
+          {
+            "criterion_id": "core:attribution",
+            "problem": "Metadata selection_reason claims the source states the mode is permissive, while the retained source passage states the access mode is strict and makes no claim that the mode is permissive.",
+            "material_impact": "The attribution misrepresents the retained source, undermining trust in source handling and violating accurate attribution of retained sources and limitations.",
+            "requested_correction": "Correct metadata.sources[0].selection_reason to accurately reflect the retained source, e.g., state the source states the access mode is strict and does not claim permissive, and align it with the source_coverage note.",
+            "draft_references": [
+              "d36cd06000f75:m10",
+              "d36cd06000f75:m12"
+            ],
+            "passage_ids": [
+              "7af0d87ef39ce69f882a64c144aa7c96d88a98ac8ba6dfef7db38940b50b92d6"
+            ]
+          },
+          {
+            "criterion_id": "core:correctness",
+            "problem": "The metadata selection_reason contains a factual contradiction with the retained source content regarding the access mode being permissive versus strict.",
+            "material_impact": "The contradictory claim introduces a concrete technical error in source description that could lead to incorrect interpretation of policy consistency.",
+            "requested_correction": "Remove or revise the permissive claim in metadata.sources[0].selection_reason to match the retained source passage that the mode is strict and no permissive claim is made.",
+            "draft_references": [
+              "d36cd06000f75:m10"
+            ],
+            "passage_ids": [
+              "7af0d87ef39ce69f882a64c144aa7c96d88a98ac8ba6dfef7db38940b50b92d6"
+            ]
+          }
+        ],
+        "suggestions": [
+          "Populate metadata.sources[0].retrieved_at with a retrieval date or note why it is unavailable, as empty metadata reduces traceability.",
+          "Consider adding an explicit future verification step to confirm the snapshot reference remains unchanged between observation and comparison."
+        ]
+      },
+      "approved": false
+    }
+  ]
+}

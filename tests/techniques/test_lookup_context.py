@@ -104,7 +104,7 @@ def test_request_abstraction_precedes_research_and_phase_guides_author(scripted_
     critic = next(prompt for role, prompt, _ in state.calls if role == "technique_critic")
     assert "Primary applicable advisory" in critic
     assert "Considered 1 fetched documents; selected 1" in critic
-    assert "Public protocol metadata alone" in critic
+    assert "You do not approve, reject" in critic
 
 
 @pytest.mark.parametrize("assessment,reason", [
@@ -533,11 +533,7 @@ def test_generation_inputs_ignore_task_context_across_all_entrypoints(
                 )
             return state.service.get("JWT handling", context)
 
-        if repair:
-            with pytest.raises(ValueError):
-                run()
-        else:
-            run()
+        run()
         inputs = [(role, prompt, [item.tool_spec["name"] for item in tools])
                   for role, prompt, tools in state.calls]
         assert "PRIVATE_" not in str(inputs)
@@ -545,4 +541,4 @@ def test_generation_inputs_ignore_task_context_across_all_entrypoints(
     assert assembled[0] == assembled[1]
     assert any(role == "technique_author" for role, _, _ in assembled[0])
     if repair:
-        assert sum(role == "technique_author" for role, _, _ in assembled[0]) == 3
+        assert sum(role == "technique_author" for role, _, _ in assembled[0]) == 2

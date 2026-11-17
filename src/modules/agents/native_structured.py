@@ -13,6 +13,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 from strands.models.model import Model
 from strands.tools.registry import ToolRegistry
+from strands.types.exceptions import MaxTokensReachedException
 
 from modules.agents.structured_outputs import StructuredOutputUnavailableError
 from modules.config.models.generation_budget import is_summary_generation
@@ -186,7 +187,7 @@ def invoke_structured(
     model._cyber_native_schema = True
     try:
         return agent(final_prompt, structured_output_model=output_model, **kwargs)
-    except (ValidationError, ValueError) as error:
+    except (ValidationError, ValueError, MaxTokensReachedException) as error:
         # Let the existing caller own correction counts. Carry evidence forward so its
         # next bounded attempt can close investigation instead of replaying tool calls.
         error.native_finalization_messages = deepcopy(agent.messages)

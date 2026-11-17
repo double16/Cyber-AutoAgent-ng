@@ -11,6 +11,15 @@ from modules.techniques.bundles import Component, Plan
 from modules.techniques.context import LookupContext
 
 
+def review_json(payload):
+    if isinstance(payload, dict) and payload.get("approved") is False:
+        payload = {**payload, "issues": [{
+            "rule": "decomposition", "component_ids": ["component-1"],
+            "input_references": ["original_request:1"], "correction": payload["reason"],
+        }]}
+    return json.dumps(payload)
+
+
 def component(identifier="one", request="JWT handling", requirements=None):
     return {"id": identifier, "request": request, "purpose": f"Purpose {identifier}",
             "requirements": requirements or [{"id": "method", "description": request}]}
@@ -22,7 +31,7 @@ def plan_runner(state, components):
     def runner(role, prompt, tools):
         if role == "technique_planner":
             excerpt = prompt.split("Original request: ", 1)[1].split("\n", 1)[0]
-            return json.dumps(plan_payload({"components": [
+            return review_json(plan_payload({"components": [
                 {**item, "request_excerpt": excerpt} for item in components
             ]}))
         return original(role, prompt, tools)
@@ -75,12 +84,11 @@ def test_total_failure_is_actionable_and_creates_no_receipts(scripted_service, m
     assert not state.service.repository.pending_uses("op", "task")
 
 
-def test_duplicate_methods_fail_before_resolution(scripted_service):
+def test_duplicate_methods_are_collapsed_before_resolution(scripted_service):
     state = scripted_service
     plan_runner(state, [component(), component()])
-    with pytest.raises(ValueError, match="Duplicate methodology"):
-        state.service.resolve_bundle("Methods")
-    assert not state.research_calls
+    bundle = state.service.resolve_bundle("Methods")
+    assert len(bundle.delivered) == 1
 
 
 def test_plan_review_rejects_lost_or_invented_requirements(scripted_service):
@@ -90,7 +98,7 @@ def test_plan_review_rejects_lost_or_invented_requirements(scripted_service):
     def runner(role, prompt, tools):
         if role == "technique_plan_reviewer":
             assert "adds no unrelated requirements" in prompt
-            return json.dumps({"approved": False, "reason": "Missing requested CVE validation component"})
+            return review_json({"approved": False, "reason": "Missing requested CVE validation component"})
         return original(role, prompt, tools)
 
     state.service.runner = runner
@@ -142,12 +150,12 @@ def test_cohesive_methodology_repairs_step_split(scripted_service, method_reques
         if role == "technique_planner":
             planners.append(prompt)
             items = [component("extract"), component("validate")] if len(planners) == 1 else [component()]
-            return json.dumps(plan_payload({"components": [
+            return review_json(plan_payload({"components": [
                 {**item, "request_excerpt": method_request} for item in items
             ]}))
         if role == "technique_plan_reviewer":
             reviews.append(prompt)
-            return json.dumps({"approved": len(reviews) > 1, "reason": "One workflow split into steps"})
+            return review_json({"approved": len(reviews) > 1, "reason": "One workflow split into steps"})
         return original(role, prompt, tools)
 
     state.service.runner = runner
@@ -156,8 +164,11 @@ def test_cohesive_methodology_repairs_step_split(scripted_service, method_reques
     assert len(bundle.delivered) == 1
     assert len(planners) == len(reviews) == 2
     assert "One workflow split into steps" in planners[1]
-    assert "input_references" in planners[0] and "not procedural steps" in reviews[0]
+    assert "input_references" in planners[0] and "requirements within a method" in reviews[0]
     assert "Original request: " + method_request in reviews[1]
+    assert "One workflow split into steps" in reviews[1]
+    assert "Every component and requirement must include" not in reviews[0]
+    assert '"review_history": []' in reviews[0]
 
 
 def test_unreferenced_plan_exhausts_correction_before_research(scripted_service):
@@ -170,7 +181,7 @@ def test_unreferenced_plan_exhausts_correction_before_research(scripted_service)
             prompts.append(prompt)
             payload = plan_payload({"components": [component()]})
             payload["components"][0]["input_references"] = ["unknown:1"]
-            return json.dumps(payload)
+            return review_json(payload)
         return original(role, prompt, tools)
 
     state.service.runner = runner
@@ -193,7 +204,7 @@ def test_planning_separates_methods_and_excludes_instruction_requirements(script
     state.service.resolve_bundle("JWT handling")
     prompts = [prompt for role, prompt, *_ in captured if role == "technique_planner"]
     assert prompts
-    assert "independently produce useful guidance" in prompts[0]
+    assert "independently useful procedures differ" in prompts[0]
     assert "must not become document requirements" in prompts[0]
 
 
@@ -218,13 +229,13 @@ def test_method_review_correction_is_bounded_and_precedes_execution(scripted_ser
         if role == "technique_planner":
             requests.append(prompt)
             names = methods if recover and len(requests) == 2 else [request]
-            return json.dumps(plan_payload({"components": [
+            return review_json(plan_payload({"components": [
                 {**component(str(i), method, requirements), "request_excerpt": method}
                 for i, method in enumerate(names)
             ]}))
         if role == "technique_plan_reviewer":
             reviews.append(prompt)
-            return json.dumps({"approved": recover and len(reviews) == 2,
+            return review_json({"approved": recover and len(reviews) == 2,
                                "reason": f"Correct {defect}: preserve four independent methods and user obligations"})
         return original(role, prompt, tools)
 
@@ -325,7 +336,7 @@ def test_missing_requirement_origin_rejected_before_research(scripted_service, m
             payload = {"components": [{**component(), "request_excerpt": "JWT handling"}]}
             if recover and len(attempts) == 2:
                 payload = plan_payload(payload)
-            return json.dumps(payload)
+            return review_json(payload)
         return original(role, prompt, tools)
 
     state.service.runner = run
@@ -420,9 +431,9 @@ def test_correction_contains_complete_findings_and_actual_rejected_output(script
             payload = plan_payload({"components": [component(), component()]})
             for item in payload["components"]:
                 item["requirements"][0]["input_references"] = ["bad:1", "bad:2"]
-            return json.dumps(payload)
+            return review_json(payload)
         if role == "technique_plan_reviewer":
-            return json.dumps({"approved": False, "reason": diagnostic})
+            return review_json({"approved": False, "reason": diagnostic})
         return original(role, prompt, tools)
 
     state.service.runner = run
@@ -430,7 +441,7 @@ def test_correction_contains_complete_findings_and_actual_rejected_output(script
     with pytest.raises(ValueError, match="unresolved request coverage"):
         state.service.resolve_bundle("JWT handling")
     rejected = next(e for e in events if e["type"] == "technique_plan_rejected")
-    assert len(rejected["validation_findings"]) == 6
+    assert len(rejected["validation_findings"]) == 3
     assert diagnostic in prompts[1]
     assert '"bad:2"' in prompts[1]
     assert "original_request:1" in prompts[1]
@@ -448,10 +459,10 @@ def test_schema_correction_reports_individual_defects_and_preserves_inputs(scrip
         if role == "technique_planner":
             prompts.append(prompt)
             if len(prompts) == 1:
-                return json.dumps({"components": [{"request": "HTTP controls", "requirements": [
+                return review_json({"components": [{"request": "HTTP controls", "requirements": [
                     {"description": "Controls", "kind": "invented"},
                 ]}]})
-            return json.dumps(plan_payload({"components": [component(request="HTTP controls")]}))
+            return review_json(plan_payload({"components": [component(request="HTTP controls")]}))
         return original(role, prompt, tools)
 
     state.service.runner = run
