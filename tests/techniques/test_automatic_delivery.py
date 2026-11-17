@@ -272,8 +272,11 @@ def test_sdk_delivers_after_fitting_and_persists_before_provider_dispatch(prepar
     from strands.hooks import HookProvider
     from strands.models.model import Model
 
+    from modules.techniques.triggers import TechniqueObservationHook
+
     p = prepared
     order = []
+    monkeypatch.setattr(p.context, "flush", lambda: order.append("match"))
 
     class Budget(HookProvider):
         def register_hooks(self, registry, **kwargs):
@@ -315,7 +318,9 @@ def test_sdk_delivers_after_fitting_and_persists_before_provider_dispatch(prepar
             yield {"messageStop": {"stopReason": "end_turn"}}
 
     model = Provider()
-    agent = Agent(model=model, hooks=[Budget(), delivery.AutomaticGuidanceHook(p.context)], callback_handler=None)
+    agent = Agent(model=model, hooks=[
+        Budget(), delivery.AutomaticGuidanceHook(p.context), TechniqueObservationHook(p.context),
+    ], callback_handler=None)
     agent("Use the assigned scope.")
-    assert order == ["fit", "supply", "provider"]
+    assert order == ["match", "fit", "supply", "provider"]
     assert len(model.calls) == 1

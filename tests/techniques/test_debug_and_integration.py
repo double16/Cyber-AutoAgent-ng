@@ -49,7 +49,8 @@ def test_reused_module_technique_only_exports_after_evaluation_and_retries_faile
     state.selection = revision
     state.service.exports = TechniqueExports(str(tmp_path))
     state.service.tool("op", "task")(request="JWT")
-    assert not (tmp_path / "techniques").exists()
+    assert not list((tmp_path / "techniques").glob("*.md"))
+    assert list((tmp_path / "techniques" / "selection_cache").glob("*.json"))
     write = state.service.exports.write
     monkeypatch.setattr(state.service.exports, "write", Mock(side_effect=OSError("disk unavailable")))
     with pytest.raises(OSError):

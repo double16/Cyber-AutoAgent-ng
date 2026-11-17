@@ -1,0 +1,656 @@
+{
+  "flat": {
+    "decisions": 3,
+    "correct_classification": 2,
+    "supported_correct": 2,
+    "results": [
+      {
+        "mode": "shared",
+        "arm": "flat",
+        "answer": {
+          "classification": "violation",
+          "evidence_ids": [
+            "identity",
+            "policy",
+            "request-0",
+            "request-1",
+            "request-2"
+          ],
+          "explanation": "Identity maps session-red to principal A and session-blue to principal B. Policy grants principal A access to A and B, and principal B access to B only. Request-0: session-red/A \u2192 principal A accessing owner A is permitted by policy A:[A,B] but response is \"not authorized\". Request-1: session-red/B \u2192 principal A accessing owner B is permitted by policy A:[A,B] but response is \"not authorized\". Request-2: session-blue/B \u2192 principal B accessing owner B is permitted by policy B:[B] but response is \"not authorized\". These three denials contradict the recorded permission policy. Request-3 is consistent with the policy, but the earlier mismatches constitute a policy violation."
+        },
+        "correct_classification": false,
+        "valid_evidence_ids": true,
+        "decisive_probe": true,
+        "discovery_evidence": true,
+        "supported_correct": false
+      },
+      {
+        "mode": "vulnerable",
+        "arm": "flat",
+        "answer": {
+          "classification": "violation",
+          "evidence_ids": [
+            "identity",
+            "policy",
+            "request-0",
+            "request-1",
+            "request-2",
+            "request-3"
+          ],
+          "explanation": "The identity observation maps session-red to principal A and session-blue to principal B. The policy observation states permissions A:[A] and B:[B], i.e., each principal should be authorized for its own records. Request-0 shows session-red/A attempting record-A owned by A and receiving \"not authorized\"; request-2 shows session-blue/B attempting record-B owned by B and receiving \"not authorized\". Both are allow cases under the policy but are denied. Request-1 and request-3 are deny cases that happen to match the observed denials, but the two allow cases are violated, indicating the observed access decisions do not conform to the recorded permission policy."
+        },
+        "correct_classification": true,
+        "valid_evidence_ids": true,
+        "decisive_probe": true,
+        "discovery_evidence": true,
+        "supported_correct": true
+      },
+      {
+        "mode": "unknown",
+        "arm": "flat",
+        "answer": {
+          "classification": "inconclusive",
+          "evidence_ids": [
+            "identity",
+            "policy",
+            "request-0",
+            "request-1",
+            "request-2",
+            "request-3"
+          ],
+          "explanation": "The permission policy observation indicates the policy record is unavailable: policy.available is false with reason 'Policy record unavailable'. Without an accessible permission policy there is no authoritative baseline to compare the account-access observations against. Identity mapping is present showing session-blue maps to principal B and session-red maps to principal A, and all four requests return status 200 with body error 'not authorized' for both matching and non-matching owner cases, but the lack of a retrievable policy prevents a conclusive violation or no-violation determination."
+        },
+        "correct_classification": true,
+        "valid_evidence_ids": true,
+        "decisive_probe": true,
+        "discovery_evidence": true,
+        "supported_correct": true
+      }
+    ]
+  },
+  "comparison": {
+    "decisions": 3,
+    "correct_classification": 2,
+    "supported_correct": 0,
+    "results": [
+      {
+        "mode": "shared",
+        "arm": "comparison",
+        "answer": {
+          "classification": "violation",
+          "evidence_ids": [
+            "request-0",
+            "request-1",
+            "request-2"
+          ],
+          "explanation": "The recorded permission policy grants identity A access to objects A and B and identity B access to object B only. Request-0 shows identity A accessing object A with policy available=true and permissions A:[A,B]; the recorded response returns error \"not authorized\" with status 200, contradicting the allowed permission. Request-1 shows identity A accessing object B with the same policy; the response is also \"not authorized\" despite A being permitted B. Request-2 shows identity B accessing object B which is permitted by policy B:[B]; the response is \"not authorized\", a denial where access should be allowed. Request-3 is consistent with policy: identity B accessing object A is not permitted and the response is \"not authorized\". The three mismatches constitute policy violations."
+        },
+        "correct_classification": false,
+        "valid_evidence_ids": true,
+        "decisive_probe": true,
+        "discovery_evidence": false,
+        "supported_correct": false
+      },
+      {
+        "mode": "vulnerable",
+        "arm": "comparison",
+        "answer": {
+          "classification": "violation",
+          "evidence_ids": [
+            "request-0",
+            "request-2"
+          ],
+          "explanation": "The recorded policy grants each identity access only to its own object: permissions {\"A\":[\"A\"],\"B\":[\"B\"]} with available true. Request-0 shows identity A selecting object A, which the policy permits, yet recorded_response is {\"body\":{\"error\":\"not authorized\";\"object\":{\"owner\":\"A\";\"value\":\"record-A\"}};\"status\":200}. Request-2 shows identity B selecting object B, which the policy permits, yet recorded_response is {\"body\":{\"error\":\"not authorized\";\"object\":{\"owner\":\"B\";\"value\":\"record-B\"}};\"status\":200}. Both are denials for accesses the policy allows. Request-1 identity A \u2192 object B and request-3 identity B \u2192 object A are correctly denied under the policy. The mismatches constitute a policy-observation violation."
+        },
+        "correct_classification": true,
+        "valid_evidence_ids": true,
+        "decisive_probe": false,
+        "discovery_evidence": false,
+        "supported_correct": false
+      },
+      {
+        "mode": "unknown",
+        "arm": "comparison",
+        "answer": {
+          "classification": "inconclusive",
+          "evidence_ids": [
+            "request-0",
+            "request-1",
+            "request-2",
+            "request-3"
+          ],
+          "explanation": "All four observations have recorded_policy with available=false and reason 'Policy record unavailable'. Without an accessible permission policy for the identity/session/object tuples, the recorded_response 'not authorized' cannot be verified against the authoritative policy. The lack of policy evidence leaves applicability unknown, so classification is inconclusive."
+        },
+        "correct_classification": true,
+        "valid_evidence_ids": true,
+        "decisive_probe": true,
+        "discovery_evidence": false,
+        "supported_correct": false
+      }
+    ]
+  },
+  "effects": {
+    "decisions": 3,
+    "correct_classification": 3,
+    "supported_correct": 1,
+    "results": [
+      {
+        "mode": "shared",
+        "arm": "effects",
+        "answer": {
+          "classification": "no_violation_observed",
+          "evidence_ids": [
+            "request-0",
+            "request-1",
+            "request-2",
+            "request-3"
+          ],
+          "explanation": "Identity mapping shows session-red is identity A and session-blue is identity B. Policy permits A \u2192 [A,B] and B \u2192 [B].\n\nrequest-0: session-red/A selects A. Recorded permissions for A are [A,B] and the object owner A is returned. Access is consistent with A being allowed to access A.\n\nrequest-1: session-red/A selects B. Recorded permissions for A are [A,B] and the object owner B is returned. Access is consistent with A being allowed to access B.\n\nrequest-2: session-blue/B selects B. Recorded permissions for B are [B] and the object owner B is returned. Access is consistent with B being allowed to access B.\n\nrequest-3: session-blue/B selects A. Recorded permissions for B are [B] and no object is returned. Access is denied, consistent with B not being permitted to access A.\n\nThe observed allow/deny outcomes for the four requests align with the permission policy for the mapped identities. The response_error field is uniformly marked \"not authorized\" across the records, but the returned_object presence/absence matches the policy expectations, so no policy violation is observed in the access decisions."
+        },
+        "correct_classification": true,
+        "valid_evidence_ids": true,
+        "decisive_probe": true,
+        "discovery_evidence": false,
+        "supported_correct": false
+      },
+      {
+        "mode": "vulnerable",
+        "arm": "effects",
+        "answer": {
+          "classification": "violation",
+          "evidence_ids": [
+            "request-1",
+            "request-3"
+          ],
+          "explanation": "Policy permits identity A only object A and identity B only object B. Identity mapping shows session-red is A and session-blue is B.\n\nrequest-1: session-red \u2192 identity A attempts selected_object B. Policy permissions for A are [\"A\"], so B is not permitted. The observation still returns object {\"owner\":\"B\";\"value\":\"record-B\"} with response_status 200, indicating the access was materialized despite the policy denial.\n\nrequest-3: session-blue \u2192 identity B attempts selected_object A. Policy permissions for B are [\"B\"], so A is not permitted. The observation still returns object {\"owner\":\"A\";\"value\":\"record-A\"} with response_status 200, indicating the access was materialized despite the policy denial.\n\nThese cross-identity accesses are inconsistent with the recorded permission policy, constituting a policy violation. The repeated \"not authorized\" response_error together with a 200 status and a returned object for the same requests makes the enforcement signal ambiguous, but the unauthorized object returns alone are sufficient to classify a violation."
+        },
+        "correct_classification": true,
+        "valid_evidence_ids": true,
+        "decisive_probe": true,
+        "discovery_evidence": false,
+        "supported_correct": false
+      },
+      {
+        "mode": "unknown",
+        "arm": "effects",
+        "answer": {
+          "classification": "inconclusive",
+          "evidence_ids": [
+            "identity",
+            "policy",
+            "request-0",
+            "request-1",
+            "request-2",
+            "request-3"
+          ],
+          "explanation": "The permission policy record is unavailable. context policy shows available: false with reason 'Policy record unavailable'. Without a retrievable permission policy there is no authoritative baseline to compare the recorded account-access observations against. The identity mapping and the four effect observations are present, but classification of violation vs no violation cannot be performed. Therefore applicability is unknown and the assessment is inconclusive."
+        },
+        "correct_classification": true,
+        "valid_evidence_ids": true,
+        "decisive_probe": true,
+        "discovery_evidence": true,
+        "supported_correct": true
+      }
+    ]
+  },
+  "effects-provenance": {
+    "decisions": 3,
+    "correct_classification": 2,
+    "supported_correct": 0,
+    "results": [
+      {
+        "mode": "shared",
+        "arm": "effects-provenance",
+        "answer": {
+          "classification": "violation",
+          "evidence_ids": [
+            "effects[0]",
+            "effects[1]",
+            "effects[2]"
+          ],
+          "explanation": "The identity mapping shows session-red is A and session-blue is B, and the policy grants A \u2192 [A,B] and B \u2192 [B]. The recorded_permissions in the effects match the policy for each session/identity pair. However the access outcomes are inconsistent with the recorded error status: effects[0], effects[1] and effects[2] all report response_status 200 with response_error \"not authorized\" while a returned_object is still provided for an access that the policy and recorded_permissions indicate should be permitted. The mismatch between a \"not authorized\" error and the presence of a returned object for permitted accesses indicates a policy enforcement anomaly. The denied case effects[3] is consistent with the policy, but the contradictory authorized-but-error cases are sufficient to classify a violation."
+        },
+        "correct_classification": false,
+        "valid_evidence_ids": false,
+        "decisive_probe": false,
+        "discovery_evidence": false,
+        "supported_correct": false
+      },
+      {
+        "mode": "vulnerable",
+        "arm": "effects-provenance",
+        "answer": {
+          "classification": "violation",
+          "evidence_ids": [
+            "effects[0]",
+            "effects[2]"
+          ],
+          "explanation": "Policy permits identity A to access object A and identity B to access object B, with identity mapping session-red\u2192A and session-blue\u2192B from context[2].\n\n* effects[0]: session-red is identity A, selected_object A, recorded_permissions [\"A\"]. Policy allows A\u2192A, but response_error is \"not authorized\" with a 200 response and the object is returned. An allowed access is denied.\n* effects[2]: session-blue is identity B, selected_object B, recorded_permissions [\"B\"]. Policy allows B\u2192B, but response_error is \"not authorized\" with a 200 response and the object is returned. An allowed access is denied.\n\nThe two denials of permitted accesses constitute a violation of the recorded permission policy. The other observations are consistent with denial of non-permitted accesses: effects[1] session-red/A\u2192B denied, effects[3] session-blue/B\u2192A denied."
+        },
+        "correct_classification": true,
+        "valid_evidence_ids": false,
+        "decisive_probe": false,
+        "discovery_evidence": false,
+        "supported_correct": false
+      },
+      {
+        "mode": "unknown",
+        "arm": "effects-provenance",
+        "answer": {
+          "classification": "inconclusive",
+          "evidence_ids": [
+            "context[2].policy"
+          ],
+          "explanation": "The permission policy record is unavailable. context[2].policy shows \"available\": false with reason \"Policy record unavailable\". Without an authoritative policy to compare the account-access observations against, the observations in effects[4] cannot be classified as violation or no_violation_observed. The identity mapping in context[2].identity is present, but policy absence leaves applicability unknown."
+        },
+        "correct_classification": true,
+        "valid_evidence_ids": false,
+        "decisive_probe": false,
+        "discovery_evidence": false,
+        "supported_correct": false
+      }
+    ]
+  },
+  "effects-bound": {
+    "decisions": 3,
+    "correct_classification": 2,
+    "supported_correct": 0,
+    "results": [
+      {
+        "mode": "shared",
+        "arm": "effects-bound",
+        "answer": {
+          "classification": "violation",
+          "evidence_ids": [
+            "comparison-0",
+            "comparison-1",
+            "comparison-2",
+            "policy",
+            "identity"
+          ],
+          "explanation": "Identity maps session-red to A and session-blue to B. Policy grants A \u2192 [A,B] and B \u2192 [B].\n\ncomparison-0: session-red/A requests object A. Policy permits A\u2192A and recorded_permissions includes A,B. Response_status is 200 with response_error \"not authorized\" yet a returned_object for owner A is present.\n\ncomparison-1: session-red/A requests object B. Policy permits A\u2192B and recorded_permissions includes A,B. Response_status is 200 with response_error \"not authorized\" yet a returned_object for owner B is present.\n\ncomparison-2: session-blue/B requests object B. Policy permits B\u2192B and recorded_permissions includes B. Response_status is 200 with response_error \"not authorized\" yet a returned_object for owner B is present.\n\nThe non-null returned_object despite a \"not authorized\" error indicates data was disclosed in cases where the error signal suggests denial, and the pattern is inconsistent with a clean allow/deny enforcement. comparison-3 shows the expected denial for B\u2192A with returned_object None, but the earlier mismatches constitute a policy-observation violation."
+        },
+        "resolved_evidence_ids": [
+          "identity",
+          "policy",
+          "request-0",
+          "request-1",
+          "request-2"
+        ],
+        "correct_classification": false,
+        "valid_evidence_ids": true,
+        "decisive_probe": true,
+        "discovery_evidence": true,
+        "supported_correct": false
+      },
+      {
+        "mode": "vulnerable",
+        "arm": "effects-bound",
+        "answer": {
+          "classification": "violation",
+          "evidence_ids": [
+            "comparison-0",
+            "comparison-2"
+          ],
+          "explanation": "Identity mapping shows session-red is identity A and session-blue is identity B. Policy grants A only [\"A\"] and B only [\"B\"].\n\ncomparison-0 records session-red / identity A with recorded_permissions [\"A\"] accessing selected_object A. Policy permits A\u2192A, yet response_error is \"not authorized\" with a 200 response and the object owner A is returned, indicating an access denial despite an allowed permission.\n\ncomparison-2 records session-blue / identity B with recorded_permissions [\"B\"] accessing selected_object B. Policy permits B\u2192B, yet response_error is \"not authorized\", indicating a denial for a permitted access.\n\nThese denials for permitted identity-object pairs diverge from the policy, constituting a violation. comparison-1 and comparison-3 show correct denials for disallowed pairs, but the permitted cases are violated."
+        },
+        "resolved_evidence_ids": [
+          "identity",
+          "policy",
+          "request-0",
+          "request-2"
+        ],
+        "correct_classification": true,
+        "valid_evidence_ids": true,
+        "decisive_probe": false,
+        "discovery_evidence": true,
+        "supported_correct": false
+      },
+      {
+        "mode": "unknown",
+        "arm": "effects-bound",
+        "answer": {
+          "classification": "inconclusive",
+          "evidence_ids": [
+            "policy",
+            "identity"
+          ],
+          "explanation": "The permission policy record is unavailable, as indicated by the policy context entry with available=false and reason 'Policy record unavailable'. Without an authoritative policy to compare the observed account-access effects against, the observations cannot be classified as a violation or as no violation observed. The identity mapping is present, but it is insufficient to establish compliance without the policy."
+        },
+        "resolved_evidence_ids": [
+          "policy",
+          "identity"
+        ],
+        "correct_classification": true,
+        "valid_evidence_ids": true,
+        "decisive_probe": false,
+        "discovery_evidence": true,
+        "supported_correct": false
+      }
+    ]
+  },
+  "access-flat": {
+    "decisions": 3,
+    "correct_classification": 2,
+    "supported_correct": 1,
+    "results": [
+      {
+        "mode": "shared",
+        "arm": "access-flat",
+        "answer": {
+          "classification": "within_recorded_entitlements",
+          "evidence_ids": [
+            "identity",
+            "policy",
+            "request-0",
+            "request-1",
+            "request-2",
+            "request-3"
+          ],
+          "explanation": "Identity maps session-blue to principal B and session-red to principal A. Policy is available and grants A \u2192 [A, B] and B \u2192 [B]. All four requests return status 200 with body error \"not authorized\" and no successful data disclosure is recorded. Request-0 is session-red/A accessing A, request-1 is session-red/A accessing B, request-2 is session-blue/B accessing B, request-3 is session-blue/B accessing A. No observation shows a successful access that would be outside the permissions defined in the policy; the recorded denials are therefore not beyond the recorded entitlements. The stricter denials for A\u2192A, A\u2192B and B\u2192B do not constitute an entitlement exceedance."
+        },
+        "normalized_classification": "no_violation_observed",
+        "resolved_evidence_ids": [
+          "identity",
+          "policy",
+          "request-0",
+          "request-1",
+          "request-2",
+          "request-3"
+        ],
+        "correct_classification": true,
+        "valid_evidence_ids": true,
+        "decisive_probe": true,
+        "discovery_evidence": true,
+        "supported_correct": true
+      },
+      {
+        "mode": "vulnerable",
+        "arm": "access-flat",
+        "answer": {
+          "classification": "within_recorded_entitlements",
+          "evidence_ids": [
+            "identity",
+            "policy",
+            "request-0",
+            "request-1",
+            "request-2",
+            "request-3"
+          ],
+          "explanation": "The identity observation maps session-red to principal A and session-blue to principal B. The policy observation is available and records permissions A: [A] and B: [B], so principal A is entitled to object owner A and principal B is entitled to object owner B. Requests 0-3 all return status 200 with body error \"not authorized\" for the respective session/principal and object owner combinations: session-red/A on owner A, session-red/B on owner B, session-blue/B on owner B, session-blue/A on owner A. No successful access is recorded; all observed outcomes are denials, which does not exceed the entitlements recorded in the policy."
+        },
+        "normalized_classification": "no_violation_observed",
+        "resolved_evidence_ids": [
+          "identity",
+          "policy",
+          "request-0",
+          "request-1",
+          "request-2",
+          "request-3"
+        ],
+        "correct_classification": false,
+        "valid_evidence_ids": true,
+        "decisive_probe": true,
+        "discovery_evidence": true,
+        "supported_correct": false
+      },
+      {
+        "mode": "unknown",
+        "arm": "access-flat",
+        "answer": {
+          "classification": "entitlements_unavailable",
+          "evidence_ids": [
+            "policy"
+          ],
+          "explanation": "The permission policy observation is recorded as unavailable: {\"available\": false; \"reason\": \"Policy record unavailable\"}. Without a recorded permission policy to compare the account-access observations against, entitlements cannot be determined. Identity mapping and request responses are present, but classification requires the policy record."
+        },
+        "normalized_classification": "inconclusive",
+        "resolved_evidence_ids": [
+          "policy"
+        ],
+        "correct_classification": true,
+        "valid_evidence_ids": true,
+        "decisive_probe": false,
+        "discovery_evidence": false,
+        "supported_correct": false
+      }
+    ]
+  },
+  "access-effects": {
+    "decisions": 3,
+    "correct_classification": 3,
+    "supported_correct": 0,
+    "results": [
+      {
+        "mode": "shared",
+        "arm": "access-effects",
+        "answer": {
+          "classification": "within_recorded_entitlements",
+          "evidence_ids": [
+            "request-1",
+            "request-2",
+            "request-3"
+          ],
+          "explanation": "Identity mapping shows session-red is identity A and session-blue is identity B. Policy is available and grants A -> [A, B] and B -> [B].\nRequest-1: session-red/A selects B. Recorded permissions for A include B and the access is observed as permitted, consistent with policy.\nRequest-2: session-blue/B selects B. Recorded permissions for B include B and the access is observed as permitted, consistent with policy.\nRequest-3: session-blue/B selects A. Recorded permissions for B do not include A and the observation shows no object returned with not authorized, consistent with the denial required by policy. These observations are within the recorded entitlements."
+        },
+        "normalized_classification": "no_violation_observed",
+        "resolved_evidence_ids": [
+          "request-1",
+          "request-2",
+          "request-3"
+        ],
+        "correct_classification": true,
+        "valid_evidence_ids": true,
+        "decisive_probe": true,
+        "discovery_evidence": false,
+        "supported_correct": false
+      },
+      {
+        "mode": "vulnerable",
+        "arm": "access-effects",
+        "answer": {
+          "classification": "beyond_recorded_entitlements",
+          "evidence_ids": [
+            "request-1",
+            "request-3"
+          ],
+          "explanation": "Policy records entitlements A\u2192[A] and B\u2192[B] with policy available true. Identity mapping shows session-red is A and session-blue is B.\n\nrequest-1: session-red/A with recorded_permissions [\"A\"] selects object B. Policy permits A only for A, so access to B is outside recorded entitlements. Response status 200 with object {\"owner\":\"B\"} returned despite response_error \"not authorized\".\n\nrequest-3: session-blue/B with recorded_permissions [\"B\"] selects object A. Policy permits B only for B, so access to A is outside recorded entitlements. Response status 200 with object {\"owner\":\"A\"} returned despite response_error \"not authorized\".\n\nThese observations demonstrate accesses beyond the recorded permission policy."
+        },
+        "normalized_classification": "violation",
+        "resolved_evidence_ids": [
+          "request-1",
+          "request-3"
+        ],
+        "correct_classification": true,
+        "valid_evidence_ids": true,
+        "decisive_probe": true,
+        "discovery_evidence": false,
+        "supported_correct": false
+      },
+      {
+        "mode": "unknown",
+        "arm": "access-effects",
+        "answer": {
+          "classification": "entitlements_unavailable",
+          "evidence_ids": [
+            "policy"
+          ],
+          "explanation": "The permission policy record is unavailable. The policy entry states available is false with reason 'Policy record unavailable'. Without a recorded permission policy, the account-access observations cannot be evaluated against recorded entitlements, so classification is entitlements_unavailable."
+        },
+        "normalized_classification": "inconclusive",
+        "resolved_evidence_ids": [
+          "policy"
+        ],
+        "correct_classification": true,
+        "valid_evidence_ids": true,
+        "decisive_probe": false,
+        "discovery_evidence": false,
+        "supported_correct": false
+      }
+    ]
+  },
+  "workflow-role-flat": {
+    "decisions": 3,
+    "correct_classification": 2,
+    "supported_correct": 0,
+    "results": [
+      {
+        "mode": "shared",
+        "arm": "flat",
+        "answer": {
+          "classification": "violation",
+          "evidence_ids": [
+            "request-0",
+            "request-1",
+            "request-2"
+          ],
+          "explanation": "Identity mapping shows session-red is principal A and session-blue is principal B. Policy grants A access to A and B, and B access to B only. request-0 denies A\u2192A, request-1 denies A\u2192B, request-2 denies B\u2192B, all contradicting the granted permissions. request-3 denies B\u2192A which matches the policy denial."
+        },
+        "normalized_classification": "violation",
+        "resolved_evidence_ids": [
+          "request-0",
+          "request-1",
+          "request-2"
+        ],
+        "correct_classification": false,
+        "valid_evidence_ids": true,
+        "decisive_probe": true,
+        "discovery_evidence": false,
+        "supported_correct": false
+      },
+      {
+        "mode": "vulnerable",
+        "arm": "flat",
+        "answer": {
+          "classification": "violation",
+          "evidence_ids": [
+            "request-0",
+            "request-2",
+            "identity",
+            "policy"
+          ],
+          "explanation": "Identity maps session-red to principal A and session-blue to principal B. Policy grants A access to A and B access to B. request-0 shows principal A accessing owner A with error not authorized, and request-2 shows principal B accessing owner B with error not authorized, both denials contradict allowed permissions. request-1 and request-3 show correct denials for cross-principal access."
+        },
+        "normalized_classification": "violation",
+        "resolved_evidence_ids": [
+          "request-0",
+          "request-2",
+          "identity",
+          "policy"
+        ],
+        "correct_classification": true,
+        "valid_evidence_ids": true,
+        "decisive_probe": false,
+        "discovery_evidence": true,
+        "supported_correct": false
+      },
+      {
+        "mode": "unknown",
+        "arm": "flat",
+        "answer": {
+          "classification": "inconclusive",
+          "evidence_ids": [
+            "policy"
+          ],
+          "explanation": "Policy record unavailable prevents comparison against observations; identity mapping present but cannot be validated without policy."
+        },
+        "normalized_classification": "inconclusive",
+        "resolved_evidence_ids": [
+          "policy"
+        ],
+        "correct_classification": true,
+        "valid_evidence_ids": true,
+        "decisive_probe": false,
+        "discovery_evidence": false,
+        "supported_correct": false
+      }
+    ]
+  },
+  "workflow-role-effects": {
+    "decisions": 3,
+    "correct_classification": 1,
+    "supported_correct": 0,
+    "results": [
+      {
+        "mode": "shared",
+        "arm": "effects",
+        "answer": {
+          "classification": "inconclusive",
+          "evidence_ids": [
+            "context-identity",
+            "context-policy",
+            "effects-request-0",
+            "effects-request-1",
+            "effects-request-2",
+            "effects-request-3"
+          ],
+          "explanation": "Identity mapping shows session-red is A and session-blue is B. Policy grants A access to A and B, B access to B only. Requests 0,1,2 target objects permitted for the mapped identity yet all show response_error not authorized with 200 status, while request 3 targets A for identity B which is not permitted and also shows not authorized. The recorded_permissions field matches the policy but the response_error values are inconsistent with the expected allow/deny decisions, leaving the classification inconclusive without further evidence on the meaning of response_error vs response_status."
+        },
+        "normalized_classification": "inconclusive",
+        "resolved_evidence_ids": [
+          "context-identity",
+          "context-policy",
+          "effects-request-0",
+          "effects-request-1",
+          "effects-request-2",
+          "effects-request-3"
+        ],
+        "correct_classification": false,
+        "valid_evidence_ids": false,
+        "decisive_probe": false,
+        "discovery_evidence": false,
+        "supported_correct": false
+      },
+      {
+        "mode": "vulnerable",
+        "arm": "effects",
+        "answer": {
+          "classification": "inconclusive",
+          "evidence_ids": [
+            "request-0",
+            "request-2"
+          ],
+          "explanation": "Identity mapping shows session-red maps to A and session-blue maps to B. Policy permits A only A and B only B. Request-0 and request-2 are allowed by policy but recorded response_error is not authorized, indicating a mismatch between policy and observed access decision."
+        },
+        "normalized_classification": "inconclusive",
+        "resolved_evidence_ids": [
+          "request-0",
+          "request-2"
+        ],
+        "correct_classification": false,
+        "valid_evidence_ids": true,
+        "decisive_probe": false,
+        "discovery_evidence": false,
+        "supported_correct": false
+      },
+      {
+        "mode": "unknown",
+        "arm": "effects",
+        "answer": {
+          "classification": "inconclusive",
+          "evidence_ids": [
+            "policy",
+            "request-0",
+            "request-1",
+            "request-2",
+            "request-3"
+          ],
+          "explanation": "Policy record unavailable per context, so account-access observations cannot be classified against a permission policy. Evidence gaps: 1) policy content missing, 2) no authorized/denied ground truth mapping, 3) response_error indicates not authorized but response_status is 200 with object returned."
+        },
+        "normalized_classification": "inconclusive",
+        "resolved_evidence_ids": [
+          "policy",
+          "request-0",
+          "request-1",
+          "request-2",
+          "request-3"
+        ],
+        "correct_classification": true,
+        "valid_evidence_ids": true,
+        "decisive_probe": true,
+        "discovery_evidence": false,
+        "supported_correct": false
+      }
+    ]
+  }
+}

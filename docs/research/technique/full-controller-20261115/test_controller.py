@@ -45,7 +45,7 @@ def test_catalog_branch_is_isolated_and_closed(tmp_path, monkeypatch):
         assert {t.tool_spec["name"]: t._cyber_technique_observation_origin
                 for t in controller.runtime.core_tools_list} == {
             "inspect_context": "source", "request_account": "source",
-            "publish_result": "analysis", "read_fixture": "source",
+            "publish_result": "analysis", "read_fixture": "source", "read_artifact": "source",
         }
         assert task.acceptance.basis.procedure.limits == {"max_requests": 8}
         assert "cross-account" in task.objective
@@ -57,6 +57,14 @@ def test_catalog_branch_is_isolated_and_closed(tmp_path, monkeypatch):
         assert inputs["operation"]["selector_header"] == "X-Account"
         assert inputs["operation"]["tool"] == "request_account"
         assert "permissions" not in inputs and "classification" not in inputs
+        artifact_reader = next(t for t in controller.runtime.core_tools_list if t.tool_spec["name"] == "read_artifact")
+        retained = artifact_reader(path="artifact:fixture.json")
+        assert "selectors" in str(retained)
+        outside = tmp_path / "outside.txt"
+        outside.write_text("Outside operation scope")
+        with pytest.raises(ValueError):
+            artifact_reader(path=str(outside))
+
 
     monkeypatch.setattr(multi_agent_workflow.MultiAgentWorkflowController, "_run_task", inspect_fixture)
     result = pilot.run_case(tmp_path / "catalog", "unknown", "lookup")

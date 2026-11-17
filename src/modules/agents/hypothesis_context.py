@@ -402,10 +402,18 @@ def publication_review(task: Any, operation_id: str) -> str:
         + f"\n## Authoritative current hypothesis publication\n{binding['artifact_ref']} sha256={binding['sha256']}\n"
         "Only this publication establishes current coverage. Older snapshots and prose summaries are history.\n"
         + _rows("subjects", ("item_id", "disposition", "reason", "hypothesis_count"), subjects)
-        + "\n" + _rows("hypotheses", ("item_id", "hypothesis_id", "observed_basis", "preconditions",
-                                       "suspected_mechanism", "attacker_controlled_input", "safe_test_steps",
-                                       "positive_expectations", "negative_expectations", "required_evidence",
-                                       "supporting_refs", "authentication_requirement"), records)
+        + "\nComparison views below reproduce current records; they add no evidence or judgments.\n"
+        + "".join(
+            f"\n### Hypothesis {record['hypothesis_id']} (subject {record['item_id']})\n"
+            + _rows("comparison", ("field", "value"), [
+                {"field": key, "value": record[key]} for key in (
+                    "observed_basis", "suspected_mechanism", "preconditions", "attacker_controlled_input",
+                    "safe_test_steps", "positive_expectations", "negative_expectations", "required_evidence",
+                    "supporting_refs", "authentication_requirement",
+                )
+            ])
+            for record in records
+        )
     )
 
 

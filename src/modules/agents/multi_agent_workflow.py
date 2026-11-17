@@ -7660,10 +7660,22 @@ class MultiAgentWorkflowController:
                                 failed_acceptance_calls[-1] if failed_acceptance_calls else None
                             ),
                         )
-                        missing_memory_prerequisite = bool(invalid_memory_refs) and not self._task_memory_refs_from_tool_outcomes(
-                            tool_outcomes
+                        available_alternatives = [
+                            item for item in acceptance_recovery_evidence
+                            if item.get("usable") == "true" and item.get("reference") not in invalid_memory_refs
+                        ]
+                        reference_correction_only = bool(invalid_memory_refs) and (
+                            self._recovery_evidence_satisfies_acceptance(task, available_alternatives)
+                        )
+                        missing_memory_prerequisite = (
+                            bool(invalid_memory_refs) and not reference_correction_only
+                            and not self._task_memory_refs_from_tool_outcomes(tool_outcomes)
                         )
                         recovery_details = self._acceptance_recovery_details(acceptance_error)
+                        if reference_correction_only:
+                            acceptance_recovery_evidence = available_alternatives
+                            recovery_details["code"] = "invalid_evidence_reference"
+                            recovery_details["next_action"] = "Resubmit with available canonical evidence references"
                         if invalid_memory_refs:
                             recovery_details["invalid_memory_refs"] = invalid_memory_refs
                         correction = json.dumps(
@@ -7690,7 +7702,11 @@ class MultiAgentWorkflowController:
                             "evidence_refs required" in acceptance_error.lower()
                             and not self._has_viable_acceptance_recovery_evidence(acceptance_recovery_evidence)
                         )
-                        repair_instruction = self._task_acceptance_repair_instruction(acceptance_error)
+                        repair_instruction = (
+                            "Correct the rejected references using the listed available durable evidence."
+                            if reference_correction_only
+                            else self._task_acceptance_repair_instruction(acceptance_error)
+                        )
                         decision = WorkflowDecision(
                             status="partial_failure",
                             reason=f"Acceptance manifest is incomplete; missing criteria: {missing_text}.",
@@ -7935,6 +7951,9 @@ class MultiAgentWorkflowController:
                         recovery_context,
                         next_cycle=cycle + 1,
                         required_tool=continuation_required_tool,
+                        controller_reconciles_acceptance=(
+                            manifest_prerequisite_recovery_active or evidence_prerequisite_recovery_active
+                        ),
                         evaluator_instructions=evaluator_instructions,
                         loop_guidance=(
                             self._repeat_loop_recovery_guidance(cycle_result)
@@ -8316,6 +8335,7 @@ class MultiAgentWorkflowController:
         *,
         next_cycle: int,
         required_tool: str = "",
+        controller_reconciles_acceptance: bool = False,
         evaluator_instructions: str = "",
         loop_guidance: str = "",
     ) -> str:
@@ -8359,6 +8379,13 @@ class MultiAgentWorkflowController:
                 "Complete only the unresolved execution requirements against their frozen subjects, preserve "
                 "qualifying artifacts, then submit the required terminal result. Do not repeat resolved work "
                 "or broaden scope."
+            )
+        if controller_reconciles_acceptance:
+            required_tool_section = ""
+            completion_instruction = (
+                "Use the available evidence tools to produce or locate durable evidence for the frozen criteria. "
+                "Return the resulting references and a concise summary. The controller handles the subsequent "
+                "acceptance turn."
             )
         if evaluator_instructions:
             evaluator_section = f"\nEvaluator corrective guidance:\n{evaluator_instructions}\n"

@@ -829,3 +829,27 @@ def test_recommendation_reaches_next_sdk_model_call(scripted_service, tmp_path, 
     agent("Read one observation.")
     assert len(model.calls) == 2
     assert ("Technique lookup recommendations" in model.calls[1]) is eligible
+
+
+def test_semantic_cache_includes_assigned_objective(scripted_service, tmp_path):
+    scripted_service.publish()
+    prompts = []
+    for index, objective in enumerate(("Review HTTP authentication", "Review filesystem permissions")):
+        context = RecommendationContext(
+            scripted_service.service, ["hypothesis_generation"], [], tmp_path / f"task-{index}.json",
+        )
+        bind_subject(context)
+        context.lookup.purpose = objective
+        original = context.service.runner
+
+        def runner(role, prompt, tools, original=original):
+            if role == "technique_trigger_matcher":
+                prompts.append(prompt)
+            return original(role, prompt, tools)
+
+        context.service.runner = runner
+        context.observe("Shared source observation", "artifact:shared.txt")
+        assert context.state["semantic_calls"] == 1
+        assert objective in prompts[-1]
+        context.observe("Shared source observation", "artifact:shared.txt")
+        assert context.state["semantic_calls"] == 1

@@ -35,6 +35,7 @@ def bind_task_techniques(runtime, plan, task, tools):
         signal_adapters(get_module_loader(), runtime.config.module),
         Path(_operation_output_root()) / "techniques" / "recommendations" / f"{key}.json",
     )
+    context.defer_matching = True
     context.event_context = {"operation_id": runtime.operation_id, "task_uid": task.task_uid}
     context.lookup.purpose = task.objective
     context.lookup.capabilities = [get_tool_name(item) for item in tools]

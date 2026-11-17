@@ -40,9 +40,9 @@ trust boundary. Distinguish observed facts from unresolved preconditions. An exp
 to a related resource can ground a workflow hypothesis; the tested action need not use the subject's
 literal path. For example, a page can call a backend API. Unrelated resources remain outside the
 assignment. Inferred GET operations and unrecorded inputs do not restrict a subject to its page response.
-Positive expectations must demonstrate the claimed security consequence, with controls distinguishing
-normal functionality.
-Positive expectations describe a security violation; negative/control expectations describe its absence.
+Positive expectations describe the claimed security consequence; negative/control expectations describe
+its absence. Compare them together: overlapping outcomes do not distinguish a violation from normal
+behavior. Explain a missing distinction under test_discrimination, without executing the proposed test.
 Identical responses, absent reflection, ordinary registration, and public bundle visibility are normal
 observations or controls, not positive evidence of a vulnerability. Withdraw an unsupported security
 premise rather than rewriting normal behavior as a successful security test.

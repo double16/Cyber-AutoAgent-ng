@@ -181,9 +181,16 @@ flowchart LR
 `CYBER_WORKFLOW_TASK_EXECUTION_CYCLES` limits executor attempts to produce a valid atomic ledger, defaults to three,
 and has a minimum of one.
 while `CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS` independently limits rejected acceptance repairs to two after the initial
-submission. Repairs retain the executor conversation and stop early when an equivalent rejected payload is repeated.
+submission. Repairs retain durable task-local evidence, use fresh actor cycles, and stop early when an equivalent
+rejected payload is repeated.
 Once that ledger exists, the evaluator's semantic verdict is terminal because the ledger cannot
 be revised. Python persists `done`, `partial_failure`, or `blocked` without replaying completed acceptance.
+
+An invalid optional memory citation is a reference-correction problem when available current-operation evidence
+already covers the frozen evidence kinds and minimum counts. The correction turn receives available canonical
+references rather than rejected citation candidates. A frozen memory or observation requirement still requires the
+appropriate stored record. Evidence-creation turns request evidence only; acceptance resumes in a separately tooled
+turn. Structural availability does not establish semantic support or automatically accept the task.
 
 Task creators return one typed proposal batch, after which Python applies the existing preflight, deduplication, and
 durable persistence checks. Rejected batches remain correctable within the configured bound. Task executors stop after

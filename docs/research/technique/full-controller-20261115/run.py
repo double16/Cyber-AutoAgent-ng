@@ -112,7 +112,11 @@ def run_case(folder, mode, arm, offline=False):
         runtime.core_tools_list = [
             t for t in scope["tools"] if t.tool_spec["name"] not in {"get_technique", "record_task_acceptance"}
         ]
-        runtime.core_tools_list.append(read_fixture)
+        from modules.tools.artifact import create_artifact_reader
+
+        reader = create_artifact_reader(runtime.prompt_token_limit)
+        reader._cyber_technique_observation_origin = "source"
+        runtime.core_tools_list.extend([read_fixture, reader])
         runtime.optional_tools_list = []
         if arm == "lookup" and not offline:
             # Separate physical catalog backend avoids shared embedded-client lock conflicts.

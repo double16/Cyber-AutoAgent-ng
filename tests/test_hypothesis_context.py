@@ -225,11 +225,12 @@ def test_review_contains_latest_records_and_no_hypothesis_dispositions(producer,
     }]))
     rendered = context.publication_review(producer, "OP_TEST")
     assert second["artifact_ref"] in rendered and first["artifact_ref"] not in rendered
-    assert "hypotheses[2]" in rendered and "Second path" in rendered
+    assert rendered.count("### Hypothesis ") == 2 and "Second path" in rendered
+    assert "Comparison views" in rendered and "comparison[10]" in rendered
     assert "negative_expectations" in rendered and "Older snapshots" in rendered
     writer(subjects=[no_test(reason="This item has no supported security implication")], mode="replace")
     rendered = context.publication_review(producer, "OP_TEST")
-    assert "no_testable_hypotheses" in rendered and "hypotheses[0]" in rendered
+    assert "no_testable_hypotheses" in rendered and "### Hypothesis " not in rendered
     assert "no supported security implication" in rendered
 
 
@@ -418,3 +419,19 @@ def test_review_candidates_include_exact_literal_source_links_without_claiming_i
 def test_source_only_legacy_tasks_do_not_require_inventory_schema(producer, tmp_path, source):
     (tmp_path / "inventory.json").write_text(source)
     assert context.review_input_candidates(producer) == {}
+
+
+@pytest.mark.parametrize("mechanism", ["HTTP token exposure", "Network service access", "Filesystem access"])
+def test_comparison_view_preserves_ambiguous_outcomes_for_semantic_review(producer, tmp_path, mechanism):
+    item = hypothesis(mechanism)
+    item["positive_expectations"] = ["Normal observable result", "Protected effect without authority"]
+    item["negative_expectations"] = ["Normal observable result"]
+    item["required_evidence"] = ["Control comparison and causal effect"]
+    _binding, writer = publish(producer, tmp_path)
+    writer(subjects=[{"item_id": "subject", "disposition": "supplied", "hypotheses": [item]}], mode="replace")
+    rendered = context.publication_review(producer, "OP_TEST")
+    assert "Normal observable result" in rendered
+    assert rendered.index("positive_expectations") < rendered.index("negative_expectations")
+    assert "Protected effect without authority" in rendered and "Control comparison and causal effect" in rendered
+    assert "add no evidence or judgments" in rendered
+    assert "sha256=" in rendered and "### Hypothesis " in rendered

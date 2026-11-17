@@ -1417,3 +1417,47 @@ Planning and plan review send controller instructions as system content and invo
 the same boundary. Legacy injected text runners retain the complete combined prompt string.
 Prompt fitting counts each part once, and integrity checks and truncation recovery retain their
 existing behavior. This changes message structure rather than adding review rules or stages.
+
+## Batched task relevance and reuse
+
+Operation executors collect observations during seeding and tool execution. Before the next model
+call, one matching decision ranks relevant lookup leads against the assigned objective, subjects,
+phase, restrictions, and bounded observations. Embedding similarity retrieves candidates; it does
+not rank the final leads. Shared application membership alone does not establish task relevance.
+Automatic delivery uses the first relevant lead and remains an existing-document lookup only.
+
+Identical observation content retains its artifact/tool-output aliases without another matching call.
+The packet retains at most six observations of up to 2,000 characters each, preferring assigned-subject
+evidence and newer observations. Changes to the bounded packet, objective, subjects, restrictions,
+phase or trigger definitions invalidate the matching decision. Unchanged replay skips both matching
+and embedding retrieval. Model failures remain unavailable decisions rather than applicability claims.
+Low-level synchronous observation callers retain compatibility; operation binding enables dispatch batching.
+
+Complete-document judgments are cached by operation, task, request, required capabilities, phase,
+restrictions, module policy and submitted document content. With debug exports enabled, validated
+judgments persist under the operation's techniques/selection_cache directory for continuation.
+Missing or corrupt caches trigger normal review. Active lifecycle and phase checks still govern
+delivery; a cache never supplies an execution receipt or reconstructs missing delivery snapshots.
+Request origin and required capabilities are presented separately from optional authoring enrichment.
+Explicit payload, control and procedure requirements remain requirements.
+
+The hypothesis evaluator receives a comparison view for each current hypothesis, placing the proposed
+mechanism, prerequisites, steps, positive outcomes, negative/control outcomes and evidence requirements
+together. Publication IDs and hashes remain authoritative. Views add no observations or semantic
+judgments. The existing evaluator reasons about outcome overlap and normal behavior under
+test_discrimination, and uses the existing revision path. Conditional future tests do not require
+completed exploitation. Technique usefulness remains separate from hypothesis quality.
+
+Matching events expose batch flushes, unchanged cache hits, candidate/observation counts and selected
+lead counts. Selection emits task-scoped cache hits. These events do not log observation text.
+No configuration or database migration is required; automatic delivery remains opt-in.
+
+See the [implementation and validation record](research/technique/batched-adoption-20261117/README.md).
+Focused probes favor the new inputs, but the end-to-end pilot still failed correct classification;
+general cost savings and useful adoption are not established.
+
+
+The [execution follow-up](research/technique/comparison-effect-20261117/README.md) records the failed
+format variants, corrected isolated harness, and optional-reference recovery fix. Its corrected
+full-controller case completed with a supported accepted result and helpful feedback; broader
+effectiveness and adoption remain unproven.

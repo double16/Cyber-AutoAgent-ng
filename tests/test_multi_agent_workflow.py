@@ -24428,7 +24428,7 @@ def test_complete_hypothesis_prompts_agree_on_publication_and_repair(worker_flow
     assert "security consequence" in evaluator
     assert "metadata-only references may supplement" in evaluator
     for prompt in prompts[:4]:
-        assert "Positive expectations must demonstrate the claimed security consequence" in prompt
+        assert "Positive expectations describe the claimed security consequence" in prompt
         assert "completed exploitation is not required" in prompt
     assert "request focused prerequisite inspection" in evaluator
     assert "Do not put replacement" in evaluator
@@ -25193,3 +25193,84 @@ def test_explicit_no_repair_prevents_legacy_instruction_retry(declared):
     controller._run_task(_plan(), _plan().phases[0], task)
     assert len(actor_prompts) == (1 if declared else 2)
     assert state.tasks[0].status == ("partial_failure" if declared else "done")
+
+
+@pytest.mark.parametrize("profile", ["HTTP response", "network capture", "filesystem audit"])
+@pytest.mark.parametrize("kind,usable,count,correction_only", [
+    ("artifact", "true", 1, True),
+    ("artifact", "false", 1, False),
+    ("artifact", "true", 2, False),
+    ("memory", "true", 1, False),
+    ("observation", "true", 1, False),
+])
+def test_invalid_optional_memory_refs_use_frozen_evidence_requirements(
+    monkeypatch, profile, kind, usable, count, correction_only,
+):
+    requirements = [EvidenceRequirement(kind=kind, min_count=count)]
+    if kind != "artifact":
+        requirements.insert(0, EvidenceRequirement(kind="artifact"))
+    acceptance = AcceptanceContract(
+        mode="outcome", basis=AcceptanceBasis(
+            kind="procedure", description="Frozen comparison", source_refs=["plan:phase-1"],
+            procedure={"methods": ["analyze"], "output_kind": "artifact",
+                       "limits": {"max_items": 1}, "stop_condition": "first_limit_reached",
+                       "gap_policy": "record_unassessed"},
+        ),
+        criteria=[AcceptanceCriterion(id="result", description="Compare recorded evidence",
+                                      evidence_requirements=requirements)],
+    )
+    task = Task("citation-repair", profile, "Assess frozen evidence", phase=1, status="active", acceptance=acceptance)
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    calls = []
+
+    class CapturedRecovery(Exception):
+        pass
+
+    def work_runner(role, prompt, tools, system, policy):
+        calls.append((prompt, {workflow_mod.get_tool_name(tool) for tool in tools}, policy))
+        if len(calls) > 1:
+            raise CapturedRecovery()
+        return workflow_mod.TaskExecutorCycleResult(text="Rejected citation", outcomes=[ToolOutcome(
+            1, "acceptance", "record_task_acceptance", False, False,
+            json.dumps({"status": "satisfied", "disposition": "observation", "summary": profile,
+                        "evidence_refs": ["artifact:result.json", "memory:obs-1"]}),
+            "Acceptance evidence memory does not exist in this operation: memory:obs-1.",
+        )])
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 1}),
+        budget=BudgetConfig(max_duration_minutes=60), state_store=state,
+        text_runner=lambda *_args: '{"prompt":"Assess recorded evidence","tools":[]}',
+        work_runner=work_runner,
+    )
+    monkeypatch.setattr(controller, "_acceptance_recovery_context", lambda *args: [
+        {"reference": "artifact:result.json", "source": "task_evidence", "usable": usable},
+        {"reference": "memory:obs-1", "source": "rejected_acceptance"},
+    ])
+    with pytest.raises(CapturedRecovery):
+        controller._run_task(_plan(), _plan().phases[0], task)
+    assert len(calls) == 2
+    prompt, names, policy = calls[1]
+    if correction_only:
+        assert "record_task_acceptance" in names
+        assert policy.required_tool_names == {"record_task_acceptance"}
+        assert "Required tool call: record_task_acceptance" in prompt
+        assert "artifact:result.json" in prompt and "memory:obs-1" not in prompt
+    else:
+        assert "record_task_acceptance" not in names
+        assert "Required tool call: record_task_acceptance" not in prompt
+        assert "controller handles the subsequent acceptance turn" in prompt.lower()
+
+
+def test_prerequisite_continuation_does_not_require_unavailable_terminal_tool():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+    )
+    task = Task("pending-evidence", "Gather source", "Preserve required evidence", phase=1, status="active")
+    prompt = controller._task_executor_critic_guidance(
+        _plan(), task, ["result"], [], next_cycle=2, controller_reconciles_acceptance=True,
+    )
+    assert "Required tool call:" not in prompt
+    assert "then call" not in prompt
+    assert "controller handles the subsequent acceptance turn" in prompt.lower()
