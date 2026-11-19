@@ -24367,7 +24367,9 @@ def test_complete_hypothesis_prompts_agree_on_publication_and_repair(worker_flow
         controller._task_prompt_critic_prompt(plan, phase, task, draft),
         controller._task_prompt_revision_prompt(plan, phase, task, draft, ["Clarify proposal"]),
         controller._task_prompt_bounded_repair_prompt(plan, phase, task, draft, ["Clarify proposal"]),
-        controller._task_evaluator_system_prompt() + controller._task_evaluator_prompt(plan, phase, task),
+        controller._task_evaluator_system_prompt() + controller._task_evaluator_prompt(
+            plan, phase, task, worker_context="EXECUTOR_CONCLUSION_SENTINEL",
+        ),
         controller.runtime.system_prompt + controller._hypothesis_input_context(task)
         + controller._task_executor_contract(task, {"record_hypotheses", "record_task_acceptance"}),
     ]
@@ -24404,6 +24406,11 @@ def test_complete_hypothesis_prompts_agree_on_publication_and_repair(worker_flow
         assert "Structural mismatches must remain explicit" in prompt
         assert "separately contracted follow-up task" not in prompt
     evaluator = prompts[-2]
+    assert "EXECUTOR_CONCLUSION_SENTINEL" not in evaluator
+    assert "Frozen acceptance results:" not in evaluator
+    assert evaluator.index("Already inspected sources and recorded lookup arguments") < evaluator.index(
+        "Required hypothesis review output"
+    )
     assert "input_candidate_ids" in evaluator
     assert "accepted subject reviews" in evaluator
     assert "Do not require every available source to be inspected" in evaluator

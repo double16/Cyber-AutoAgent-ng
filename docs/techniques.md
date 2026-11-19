@@ -1461,3 +1461,8 @@ The [execution follow-up](research/technique/comparison-effect-20261117/README.m
 format variants, corrected isolated harness, and optional-reference recovery fix. Its corrected
 full-controller case completed with a supported accepted result and helpful feedback; broader
 effectiveness and adoption remain unproven.
+
+Hypothesis reviewers select inspection evidence through short IDs constrained by the final output
+schema. Python resolves those IDs to exact task-local receipts before provenance validation.
+The schema refresh includes inspection results added during review; canonical stored review records
+continue to use artifact references.

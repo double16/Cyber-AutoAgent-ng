@@ -6,10 +6,12 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import ConfigDict, Field, create_model, model_validator
+from pydantic import ConfigDict, Field, TypeAdapter, create_model, model_validator
 
 from modules.agents.hypothesis_context import hypothesis_inspection_journal, review_input_candidates
+from modules.agents.review_evidence_ids import bind_evidence_ids
 from modules.agents.structured_outputs import (
+    ArtifactEvidenceReference,
     HypothesisBehaviorAssessment,
     HypothesisCheckpointDecisionOutput,
     HypothesisPrerequisiteGap,
@@ -422,12 +424,15 @@ class BoundHypothesisReview:
                 f"BoundNoHypothesisBasis{index}", __base__=NoHypothesisBasis,
                 __config__=ConfigDict(json_schema_extra={"oneOf": [
                     {"properties": {"kind": {"const": "inspected_evidence"},
-                                    "inspection_refs": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                                    "inspection_refs": {"type": "array", "items": TypeAdapter(
+                                        ArtifactEvidenceReference,
+                                    ).json_schema(), "minItems": 1},
                                     explanation_field: {"type": "array", "items": assessment.model_json_schema(),
                                                         "minItems": 1} if candidate_ids
                                     else {"type": "string", "minLength": 1}},
-                     "required": ["inspection_refs", explanation_field]},
-                    {"properties": {"kind": {"enum": ["metadata_only", "necessary_evidence_unreviewed"]}}},
+                     "required": ["kind", "inspection_refs", explanation_field]},
+                    {"properties": {"kind": {"enum": ["metadata_only", "necessary_evidence_unreviewed"]}},
+                     "required": ["kind"]},
                 ]}),
                 __validators__={"inspected_basis": model_validator(mode="after")(_validate_inspected_basis)},
                 behavior_assessments=(list[assessment] | None, Field(default=None, min_length=1))
@@ -477,6 +482,7 @@ class BoundHypothesisReview:
                           if not subject.hypotheses else {}),
                    } for subject in publication.subjects],
                    "prerequisite_gaps": [], "unresolved_criterion_ids": []}
+        model = bind_evidence_ids(model, hypothesis_inspection_journal(task, operation_id, memory._operation_output_root()))
         return cls(binding["sha256"], model, task.task_uid, json.dumps(example))
 
     def bind(self, payload: dict[str, Any], task: Any) -> dict[str, Any]:

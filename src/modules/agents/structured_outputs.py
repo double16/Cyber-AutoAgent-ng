@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StrictBool, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StrictBool, WithJsonSchema, model_validator
 
 from modules.tools.artifact_references import require_artifact_reference
 from modules.tools.memory import TaskProposal
@@ -160,7 +160,10 @@ class FindingRecommendationOutput(StrictStructuredOutput):
 ArtifactEvidenceReference = Annotated[str, BeforeValidator(require_artifact_reference), Field(
     pattern=r"^artifact(?:_id)?:\s*\S",
     description="Current-task artifact: or artifact_id: reference only; memory: and other kinds are unsupported.",
-)]
+), WithJsonSchema({
+    "type": "string", "pattern": r"^artifact(?:_id)?:\s*\S",
+    "description": "Current-task artifact: or artifact_id: reference only.",
+})]
 
 
 class OperationSupportOutput(StrictStructuredOutput):

@@ -19454,9 +19454,8 @@ Do not use partial_failure when every review is retain and no criterion or prere
                 "the publication, including semantic revisions; execution repair means inspecting a required "
                 "missing frozen input. Do not require confirmed findings or execution of identity comparisons "
                 "during proposal review; proposed future tests may require identity comparisons.\n"
-                + task_payload + "\nFrozen acceptance results:\n" + acceptance_result_section
-                + hypothesis_review + self._hypothesis_input_context(task)
-                + artifact_limit_section + tool_outcome_section + worker_context_section
+                + task_payload + self._hypothesis_input_context(task)
+                + artifact_limit_section + tool_outcome_section + hypothesis_review
                 + "\nPlan constraints:\n" + plan.constraints_to_toon()
             )
         endpoint_binding = ""

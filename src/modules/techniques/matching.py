@@ -2,8 +2,9 @@
 
 import hashlib
 import json
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError, create_model, field_validator
 
 from modules.handlers.utils import sanitize_toon_value
 from modules.utils.redaction import redact
@@ -63,7 +64,7 @@ def flush_matching(context):
     if not observations or not context.lookup.subjects:
         return
     packet = {
-        "version": 1, "objective": context.lookup.purpose, "phases": context.contexts,
+        "version": 2, "objective": context.lookup.purpose, "phases": context.contexts,
         "constraints": context.lookup.constraints, "subjects": context.lookup.subjects,
         "observations": [{key: row[key] for key in ("sha256", "origin", "scope", "excerpt")}
                          for row in observations],
@@ -103,7 +104,8 @@ def flush_matching(context):
     candidates = {key: row for key, row in candidates.items() if key in allowed}
     context._match_event("batch_flush", candidates=len(candidates), observations=len(observations))
     triggers = {f"t{index}": row for index, row in enumerate(candidates.values(), 1)}
-    subjects = {f"s{index}": row for index, row in enumerate(context.lookup.subjects, 1)}
+    subjects = {row["id"]: row for row in context.lookup.subjects}
+    aliases = {f"s{index}": row["id"] for index, row in enumerate(context.lookup.subjects, 1)}
     observed = {f"o{index}": row for index, row in enumerate(observations, 1)}
     prompt = (
         "Rank relevant technique lookup leads for the assigned task, most useful first. "
@@ -128,7 +130,19 @@ def flush_matching(context):
         for attempt in range(2):
             context.state["semantic_calls"] += 1
             try:
-                result = context.service._json("technique_trigger_matcher", prompt, RankedSelection)
+                lead_model = create_model(
+                    "BoundRankedLead", __base__=RankedLead,
+                    trigger_id=(Literal[tuple(triggers)], ...),
+                    subject_id=(Literal[tuple(subjects)], ...),
+                    __validators__={"normalize_subject": field_validator("subject_id", mode="before")(
+                        lambda value: value if value in subjects else aliases.get(value, value)
+                    )},
+                    observation_reference=(Literal[tuple(observed)], ...),
+                )
+                output_model = create_model(
+                    "BoundRankedSelection", __base__=RankedSelection, matches=(list[lead_model], ...),
+                )
+                result = context.service._json("technique_trigger_matcher", prompt, output_model)
                 for row in result.matches:
                     if (row.trigger_id not in triggers or row.subject_id not in subjects
                             or row.observation_reference not in observed):
@@ -136,9 +150,13 @@ def flush_matching(context):
                 selected = result.matches
                 status = "completed"
                 break
-            except Exception:
+            except Exception as error:
                 status = "invalid"
-                context._match_event("contract_failure", attempt=attempt)
+                fields = ([".".join(map(str, item["loc"])) for item in error.errors()]
+                          if isinstance(error, ValidationError) else [])
+                context._match_event("contract_failure", attempt=attempt, invalid_fields=fields,
+                                     allowed_ids={"trigger_id": list(triggers), "subject_id": list(subjects),
+                                                  "observation_reference": list(observed)})
                 prompt += "\nReturn only the declared matches object with supplied IDs."
     recommendations = []
     for rank, lead in enumerate(selected, 1):

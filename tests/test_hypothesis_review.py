@@ -579,9 +579,13 @@ def test_native_empty_review_without_candidates_requires_explanation(empty_revie
     from modules.agents.hypothesis_review import BoundHypothesisReview
 
     task, data = empty_review
+    from modules.agents.hypothesis_context import hypothesis_inspection_journal
+    from modules.tools import memory
+    journal = hypothesis_inspection_journal(task, "OP_TEST", memory._operation_output_root())
+    journal.record_inspection("read_artifact", "source", {}, '{"content":"inert documentation"}', ())
     bound = BoundHypothesisReview.capture(task, "OP_TEST")
     data.pop("publication_sha256")
-    basis = {"kind": "inspected_evidence", "inspection_refs": ["artifact:inspection.json"]}
+    basis = {"kind": "inspected_evidence", "inspection_refs": ["e1"]}
     if case == "null":
         basis["no_relevant_behavior_reason"] = None
     elif case == "empty":
@@ -627,6 +631,9 @@ def test_native_empty_review_with_candidates_requires_assessments(candidate_revi
         basis["no_relevant_behavior_reason"] = "No inputs recorded"
     elif case == "foreign":
         basis["behavior_assessments"][0]["input_candidate_ids"] = ["unknown"]
+    basis["inspection_refs"] = ["e1"]
+    for assessment in basis.get("behavior_assessments") or []:
+        assessment["inspection_refs"] = ["e1"]
     for schema in (bound.output_model.model_json_schema(),
                    StructuredOutputTool(bound.output_model).tool_spec["inputSchema"]["json"]):
         assert bool(list(Draft202012Validator(schema).iter_errors(data))) is (case != "valid")
@@ -635,7 +642,7 @@ def test_native_empty_review_with_candidates_requires_assessments(candidate_revi
             bound.output_model.model_validate_json(json.dumps(data))
     else:
         bound.output_model.model_validate_json(json.dumps(data))
-        validate_review({**data, "publication_sha256": bound.digest}, task, "OP_TEST")
+        validate_review(bound.canonicalize(data, task), task, "OP_TEST")
     schema = bound.output_model.model_json_schema()["$defs"]["BoundNoHypothesisBasis0"]
     assert "behavior_assessments" in schema["oneOf"][0]["required"]
     assert schema["properties"]["no_relevant_behavior_reason"]["type"] == "null"
@@ -1098,3 +1105,47 @@ def test_conditional_arrays_declare_items_for_native_grammar(request, fixture_na
                 assert field["items"]
                 if "$ref" in field["items"]:
                     assert field["items"]["$ref"].split("/")[-1] in schema["$defs"]
+
+
+@pytest.mark.parametrize("reference,valid", [
+    ("artifact:source.txt", True), ("artifact_id:inspection-1", True),
+    ("memory:observation", False), ("source.txt", False), ("artifact:", False), ("artifact: ", False),
+])
+def test_shared_native_and_tool_schemas_reject_nonartifact_citations(reference, valid):
+    from jsonschema import Draft202012Validator
+    from strands.tools.structured_output.structured_output_tool import StructuredOutputTool
+
+    from modules.agents.structured_outputs import NoHypothesisBasis
+
+    schemas = [
+        NoHypothesisBasis.model_json_schema(),
+        StructuredOutputTool(NoHypothesisBasis).tool_spec["inputSchema"]["json"],
+    ]
+
+    def citation_fields(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key == "inspection_refs":
+                    yield child["items"]
+                yield from citation_fields(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from citation_fields(child)
+
+    for schema in schemas:
+        fields = list(citation_fields(schema))
+        assert fields
+        for field in fields:
+            assert "pattern" in field
+            assert Draft202012Validator(field).is_valid(reference) is valid
+
+
+def test_native_conditional_branches_explicitly_require_kind(empty_review):
+    from modules.agents.hypothesis_review import BoundHypothesisReview
+
+    task, _ = empty_review
+    schema = BoundHypothesisReview.capture(task, "OP_TEST").output_model.model_json_schema()
+    basis = schema["$defs"]["BoundNoHypothesisBasis0"]
+    assert "kind" in basis["required"]
+    for branch in basis["oneOf"]:
+        assert "kind" in branch["required"]

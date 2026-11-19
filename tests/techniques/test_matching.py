@@ -259,3 +259,45 @@ def test_promoted_shared_observation_moves_ahead_of_other_shared_rows(batch):
     c.observe("older", "artifact:assigned", origin="source", scope="subject")
     assert c.state["batch_observations"][0]["excerpt"] == "older"
     assert c.state["batch_observations"][0]["origin"] == "source"
+
+
+@pytest.mark.parametrize("subject_id", ["subject", "s1"])
+def test_canonical_and_legacy_subject_ids_resolve(batch, subject_id):
+    batch.results["matches"][0]["subject_id"] = subject_id
+    batch.context.observe("source behavior", "artifact:source")
+    batch.context.flush()
+    assert batch.context.recommended()[0]["supporting_subject_ids"] == ["subject"]
+    assert "subject" in batch.calls[0][1]
+
+
+def test_native_schema_advertises_only_canonical_subjects(batch, monkeypatch):
+    schemas = []
+
+    def model(role, prompt, schema):
+        schemas.append(schema.model_json_schema())
+        return schema.model_validate(batch.results)
+
+    monkeypatch.setattr(batch.state.service, "_json", model)
+    batch.context.observe("evidence", "artifact:source")
+    batch.context.flush()
+    lead = schemas[0]["$defs"]["BoundRankedLead"]["properties"]
+    assert lead["subject_id"]["const"] == "subject"
+    assert lead["trigger_id"]["const"] == "t1"
+    assert lead["observation_reference"]["const"] == "o1"
+
+
+def test_invalid_and_empty_outcomes_are_distinct_and_diagnostics_are_safe(batch):
+    events = []
+    batch.context.service.events.callback = events.append
+    batch.results["matches"][0]["subject_id"] = "not-supplied"
+    batch.context.observe("private content", "artifact:source")
+    batch.context.flush()
+    assert batch.context.state["batch_match"]["status"] == "invalid"
+    failure = next(e for e in events if e.get("status") == "contract_failure")
+    assert failure["invalid_fields"] == ["matches.0.subject_id"]
+    assert failure["allowed_ids"]["subject_id"] == ["subject"]
+    assert "private content" not in json.dumps(events)
+    batch.results["matches"] = []
+    batch.context.observe("new evidence", "artifact:next")
+    batch.context.flush()
+    assert batch.context.state["batch_match"]["status"] == "completed"
