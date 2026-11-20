@@ -320,7 +320,7 @@ services:
 
   # Langfuse observability service (self-hosted) 
   langfuse-web:
-    image: docker.io/langfuse/langfuse:3
+    image: docker.langfuse.com/langfuse/langfuse:4.83.0
     container_name: cyber-langfuse
     restart: unless-stopped
     depends_on:
@@ -441,7 +441,7 @@ services:
           cpus: '0.5'
 
   langfuse-worker:
-    image: docker.io/langfuse/langfuse-worker:3
+    image: docker.langfuse.com/langfuse/langfuse-worker:4.83.0
     container_name: cyber-langfuse-worker
     restart: unless-stopped
     depends_on:

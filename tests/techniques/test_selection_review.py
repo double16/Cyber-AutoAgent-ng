@@ -74,3 +74,81 @@ def test_absent_requested_capability_does_not_need_nonexistent_quote():
 def test_covered_requirement_requires_a_real_passage():
     with pytest.raises(ValueError, match="require a passage"):
         review(passages=[]).validate_references([{"id": "method"}], {1: "Other"})
+
+
+@pytest.mark.parametrize("verdict", ["covered", "conditional", "unmet"])
+@pytest.mark.parametrize("fault", [None, "foreign", "missing", "empty", "whitespace", "no_passage", "extra"])
+def test_bound_selection_native_and_runtime_tool_schemas(verdict, fault):
+    from copy import deepcopy
+
+    from jsonschema import Draft202012Validator
+    from strands.tools.structured_output.structured_output_tool import StructuredOutputTool
+
+    from modules.techniques.selection_review import selection_output_model
+
+    model = selection_output_model([{"id": "method"}])
+    data = review(verdict).model_dump()
+    row = data["judgments"][0]
+    if fault == "foreign":
+        row["requirement_id"] = "invented"
+    elif fault == "missing":
+        row.pop("missing_capability")
+    elif fault == "empty":
+        row["missing_capability"] = ""
+    elif fault == "whitespace":
+        row["missing_capability"] = "  "
+    elif fault == "no_passage":
+        row["passages"] = []
+    elif fault == "extra":
+        data["judgments"].append(deepcopy(row))
+    invalid = (fault in {"foreign", "extra"}
+               or (verdict == "unmet" and fault in {"missing", "empty", "whitespace"})
+               or (verdict != "unmet" and fault == "no_passage"))
+    for schema in (model.model_json_schema(), StructuredOutputTool(model).tool_spec["inputSchema"]["json"]):
+        assert Draft202012Validator(schema).is_valid(data) is not invalid
+    if invalid:
+        with pytest.raises(ValueError):
+            model.model_validate(data)
+    else:
+        bound = model.model_validate(data)
+        canonical = SelectionReview.model_validate(bound.model_dump())
+        canonical.validate_references([{"id": "method"}], {1: "Compare versions"})
+        assert canonical.reusable == (verdict != "unmet")
+
+
+@pytest.mark.parametrize("requirements", [[], [{"id": ""}], [{"id": " "}], [{"id": 4}],
+                                         [{"id": "method"}, {"id": "method"}]])
+def test_bound_selection_rejects_invalid_requirement_ids(requirements):
+    from modules.techniques.selection_review import selection_output_model
+
+    with pytest.raises(ValueError, match="unique requirement IDs"):
+        selection_output_model(requirements)
+
+
+def test_bound_selection_keeps_complete_coverage_controller_owned():
+    from modules.techniques.selection_review import selection_output_model
+
+    requirements = [{"id": "first"}, {"id": "second"}]
+    model = selection_output_model(requirements)
+    data = review().model_dump()
+    data["judgments"][0]["requirement_id"] = "first"
+    data["judgments"] *= 2
+    bound = model.model_validate(data)
+    with pytest.raises(ValueError, match="exactly once"):
+        bound.validate_references(requirements, {1: "Compare versions"})
+    data["judgments"] = [dict(row) for row in data["judgments"]]
+    data["judgments"][1]["requirement_id"] = "second"
+    model.model_validate(data).validate_references(requirements, {1: "Compare versions"})
+
+
+@pytest.mark.parametrize("capability", ["After-expiry comparison", "A comparison\nwith an expired credential"])
+def test_missing_capability_pattern_allows_complete_native_grammar_strings(capability):
+    import re
+
+    from modules.techniques.selection_review import selection_output_model
+
+    schema = selection_output_model([{"id": "method"}]).model_json_schema()
+    pattern = schema["$defs"]["UnmetRequirementJudgment"]["properties"]["missing_capability"]["pattern"]
+    # Some native grammar compilers match the entire string, rather than JSON Schema's substring semantics.
+    assert re.fullmatch(pattern, capability)
+    assert re.fullmatch(pattern, " \n ") is None

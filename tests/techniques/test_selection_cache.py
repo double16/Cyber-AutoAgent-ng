@@ -107,3 +107,21 @@ def test_explicit_miss_authors_then_existing_guidance_reuses_without_another_rev
         assert p.service.get("JWT handling")[0] == revision
         assert sum("COMPLETE technique" in prompt for _, prompt, _ in p.calls) == reviewed
         assert len(p.research_calls) == 1
+
+
+def test_output_schema_changes_invalidate_selection_cache(cached, monkeypatch):
+    from pydantic import create_model
+
+    import modules.techniques.service as service_module
+
+    p = cached
+    factory = service_module.selection_output_model
+    with p.service.events.scope(operation_id="operation", task_uid="task"):
+        assert p.service._select("JWT handling", MethodologyContext())
+        count = sum("COMPLETE technique" in prompt for _, prompt, _ in p.calls)
+        monkeypatch.setattr(
+            service_module, "selection_output_model",
+            lambda requirements: create_model("UpdatedSelectionReview", __base__=factory(requirements)),
+        )
+        assert p.service._select("JWT handling", MethodologyContext())
+        assert sum("COMPLETE technique" in prompt for _, prompt, _ in p.calls) == count + 1

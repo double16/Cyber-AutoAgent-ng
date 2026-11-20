@@ -16,6 +16,24 @@ returned when any component succeeds; total failure returns diagnostics. Only in
 techniques enter the global catalog. Direct callers retain `get()` and its `(revision, markdown)` tuple;
 operation tools and CLI use the typed `resolve_bundle()` API.
 
+Selection evaluates transferable methodological capabilities using the existing `covered`, `conditional`
+and `unmet` judgments. Ordinary adaptation of names, parameters and examples, or use of a relevant
+subset of a multi-method document, can support reuse. A rejection identifies a missing essential action
+or control. Phase authoring preferences such as illustrative payloads and checklists are optional unless
+explicitly requested. Selection retains phase identifiers, module policy and methodology restrictions
+without adding the phase authoring rubric. Prompt fingerprints invalidate earlier cached judgments when
+these instructions change.
+
+Shared interpretation guidance distinguishes observations, assumptions, legitimate behavior and the
+evidence needed to establish a security consequence. Hypothesis fields describe positive outcomes,
+controls and prerequisite evidence using their existing shape. Unknown implementation details can be
+future checks when observed behavior motivates a proposal. Technique-review counterexample fields
+remain in their owning review instructions. When an empty publication has reconciled input candidates,
+its bound review schema requires every behavior assessment to provide at least one known
+`input_candidate_ids` value. Python still verifies aggregate candidate coverage and corresponding
+inspected evidence. Reviews without reconciled candidates retain their existing compatibility path. Execution, finding acceptance and report contracts retain
+their existing phase-specific decisions.
+
 Existing active guidance is judged for applicability before reuse. A miss invokes separate researcher, source judge,
 author, and critic agents. Research starts with a target of three relevant fetched documents, with no
 three-source selection cap. At least one useful retrieved reference is required. Model knowledge and reasoning may supply
@@ -1466,3 +1484,17 @@ Hypothesis reviewers select inspection evidence through short IDs constrained by
 schema. Python resolves those IDs to exact task-local receipts before provenance validation.
 The schema refresh includes inspection results added during review; canonical stored review records
 continue to use artifact references.
+
+Selection uses the original methodology request and explicit restrictions. Phase framing helps adapt a
+method; optional authoring examples and checklists do not become additional selection obligations.
+Explicitly requested examples, controls and deliverables remain required.
+
+Hypothesis evaluator contract failures stay with evaluation. They are recorded separately from
+actionable publication feedback and do not ask the executor to rewrite an unchanged publication.
+Closing investigation still permits assessment correction using already inspected content and receipts.
+
+New selection generations use a request-bound structured schema: requirement IDs come from the
+supplied list, and unmet judgments require a nonempty missing-capability explanation. Covered and
+conditional judgments require passage references. Python continues to validate complete requirement
+coverage and citations. Stored reviews retain their existing format; selection cache fingerprints
+include the output schema so old generation contracts cannot satisfy a changed schema.

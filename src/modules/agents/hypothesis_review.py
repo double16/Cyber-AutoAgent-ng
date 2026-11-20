@@ -42,21 +42,13 @@ trust boundary. Distinguish observed facts from unresolved preconditions. An exp
 to a related resource can ground a workflow hypothesis; the tested action need not use the subject's
 literal path. For example, a page can call a backend API. Unrelated resources remain outside the
 assignment. Inferred GET operations and unrecorded inputs do not restrict a subject to its page response.
-Positive expectations describe the claimed security consequence; negative/control expectations describe
-its absence. Compare them together: overlapping outcomes do not distinguish a violation from normal
-behavior. Explain a missing distinction under test_discrimination, without executing the proposed test.
-Identical responses, absent reflection, ordinary registration, and public bundle visibility are normal
-observations or controls, not positive evidence of a vulnerability. Withdraw an unsupported security
-premise rather than rewriting normal behavior as a successful security test.
-Under test_discrimination, ask: would the positive result demonstrate the claimed security consequence,
-or could normal application behavior produce it? Require observations and controls that distinguish
-the consequence. A SPA shell or visible login form alone does not show unauthorized access; require
-protected data or an authorization-sensitive action without the required authority. Response differences
-alone are insufficient. Accepting an extra field does not establish mass assignment; the test must
-show an unauthorized effect on a protected property. Submitting another email and its required password
-does not establish privilege escalation. Token persistence alone does not establish session fixation;
-distinguish attacker control of an accepted session from the normal remember-me behavior. Missing
-headers, exposed versions, and public content alone do not demonstrate a security consequence.
+Positive expectations describe the claimed security consequence.
+Under test_discrimination, compare positive expectations with legitimate and control outcomes.
+Explain any missing distinction in the existing check reason. For example, accepting an upload body
+is ordinary file-write behavior; a mass-assignment test needs an unauthorized effect on a protected
+property, with structured binding established as a future prerequisite if unknown. A SPA shell alone
+cannot establish unauthorized access; distinguish access to protected data or actions. For network
+and filesystem checks, compare access against the applicable connection policy or file entitlement.
 Identity requirements: declared identities and comparisons must match the proposed future tests.
 Missing execution credentials alone do not invalidate a future test plan.
 Retain grounded conditional hypotheses when proposed controls can resolve uncertainty;
@@ -415,7 +407,8 @@ class BoundHypothesisReview:
             assessment = create_model(
                 f"BoundHypothesisBehavior{index}", __base__=HypothesisBehaviorAssessment,
                 input_candidate_ids=(list[Literal[candidate_ids]] if candidate_ids else list[str],
-                                     Field(default_factory=list, **({} if candidate_ids else {"max_length": 0}))),
+                                     Field(min_length=1) if candidate_ids
+                                     else Field(default_factory=list, max_length=0)),
             )
             explanation_field = "behavior_assessments" if candidate_ids else "no_relevant_behavior_reason"
             # Keep conditional requirements inline: the SDK compatibility schema flattener does

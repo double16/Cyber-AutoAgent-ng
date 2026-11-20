@@ -30,9 +30,15 @@ class Hypothesis(BaseModel):
     suspected_mechanism: Text
     attacker_controlled_input: Text
     safe_test_steps: list[Text] = Field(min_length=1)
-    positive_expectations: list[Text] = Field(min_length=1)
-    negative_expectations: list[Text] = Field(min_length=1)
-    required_evidence: list[Text] = Field(min_length=1)
+    positive_expectations: list[Text] = Field(
+        min_length=1, description="Observation distinguishing the suspected security consequence from legitimate behavior.",
+    )
+    negative_expectations: list[Text] = Field(
+        min_length=1, description="Legitimate baseline and control outcomes against which the positive result is compared.",
+    )
+    required_evidence: list[Text] = Field(
+        min_length=1, description="Evidence needed to establish prerequisites and distinguish the claimed consequence.",
+    )
     supporting_refs: list[Text] = Field(
         min_length=1, description="Current-operation artifact: or artifact_id: references, not memory IDs or URLs.",
     )

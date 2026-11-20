@@ -13886,6 +13886,14 @@ applicability or a finding, and published proof of concepts must not be executed
         except PromptInputTooLarge as error:
             return WorkflowDecision(status="blocked", reason=f"evaluator_input_capacity: {error}")
         if self._is_hypothesis_producer(task):
+            try:
+                validate_review(data, task, self.runtime.operation_id)
+            except (OSError, TypeError, ValueError) as error:
+                reason = f"Hypothesis evaluator output invalid: {self._short(str(error), 300)}"
+                self.state.patch_task(task.task_uid, recovery_context_updates={
+                    "evaluator_output_failure": {"reason": reason, "operation_id": self.runtime.operation_id},
+                })
+                return WorkflowDecision(status="partial_failure", reason=reason, repair_kind="none")
             task = self.state.patch_task(task.task_uid, recovery_context_updates={"hypothesis_review": data})
         decision = self._decision_from_data(data, allowed=("done", "partial_failure", "blocked"))
         repair = self._evaluator_repair_from_data(data)

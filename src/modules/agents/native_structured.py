@@ -33,7 +33,9 @@ FINALIZATION_GUIDANCE = (
     "\n\n## Structured finalization\n"
     "Investigation is closed. Use the supplied task, evidence, controller observations, and correction "
     "feedback to return the final decision matching the response schema. No investigation or "
-    "publication tools are available in this pass. Do not invent missing evidence."
+    "publication tools are available in this pass. Complete or correct assessments using already supplied "
+    "inspected content and receipts; this requires no new inspection. Request publication changes only "
+    "for defects in the publication, not defects in your review. Do not invent missing evidence."
 )
 
 

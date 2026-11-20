@@ -23720,6 +23720,8 @@ def test_hypothesis_evaluator_reviews_current_records_and_preserves_semantic_rep
             if status == "partial_failure" else {"kind": "none"}}
 
     monkeypatch.setattr(controller, "_run_json_text_agent", evaluate)
+    # This test isolates routing; contract validation is covered by real-runner tests.
+    monkeypatch.setattr(workflow_mod, "validate_review", lambda *_args: None)
     guard = Mock(return_value=True)
     monkeypatch.setattr(controller, "_evaluator_reopens_resolved_execution_gate", guard)
     decision = controller._evaluate_task(_plan(), _plan().phases[0], task, acceptance_results=[])
@@ -23734,7 +23736,7 @@ def test_hypothesis_evaluator_reviews_current_records_and_preserves_semantic_rep
     assert "comparison_assessment" not in capture[0]
     assert "closure/schema defect" not in capture[0]
     assert "Under test_discrimination" in capture[0]
-    assert "would the positive result demonstrate the claimed" in capture[0]
+    assert "What observation would distinguish that consequence" in capture[0]
     assert "not completed exploitation" in capture[0]
 
 
@@ -24296,12 +24298,12 @@ def test_hypothesis_schema_correction_preserves_semantic_feedback(worker_flow_ca
     assert decision.status == "partial_failure"
     assert len(prompts) == 2
     stored = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
-    feedback = stored.recovery_context["hypothesis_review"]
     if correction != "preserve":
-        # Invalid subjects are not frozen into canonical feedback when bounded correction fails.
-        assert "subject_reviews" not in feedback
+        assert "hypothesis_review" not in stored.recovery_context
+        assert "evaluator_output_failure" in stored.recovery_context
         assert decision.repair_kind == "none"
         return
+    feedback = stored.recovery_context["hypothesis_review"]
     assert feedback["subject_reviews"] == initial["subject_reviews"]
     if correction == "preserve":
         assert decision.repair_kind == "acceptance"
@@ -24376,7 +24378,11 @@ def test_complete_hypothesis_prompts_agree_on_publication_and_repair(worker_flow
     roles = ["task_prompt_builder", "task_prompt_critic", "task_prompt_builder", "task_prompt_builder"]
     for index, role in enumerate(roles):
         prompts[index] = prompt_factory.get_role_system_prompt(controller.runtime.system_prompt, role) + prompts[index]
+    from modules.prompts.security_interpretation import SECURITY_INTERPRETATION
+
     for prompt in prompts:
+        assert prompt.count(SECURITY_INTERPRETATION) == 1
+        assert "counterexample_matches_check=false" not in prompt
         assert candidate_id in prompt
         assert "inventory_url" in prompt
         assert "artifact:implementation.js" in prompt
@@ -25281,3 +25287,74 @@ def test_prerequisite_continuation_does_not_require_unavailable_terminal_tool():
     assert "Required tool call:" not in prompt
     assert "then call" not in prompt
     assert "controller handles the subsequent acceptance turn" in prompt.lower()
+
+
+@pytest.mark.parametrize("structured", [False, True])
+@pytest.mark.parametrize("fault", ["missing", "empty"])
+def test_candidate_links_correct_through_evaluator_retry(worker_flow_case, monkeypatch, structured, fault):
+    from modules.agents import hypothesis_review
+    from modules.agents.hypothesis_context import hypothesis_inspection_journal
+
+    controller, *_ = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    _publish_controller_hypotheses(controller, task)
+    task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    candidate = {"candidate_id": "candidate-visible", "origins": [{"kind": "recorded_input"}]}
+    monkeypatch.setattr(hypothesis_review, "review_input_candidates", lambda _task: {"subject": [candidate]})
+    journal = hypothesis_inspection_journal(task, controller.runtime.operation_id, workflow_mod._operation_output_root())
+    reference = journal.record_inspection("read_artifact", "visible", {}, json.dumps({
+        "content": "A user-controlled selector is observed; it selects public documentation only.",
+    }), ())
+    calls = []
+
+    def runner(_role, prompt, _tools, _system, *_args):
+        calls.append(prompt)
+        if len(calls) > 1:
+            assert "input_candidate_ids" in prompt
+        assessment = {
+            "observed_behavior": "Selector chooses public documentation", "inspection_refs": [reference],
+            "supports_conditional_test": False, "reasoning": "No observed security-relevant boundary",
+        }
+        if len(calls) > 1:
+            assessment["input_candidate_ids"] = ["candidate-visible"]
+        elif fault == "empty":
+            assessment["input_candidate_ids"] = []
+        data = {"status": "done", "reason": "Reviewed the observed selector", "subject_reviews": [{
+            "item_id": "subject", "decision": "retain", "reason": "Only public documentation",
+            "hypotheses": [], "no_hypothesis_basis": {"kind": "inspected_evidence",
+                "inspection_refs": [reference], "behavior_assessments": [assessment]},
+        }]}
+        return data if structured else json.dumps(data)
+
+    if structured:
+        controller.structured_runner = runner
+    else:
+        controller.text_runner = runner
+    decision = controller._evaluate_task(_plan(), _plan().phases[0], task, acceptance_results=[])
+    assert len(calls) == 2
+    assert decision.status == "done" and decision.repair_kind == "none"
+    retained = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    review = retained.recovery_context["hypothesis_review"]
+    assessment = review["subject_reviews"][0]["no_hypothesis_basis"]["behavior_assessments"][0]
+    assert assessment["input_candidate_ids"] == ["candidate-visible"]
+    assert assessment["inspection_refs"] == [reference]
+
+
+def test_invalid_hypothesis_evaluator_fallback_does_not_poison_publication(
+    worker_flow_case, monkeypatch,
+):
+    controller, *_ = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    _publish_controller_hypotheses(controller, task)
+    task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    fallback = {"status": "partial_failure", "reason": "Evaluator contract exhausted", "instructions": ""}
+    monkeypatch.setattr(controller, "_run_json_text_agent", lambda *_args, **_kwargs: fallback)
+    for _ in range(2):
+        decision = controller._evaluate_task(_plan(), _plan().phases[0], task, acceptance_results=[])
+        assert decision.status == "partial_failure"
+        assert decision.repair_kind == "none"
+        task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+        assert "hypothesis_review" not in task.recovery_context
+        assert "evaluator_output_failure" in task.recovery_context

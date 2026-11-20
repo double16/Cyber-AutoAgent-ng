@@ -1,0 +1,158 @@
+{
+  "model": "muse-glimmer:30b-mlx",
+  "requests": 25,
+  "reviews": [
+    {
+      "case": "file-selector",
+      "correct": true,
+      "controller_valid": true,
+      "continuation_contract_valid": true,
+      "status": "partial_failure",
+      "repair_kind": "acceptance",
+      "requests": 2
+    },
+    {
+      "case": "file-selector",
+      "correct": true,
+      "controller_valid": true,
+      "continuation_contract_valid": true,
+      "status": "partial_failure",
+      "repair_kind": "acceptance",
+      "requests": 2
+    },
+    {
+      "case": "file-selector",
+      "correct": true,
+      "controller_valid": true,
+      "continuation_contract_valid": true,
+      "status": "partial_failure",
+      "repair_kind": "acceptance",
+      "requests": 2
+    },
+    {
+      "case": "partner-login",
+      "correct": true,
+      "controller_valid": true,
+      "continuation_contract_valid": true,
+      "status": "partial_failure",
+      "repair_kind": "acceptance",
+      "requests": 2
+    },
+    {
+      "case": "partner-login",
+      "correct": true,
+      "controller_valid": true,
+      "continuation_contract_valid": true,
+      "status": "partial_failure",
+      "repair_kind": "acceptance",
+      "requests": 2
+    },
+    {
+      "case": "partner-login",
+      "correct": true,
+      "controller_valid": true,
+      "continuation_contract_valid": true,
+      "status": "partial_failure",
+      "repair_kind": "acceptance",
+      "requests": 2
+    }
+  ],
+  "selections": [
+    {
+      "case": "explicit-missing-control-0",
+      "correct": false,
+      "selected": null,
+      "expected": null,
+      "attempts": 2,
+      "error": "Complete-document selection unresolved: ValueError: Unmet requirements need a missing requested capability"
+    },
+    {
+      "case": "explicit-missing-control-1",
+      "correct": true,
+      "selected": false,
+      "expected": false,
+      "attempts": 1,
+      "error": null
+    },
+    {
+      "case": "explicit-missing-control-2",
+      "correct": true,
+      "selected": false,
+      "expected": false,
+      "attempts": 1,
+      "error": null
+    },
+    {
+      "case": "hidden-upload-0",
+      "correct": true,
+      "selected": true,
+      "expected": true,
+      "attempts": 1,
+      "error": null
+    },
+    {
+      "case": "hidden-upload-1",
+      "correct": true,
+      "selected": true,
+      "expected": true,
+      "attempts": 1,
+      "error": null
+    },
+    {
+      "case": "hidden-upload-2",
+      "correct": true,
+      "selected": true,
+      "expected": true,
+      "attempts": 1,
+      "error": null
+    },
+    {
+      "case": "optional-details-0",
+      "correct": true,
+      "selected": true,
+      "expected": true,
+      "attempts": 2,
+      "error": null
+    },
+    {
+      "case": "optional-details-1",
+      "correct": true,
+      "selected": true,
+      "expected": true,
+      "attempts": 2,
+      "error": null
+    },
+    {
+      "case": "optional-details-2",
+      "correct": true,
+      "selected": true,
+      "expected": true,
+      "attempts": 2,
+      "error": null
+    }
+  ],
+  "tests": {
+    "passed": 8270,
+    "skipped": 46,
+    "deselected": 89,
+    "coverage_floor": "All selected files >=80% lines and branches",
+    "ruff": "passed",
+    "whitespace": "passed"
+  },
+  "promotion": "hold: one of nine selection trials exhausted its contract correction",
+  "limitations": [
+    "Reconstructed fixtures, not exact operation replay",
+    "Empty publication fixture reason is No safe probe in current scope; not the original operation reason",
+    "Selection uses synthetic complete documents and actual production _select",
+    "No assessment target I/O or downstream effectiveness measurement",
+    "Selection attempt outputs retained as Pydantic representations by inherited harness; assembled prompts and schemas also retained"
+  ],
+  "source_sha256": {
+    "src/modules/agents/multi_agent_workflow.py": "3a752cc2ec8c95eca8e84a410b9daad449603a1267b2015d8a6191fe0d62438a",
+    "src/modules/agents/native_structured.py": "d841c1f37185a8089aeb05ad8de38744da95831f1cb78f9aecb87fbf991fa217",
+    "src/modules/prompts/security_interpretation.py": "e6b7043206771aa08c87aea6acb711e8640e7edcf4a78ac1a3364cf6561f173c",
+    "src/modules/techniques/alignment.py": "1661277e56153a9a850f5b2699c68bf5e7f3d8768a8ac6bf2232b7135d41ed8c",
+    "src/modules/techniques/bundles.py": "408737b34a371ca808554a452e8749e45348b46c425a662af438e0f511572be8",
+    "src/modules/techniques/service.py": "2827059115a708c0ee47eb7f62f392fd32035f41bf6fcbbf03fcf3a10c16edda"
+  }
+}

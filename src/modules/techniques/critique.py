@@ -17,6 +17,20 @@ from modules.techniques.review_integrity import bind_review_prompt
 Category = Literal["authored_content", "source_attribution", "research_coverage", "request_coverage"]
 
 
+TECHNIQUE_REVIEW_INTERPRETATION = (
+    "Interpret each procedure where it labels an outcome. An expected outcome does not establish policy "
+    "or prerequisites. Repeated use of a valid credential, a permitted file read, an allowed network "
+    "connection or intended object selection can be legitimate. Credential-reuse rejection needs an "
+    "established expiry, revocation, nonce-consumption or freshness restriction that actually applies. "
+    "A permitted counterexample must satisfy the procedure's actual prerequisites and the exact "
+    "observation labeled suspicious. If none does, explain why and set counterexample_matches_check=false. "
+    "Do not reject a check merely because control_excludes_counterexample=false when no permitted "
+    "counterexample matches. Separately assess how the method establishes its prerequisites. "
+    "An unconditional violation claim conflicting with its own prerequisites is an authored_content defect. "
+    "Clarifying conditional checks requires reasoning rather than additional research. "
+)
+
+
 class ReviewSnapshot:
     """Controller references to decoded values, never YAML syntax."""
 
@@ -547,7 +561,7 @@ def assess(service, prompt, markdown, requirements, documents, selected_urls, *,
         {"reference": key, "path": snapshot.paths[key], "value": value}
         for key, value in snapshot.values.items() if snapshot.paths[key] != "metadata.source_coverage"
     ]
-    prompt += "\n" + REVIEW_GUIDANCE + "\n" + snapshot.render()
+    prompt += "\n" + REVIEW_GUIDANCE + TECHNIQUE_REVIEW_INTERPRETATION + "\n" + snapshot.render()
     prompt += "\n" + json_payload("retained_sources", [
         {"url": url, "characters": len(text)} for url, text in lookup.texts.items()
     ])
@@ -758,7 +772,7 @@ def assess(service, prompt, markdown, requirements, documents, selected_urls, *,
                     investigation_instructions = INVESTIGATION_GUIDANCE
                     comparison_instructions = COMPARISON_GUIDANCE
                 assessment_evidence = (
-                    contract.render() + REVIEW_GUIDANCE + "\n"
+                    contract.render() + REVIEW_GUIDANCE + TECHNIQUE_REVIEW_INTERPRETATION + "\n"
                     + json_payload(
                         "retained_sources",
                         [{"url": url, "characters": len(text)} for url, text in lookup.texts.items()],

@@ -611,7 +611,9 @@ def test_native_empty_review_without_candidates_requires_explanation(empty_revie
     assert schema["properties"]["behavior_assessments"]["type"] == "null"
 
 
-@pytest.mark.parametrize("case", ["missing", "null", "empty", "explanation", "foreign", "valid"])
+@pytest.mark.parametrize("case", [
+    "missing", "null", "empty", "explanation", "foreign", "missing_ids", "empty_ids", "null_ids", "valid",
+])
 def test_native_empty_review_with_candidates_requires_assessments(candidate_review, case):
     from jsonschema import Draft202012Validator
     from strands.tools.structured_output.structured_output_tool import StructuredOutputTool
@@ -631,6 +633,12 @@ def test_native_empty_review_with_candidates_requires_assessments(candidate_revi
         basis["no_relevant_behavior_reason"] = "No inputs recorded"
     elif case == "foreign":
         basis["behavior_assessments"][0]["input_candidate_ids"] = ["unknown"]
+    if case == "missing_ids":
+        del basis["behavior_assessments"][0]["input_candidate_ids"]
+    elif case == "empty_ids":
+        basis["behavior_assessments"][0]["input_candidate_ids"] = []
+    elif case == "null_ids":
+        basis["behavior_assessments"][0]["input_candidate_ids"] = None
     basis["inspection_refs"] = ["e1"]
     for assessment in basis.get("behavior_assessments") or []:
         assessment["inspection_refs"] = ["e1"]
@@ -645,6 +653,10 @@ def test_native_empty_review_with_candidates_requires_assessments(candidate_revi
         validate_review(bound.canonicalize(data, task), task, "OP_TEST")
     schema = bound.output_model.model_json_schema()["$defs"]["BoundNoHypothesisBasis0"]
     assert "behavior_assessments" in schema["oneOf"][0]["required"]
+    assessment_schema = bound.output_model.model_json_schema()["$defs"]["BoundHypothesisBehavior0"]
+    assert "input_candidate_ids" in assessment_schema["required"]
+    assert assessment_schema["properties"]["input_candidate_ids"]["minItems"] == 1
+    assert "default" not in assessment_schema["properties"]["input_candidate_ids"]
     assert schema["properties"]["no_relevant_behavior_reason"]["type"] == "null"
 
 
@@ -1149,3 +1161,20 @@ def test_native_conditional_branches_explicitly_require_kind(empty_review):
     assert "kind" in basis["required"]
     for branch in basis["oneOf"]:
         assert "kind" in branch["required"]
+
+
+
+def test_bound_schema_preserves_controller_complete_candidate_coverage(candidate_review, monkeypatch):
+    from modules.agents import hypothesis_review
+    from modules.agents.hypothesis_review import BoundHypothesisReview
+
+    task, data, basis, _journal = candidate_review
+    original = hypothesis_review.review_input_candidates(task)["subject"][0]
+    candidates = [original, {**original, "candidate_id": "candidate-second"}]
+    monkeypatch.setattr(hypothesis_review, "review_input_candidates", lambda _task: {"subject": candidates})
+    bound = BoundHypothesisReview.capture(task, "OP_TEST")
+    # Each row has a valid link; the controller still checks complete aggregate coverage.
+    with pytest.raises(ValueError, match="candidate-second"):
+        validate_review(bound.canonicalize(data, task), task, "OP_TEST")
+    basis["behavior_assessments"][0]["input_candidate_ids"].append("candidate-second")
+    validate_review(bound.canonicalize(data, task), task, "OP_TEST")

@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, create_model
 
 
 class Passage(BaseModel):
@@ -51,6 +51,34 @@ class SelectionReview(BaseModel):
     @property
     def reusable(self):
         return all(row.verdict != "unmet" for row in self.judgments)
+
+
+def selection_output_model(requirements):
+    """Bind new generation to supplied IDs and verdict-specific bookkeeping; keep stored reviews compatible."""
+    identifiers = tuple(row["id"] for row in requirements)
+    if (not identifiers or any(not isinstance(value, str) or not value.strip() for value in identifiers)
+            or len(set(identifiers)) != len(identifiers)):
+        raise ValueError("Selection requires nonempty, unique requirement IDs")
+    identifier_type = Literal[identifiers]
+    supported = create_model(
+        "SupportedRequirementJudgment", __base__=RequirementJudgment,
+        requirement_id=(identifier_type, ...),
+        verdict=(Literal["covered", "conditional"], ...),
+        passages=(list[Passage], Field(min_length=1)),
+    )
+    unmet = create_model(
+        "UnmetRequirementJudgment", __base__=RequirementJudgment,
+        requirement_id=(identifier_type, ...),
+        verdict=(Literal["unmet"], ...),
+        missing_capability=(str, Field(
+            min_length=1, pattern=r"[\s\S]*\S[\s\S]*",
+            description="Name the requested procedure or control that the document lacks.",
+        )),
+    )
+    return create_model(
+        "BoundSelectionReview", __base__=SelectionReview,
+        judgments=(list[supported | unmet], Field(min_length=len(identifiers), max_length=len(identifiers))),
+    )
 
 
 def document_passages(markdown):

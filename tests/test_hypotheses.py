@@ -767,3 +767,9 @@ def test_checkpoint_reader_rejects_impossible_inline_ceiling(tmp_path, monkeypat
     reader = hypotheses.build_hypothesis_input_reader({"artifact:input.txt"}, max_inline_chars=1)
     with pytest.raises(ValueError, match="ceiling is too small"):
         reader(source_ref="artifact:input.txt")
+
+def test_hypothesis_schema_explains_distinguishing_outcomes():
+    properties = hypotheses.Hypothesis.model_json_schema()["properties"]
+    assert "legitimate behavior" in properties["positive_expectations"]["description"]
+    assert "control outcomes" in properties["negative_expectations"]["description"]
+    assert "prerequisites" in properties["required_evidence"]["description"]

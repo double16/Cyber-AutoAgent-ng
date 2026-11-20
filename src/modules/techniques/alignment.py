@@ -44,8 +44,7 @@ PHASE_OBJECTIVES = {
     "reconnaissance": "Discover and characterize relevant surfaces, components, versions and trust boundaries; "
                       "preserve unknowns rather than require confirmed vulnerabilities.",
     "hypothesis_generation": "Form plausible hypotheses with known prerequisites, explicit "
-                             "assumptions and concrete future supporting or refuting checks. Include applicable "
-                             "illustrative payloads and checklists, distinguished from observed results. "
+                             "assumptions and concrete future supporting or refuting checks. "
                              "Unknown target conditions become future checks.",
     "vulnerability_verification": "Describe validation methods, controls, evidence requirements and criteria "
                                   "to confirm or reject a hypothesis; do not require completed target validation.",
@@ -202,7 +201,7 @@ def align_request(service, request: str, context: MethodologyContext | None):
             "validation guidance from performing validation: techniques always provide guidance. For "
             "hypothesis generation, ambiguous 'validate applicability' means plausible applicability "
             "hypotheses, documented prerequisites, unknowns and future supporting/refuting checks. "
-            "Encourage applicable examples and checklists without inventing restrictions. Do not "
+            "Keep optional examples and checklists in authoring guidance, outside the aligned request. Do not "
             "invent requirements or remove an explicit deliverable. Only Original request defines the "
             "requested methodology; task objectives and execution context are not supplied to this workflow. "
             "Return the methodology itself, never these instructions. "

@@ -237,10 +237,10 @@ def test_evaluator_checks_hypothesis_semantics_even_when_publication_is_availabl
     _controller, prompt, _valid = semantic_hypothesis_case
     assembled = " ".join(prompt.split())
     assert "Under test_discrimination" in assembled
-    assert "would the positive result demonstrate the claimed security consequence" in assembled
-    assert "could normal application behavior produce it" in assembled
+    assert "What observation would distinguish that consequence from legitimate behavior?" in assembled
+    assert "compare positive expectations with legitimate and control outcomes" in assembled
     assert "completed exploitation is not required" in assembled
-    assert "normal remember-me behavior" in assembled
+    assert "Unknown implementation details can become future checks" in assembled
     assert "Request revise for repairable tests and withdraw for an ungrounded premise" in assembled
     assert "Attacker input is executed" in prompt or "no_testable_hypotheses" in prompt
 
@@ -490,8 +490,8 @@ def test_linked_workflow_review_uses_shared_rubric(workflow_semantic_case):
     _controller, prompt, _expected = workflow_semantic_case
     assert prompt.count(HYPOTHESIS_SEMANTIC_GUIDANCE) == 1
     assert "literal path" in prompt and "Unrelated resources remain outside" in prompt
-    assert "protected property" in prompt
-    assert "not positive evidence of a vulnerability" in prompt
+    assert "protected property" in " ".join(prompt.split())
+    assert "Successful execution or a different response establishes only what was observed" in prompt
     assert "Do not fetch the live target" in prompt
     assert "actor uses revise_hypothesis" in prompt
     fitted = fit_task_prompt(

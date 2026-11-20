@@ -708,7 +708,7 @@ def test_planning_review_correction_assembled_transport(
     assert "planner_output" in str(model.calls[1])
     assert "Component IDs are" in str(model.calls[1])
     assert "not its source category alone" in str(model.calls[1])
-    assert "phase requirements and applicable procedural details" in str(model.calls[1])
+    assert "phase framing must not promote optional payloads" in str(model.calls[1])
     assert "review_history" in str(model.calls[1])
     for call in model.calls:
         user = str([message for message in call[2] if message["role"] == "user"])
@@ -1299,3 +1299,32 @@ def test_role_system_policy_survives_native_truncation_recovery(runner_factory, 
         assert "CONTROLLER_POLICY" in str(call[-1])
         assert "CONTROLLER_POLICY" not in str([m for m in call[2] if m["role"] == "user"])
         assert "REQUEST_DATA" in str(call[2])
+
+
+def test_phase_framing_keeps_optional_examples_in_authoring_only():
+    from modules.techniques.alignment import AUTHORING_GUIDANCE, phase_guidance
+    from modules.techniques.context import MethodologyContext
+
+    guidance = phase_guidance(MethodologyContext(phase_contexts=["hypothesis_generation"]))
+    assert "Include applicable illustrative payloads and checklists" not in guidance
+    assert "concrete future supporting or refuting checks" in guidance
+    assert "representative payloads" in AUTHORING_GUIDANCE
+
+
+@pytest.mark.parametrize("provider", ["ollama", "bedrock"], ids=["native", "schema-tool"])
+@pytest.mark.parametrize("verdict", ["covered", "conditional", "unmet"])
+def test_bound_selection_uses_real_structured_transport(runner_factory, provider, verdict):
+    from modules.techniques.selection_review import selection_output_model
+
+    row = {
+        "requirement_id": "assigned", "verdict": verdict,
+        "passages": [] if verdict == "unmet" else [{"passage_id": 1}],
+        "explanation": "Mapped the requested procedure",
+        "missing_capability": "After-expiry comparison" if verdict == "unmet" else "",
+    }
+    runner, model = runner_factory([{"reason": "Reviewed", "judgments": [row]}], provider)
+    schema = selection_output_model([{"id": "assigned"}])
+    result = runner.structured("technique_judge", "Map the supplied requirement", schema, [])
+    result.validate_references([{"id": "assigned"}], {1: "Compare expiry states"})
+    assert result.reusable == (verdict != "unmet")
+    assert model.calls[0][0] == ("native" if provider == "ollama" else "tool")

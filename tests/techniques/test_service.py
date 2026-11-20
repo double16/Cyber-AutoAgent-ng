@@ -667,3 +667,59 @@ def test_lookup_review_cache_invalidates_changed_inputs(scripted_service, monkey
         context.methodology_constraints = ["Passive only"]
     service._select(request, context, requirements, reviews=cache)
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("phase", ["reconnaissance", "hypothesis_generation", "execution", "analysis"])
+@pytest.mark.parametrize("covered", [True, False])
+def test_selection_preserves_policy_without_authoring_enrichment(scripted_service, monkeypatch, phase, covered):
+    from modules.techniques.context import MethodologyContext
+
+    service = scripted_service.service
+    revision = scripted_service.publish()
+    context = MethodologyContext(
+        phase_contexts=[phase], methodology_constraints=["Use read-only comparisons"],
+        module_technique_policy=[{"module": "example", "restriction": "Keep reusable methods tool-neutral"}],
+    )
+    prompts = []
+
+    def review(role, prompt, schema):
+        prompts.append(str(prompt))
+        assert "Use read-only comparisons" in str(prompt)
+        assert "Keep reusable methods tool-neutral" in str(prompt)
+        assert "Names, framework labels" in str(prompt)
+        assert "Required-source obligations" not in str(prompt)
+        assert "Encourage applicable examples" not in str(prompt)
+        assert "Judge completeness against" not in str(prompt)
+        return review_response(prompt, covered)
+
+    monkeypatch.setattr(service, "_json", review)
+    monkeypatch.setattr(service, "_candidates", lambda *_args: [{"revision_id": revision}])
+    assert service._select("Review token validation", context) == (revision if covered else None)
+    assert len(prompts) == 1
+
+
+@pytest.mark.parametrize("inherited", [False, True])
+@pytest.mark.parametrize("method_request", ["Assess input handling", "Assess input handling with a payload checklist"])
+def test_get_keeps_selection_request_unenriched(scripted_service, monkeypatch, inherited, method_request):
+    from modules.techniques.alignment import RequestAlignment
+    from modules.techniques.context import MethodologyContext
+
+    service = scripted_service.service
+    context = MethodologyContext(phase_contexts=["hypothesis_generation"])
+    alignment = RequestAlignment(
+        original_request=method_request,
+        adjusted_request=f"{method_request} with illustrative payloads and a summary table",
+    )
+    if inherited:
+        context._request_alignment = alignment
+    monkeypatch.setattr("modules.techniques.service.align_request", lambda *_: (alignment, context))
+    requests = []
+
+    def get(request, *_args, **_kwargs):
+        requests.append(request)
+        return "revision", "document"
+
+    monkeypatch.setattr(service, "_get", get)
+    revision, _ = service.get(method_request, context)
+    assert revision == "revision"
+    assert requests == [method_request]

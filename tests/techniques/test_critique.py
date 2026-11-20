@@ -958,11 +958,11 @@ def test_assembled_assessor_requires_independent_outcome_derivation(scripted_ser
     assess(scripted_service.service, "Review", "An unexpired reusable credential succeeds again", REQS, DOCS, [URL])
     assert len(prompts) == 1
     assert "First derive legitimate and prohibited outcomes" in prompts[0]
-    assert "Calling a check a future hypothesis does not excuse misclassifying legitimate behavior" in prompts[0]
-    assert "specify how to establish policy through documentation" in prompts[0]
-    assert "a valid reusable credential can legitimately succeed repeatedly" in prompts[0]
-    assert "reuse inside its valid window" in prompts[0]
-    assert "freshness-limit event to have occurred" in prompts[0]
+    assert "Interpret each procedure where it labels an outcome" in prompts[0]
+    assert "Establish relevant policy from documentation" in prompts[0]
+    assert "Repeated use of a valid credential" in prompts[0]
+    assert "restriction that actually applies" in prompts[0]
+    assert "expiry, revocation, nonce-consumption or freshness restriction" in prompts[0]
 
 
 @pytest.mark.parametrize("recover", [False, True])
