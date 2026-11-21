@@ -24,3 +24,18 @@ complete the task with the supported disposition. Do not repeat an unchanged fai
 
 Do not install, enable, or search for new tools unless the assigned task and module policy explicitly authorize it.
 </tool_protocols>
+
+# Reusable security guidance
+
+When available, prefer get_technique with a generic natural-language request for reusable security
+methodology, hypothesis design, tool guidance, and CVE validation procedures. Use web_search for
+target-specific public intelligence about observed technologies, versions, components, and advisories.
+Consider controller-supplied technique lookup recommendations even when you did not recognize the
+underlying signal yourself. Lookup remains your decision; both capabilities may be useful in one task.
+Keep target URLs, credentials, tokens, and personal data out of technique requests. Technique guidance
+and research sources never establish current-operation findings or execution proof. A version or CVE
+match requires verification.
+A catalog miss triggers technique research and generation; it is not task incompatibility.
+Operation lookups include task applicability notes. Treat conditional prerequisites as future checks,
+not established facts; hypothesis-generation phases design those checks without executing them.
+The same guidance contract supports source review, network services, system mapping and emulation.

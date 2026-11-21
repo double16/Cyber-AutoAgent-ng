@@ -1,0 +1,60 @@
+{
+  "full_suite": {
+    "passed": 8246,
+    "skipped": 46,
+    "deselected": 89,
+    "coverage_floor": "passed",
+    "log": "/private/tmp/promoted-review-full-coverage.log"
+  },
+  "final_focused_suite": {
+    "passed": 205,
+    "coverage": {
+      "src/modules/agents/review_evidence_ids.py": {
+        "statements": 100.0,
+        "branches": 100.0
+      },
+      "src/modules/agents/hypothesis_review.py": {
+        "statements": 99.03536977491962,
+        "branches": 98.35164835164835
+      },
+      "src/modules/agents/structured_outputs.py": {
+        "statements": 98.13953488372093,
+        "branches": 86.36363636363636
+      },
+      "src/modules/agents/multi_agent_workflow.py": {
+        "statements": 0.0,
+        "branches": 0.0
+      },
+      "src/modules/techniques/matching.py": {
+        "statements": 99.02912621359224,
+        "branches": 91.17647058823529
+      }
+    }
+  },
+  "research_harness": {
+    "passed": 21,
+    "coverage_json": "/private/tmp/promoted-review-research-coverage.json"
+  },
+  "checks": {
+    "ruff": "passed",
+    "whitespace": "passed"
+  },
+  "promotion": {
+    "evidence_ids": "retained",
+    "evidence_first_assembly": "retained"
+  },
+  "model_jobs": "complete",
+  "source_sha256": {
+    "src/modules/agents/review_evidence_ids.py": "6064448138b902a6e05b828308a4d7d37ca1922320c599c2df66677bd603ad00",
+    "src/modules/agents/hypothesis_review.py": "8adc5058b2162c9a991642575be3667f4f93f1648f6320b55698138a7d338c43",
+    "src/modules/agents/structured_outputs.py": "2830911f8766c4b5266884dc2e1070334b142ac63e235fc6b0b7c26332d353ec",
+    "src/modules/agents/multi_agent_workflow.py": "d9deb4ec23b956dbc93080e2cc3127d63184c3c9fb4a2fae0ad50db57183b9aa",
+    "src/modules/techniques/matching.py": "2d19faa18a67168c94068aafd1bf759751bf354f1c0b4f9983950ca493d4c246"
+  },
+  "limitations": [
+    "Six synthetic cases, three repetitions per arm; fixed baseline-first order.",
+    "Replay validation occurred while temporary journals existed; use persisted controller-pilot receipts for audit.",
+    "Injected native runner in the two-case controller pilot; not a full operation or actor-repair cycle.",
+    "Broader authorship quality, target outcomes and useful adoption remain unproven."
+  ]
+}

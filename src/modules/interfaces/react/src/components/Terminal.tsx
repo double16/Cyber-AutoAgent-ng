@@ -551,7 +551,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
       event.type === 'tool_input_update' ||
       event.type === 'tool_input_corrected' ||
       event.type === 'tool_output' ||
-      event.type === 'output'
+      event.type === 'output' ||
+      String(event.type).startsWith('technique_')
     ))
   );
   const isCompletionPhaseEvent = (event: DisplayStreamEvent): boolean => (

@@ -1,0 +1,1127 @@
+{
+  "status": "failed",
+  "provider": "ollama",
+  "model": "muse-glimmer:30b",
+  "runtime_identity": "13223f87e76f1e83761277f3ee26d0936546378df227a8c9385af4a2811a6f46",
+  "runtime_identity_rechecked": true,
+  "counts": {
+    "limit": 21,
+    "requests": 16,
+    "roles": 7
+  },
+  "prior_live_requests": 196,
+  "cumulative_live_requests": 212,
+  "running": false,
+  "model_input_sizes": [
+    {
+      "role": "technique_critic",
+      "input_tokens": 9570,
+      "prompt_limit": 40000
+    },
+    {
+      "role": "technique_critic",
+      "input_tokens": 8797,
+      "prompt_limit": 40000
+    },
+    {
+      "role": "technique_critic",
+      "input_tokens": 11273,
+      "prompt_limit": 40000
+    },
+    {
+      "role": "technique_critique_assessor",
+      "input_tokens": 6925,
+      "prompt_limit": 40000
+    },
+    {
+      "role": "technique_critique_assessor",
+      "input_tokens": 11031,
+      "prompt_limit": 40000
+    },
+    {
+      "role": "technique_critique_assessor",
+      "input_tokens": 6651,
+      "prompt_limit": 40000
+    },
+    {
+      "role": "technique_critique_assessor",
+      "input_tokens": 10314,
+      "prompt_limit": 40000
+    },
+    {
+      "role": "technique_critic",
+      "input_tokens": 10059,
+      "prompt_limit": 40000
+    },
+    {
+      "role": "technique_critic",
+      "input_tokens": 10667,
+      "prompt_limit": 40000
+    },
+    {
+      "role": "technique_critique_assessor",
+      "input_tokens": 7448,
+      "prompt_limit": 40000
+    },
+    {
+      "role": "technique_critique_assessor",
+      "input_tokens": 11065,
+      "prompt_limit": 40000
+    },
+    {
+      "role": "technique_critic",
+      "input_tokens": 7444,
+      "prompt_limit": 40000
+    },
+    {
+      "role": "technique_critic",
+      "input_tokens": 6938,
+      "prompt_limit": 40000
+    },
+    {
+      "role": "technique_critic",
+      "input_tokens": 7904,
+      "prompt_limit": 40000
+    },
+    {
+      "role": "technique_critique_assessor",
+      "input_tokens": 5316,
+      "prompt_limit": 40000
+    },
+    {
+      "role": "technique_critique_assessor",
+      "input_tokens": 8075,
+      "prompt_limit": 40000
+    }
+  ],
+  "cases": [
+    {
+      "case": "00-human-network",
+      "outcome": {
+        "status": "unresolved",
+        "error_type": "ValueError",
+        "error": "Critique assessment failed after one correction: IssueAssessment contract failed for technique_critique_assessor after one correction: Failed to parse or validate native structured content: review_changes.0.replacement: Value error, Boundary or legacy-unclassified checks require boolean counterexample judgments [value_error]; review_changes.1.replacement: Value error, Boundary or legacy-unclassified checks require boolean counterexample judgments [value_error]; review_changes.2.replacement: Value error, Boundary or legacy-unclassified checks require boolean counterexample judgments [value_error]; review_changes.3.replacement: Value error, Boundary or legacy-unclassified checks require boolean counterexample judgments [value_error]",
+        "counts": {
+          "limit": 21,
+          "requests": 7,
+          "roles": 3
+        }
+      },
+      "independent_assessments": [],
+      "controller_events": [
+        {
+          "timestamp": "2026-11-06T17:12:47.983035+00:00",
+          "run_id": "eecd5daf-02f8-4841-a599-f97bd5039351",
+          "stage": "critique",
+          "status": "review_snapshot",
+          "snapshot_id": "a0191fe62909d3ad75eccd6fde2e7a60995e3dd3cd9adca65a4b7c49d0983698",
+          "draft_reference_count": 78,
+          "type": "technique_build_progress",
+          "level": "info"
+        },
+        {
+          "timestamp": "2026-11-06T17:20:02.039635+00:00",
+          "run_id": "eecd5daf-02f8-4841-a599-f97bd5039351",
+          "stage": "critique",
+          "status": "issues_validated",
+          "snapshot_id": "a0191fe62909d3ad75eccd6fde2e7a60995e3dd3cd9adca65a4b7c49d0983698",
+          "issues": [
+            {
+              "id": "issue-1",
+              "category": "authored_content",
+              "criterion_id": "core:technical_support",
+              "material_impact": "The statefulness control asserts that subsequent packets follow state and do not re-evaluate policy, an asserted factual mechanism about pf behavior that is not supported by the retained excerpts. This undermines the advertised operational sufficiency of the reusable method.",
+              "problem": "Unsupported factual mechanism about stateful packet handling: the draft states 'verify subsequent packets follow state, not re-evaluate policy' without retained support.",
+              "requested_correction": "Remove or qualify the claim to only what is supported by retained sources, e.g., observe first-packet state entry creation, and note that subsequent handling behavior must be established during future application with target-specific evidence.",
+              "requirement_ids": [
+                "method"
+              ],
+              "source_urls": [
+                "https://man.openbsd.org/pf.conf"
+              ],
+              "draft_references": [
+                "da0191fe62909:b38"
+              ],
+              "absence_scope": "inspected_passages",
+              "draft_excerpt": "- **Statefulness control**: Observe first-packet state creation on pass and verify subsequent packets follow state, not re-evaluate policy.",
+              "passage_ids": [
+                "bebc0239c72c87fd30b739ed0ac19e28b0c2077e70aa6c0d2f1e298eccd92bb1"
+              ],
+              "passages": [
+                {
+                  "url": "https://man.openbsd.org/pf.conf",
+                  "start": 0,
+                  "end": 146
+                }
+              ],
+              "absence_of_support": "Retained excerpts provide 'the last matching rule decides what action is taken' and 'the first time a packet matches a pass rule, a state entry is created.' No retained passage supports the claim that subsequent packets follow state and do not re-evaluate policy."
+            }
+          ],
+          "source_inspection": [
+            {
+              "url": "https://man.openbsd.org/pf.conf",
+              "characters": 146,
+              "inspected_intervals": [
+                [
+                  0,
+                  146
+                ]
+              ]
+            }
+          ],
+          "type": "technique_build_progress",
+          "level": "info"
+        },
+        {
+          "timestamp": "2026-11-06T17:25:29.752041+00:00",
+          "run_id": "eecd5daf-02f8-4841-a599-f97bd5039351",
+          "stage": "critique_assessment",
+          "status": "control_references_resolved",
+          "snapshot_id": "a0191fe62909d3ad75eccd6fde2e7a60995e3dd3cd9adca65a4b7c49d0983698",
+          "interpretation_index": 0,
+          "provided_references": [
+            "da0191fe62909:b36"
+          ],
+          "resolved_references": [
+            "da0191fe62909:b36"
+          ],
+          "resolved_records": [
+            {
+              "reference": "da0191fe62909:b36",
+              "path": "body.line[36]",
+              "value": "- **Identity isolation control**: Repeat test with a different identity that should map to a different policy outcome to verify binding is effective."
+            }
+          ],
+          "correction_number": 0,
+          "type": "technique_build_progress",
+          "level": "info"
+        },
+        {
+          "timestamp": "2026-11-06T17:25:29.752560+00:00",
+          "run_id": "eecd5daf-02f8-4841-a599-f97bd5039351",
+          "stage": "critique_assessment",
+          "status": "control_references_resolved",
+          "snapshot_id": "a0191fe62909d3ad75eccd6fde2e7a60995e3dd3cd9adca65a4b7c49d0983698",
+          "interpretation_index": 1,
+          "provided_references": [
+            "da0191fe62909:b37"
+          ],
+          "resolved_references": [
+            "da0191fe62909:b37"
+          ],
+          "resolved_records": [
+            {
+              "reference": "da0191fe62909:b37",
+              "path": "body.line[37]",
+              "value": "- **Order sensitivity control**: If policy allows, test with a non-matching rule preceding a matching rule to confirm last-matching-rule precedence."
+            }
+          ],
+          "correction_number": 0,
+          "type": "technique_build_progress",
+          "level": "info"
+        },
+        {
+          "timestamp": "2026-11-06T17:25:29.753011+00:00",
+          "run_id": "eecd5daf-02f8-4841-a599-f97bd5039351",
+          "stage": "critique_assessment",
+          "status": "control_references_resolved",
+          "snapshot_id": "a0191fe62909d3ad75eccd6fde2e7a60995e3dd3cd9adca65a4b7c49d0983698",
+          "interpretation_index": 2,
+          "provided_references": [
+            "da0191fe62909:b38"
+          ],
+          "resolved_references": [
+            "da0191fe62909:b38"
+          ],
+          "resolved_records": [
+            {
+              "reference": "da0191fe62909:b38",
+              "path": "body.line[38]",
+              "value": "- **Statefulness control**: Observe first-packet state creation on pass and verify subsequent packets follow state, not re-evaluate policy."
+            }
+          ],
+          "correction_number": 0,
+          "type": "technique_build_progress",
+          "level": "info"
+        },
+        {
+          "timestamp": "2026-11-06T17:25:29.753441+00:00",
+          "run_id": "eecd5daf-02f8-4841-a599-f97bd5039351",
+          "stage": "critique_assessment",
+          "status": "control_references_resolved",
+          "snapshot_id": "a0191fe62909d3ad75eccd6fde2e7a60995e3dd3cd9adca65a4b7c49d0983698",
+          "interpretation_index": 3,
+          "provided_references": [
+            "da0191fe62909:b39"
+          ],
+          "resolved_references": [
+            "da0191fe62909:b39"
+          ],
+          "resolved_records": [
+            {
+              "reference": "da0191fe62909:b39",
+              "path": "body.line[39]",
+              "value": "- **Negative control**: Test a known denied identity-service pair to confirm denial is observable."
+            }
+          ],
+          "correction_number": 0,
+          "type": "technique_build_progress",
+          "level": "info"
+        },
+        {
+          "timestamp": "2026-11-06T17:25:29.753801+00:00",
+          "run_id": "eecd5daf-02f8-4841-a599-f97bd5039351",
+          "stage": "critique_assessment",
+          "status": "failed",
+          "originating_role": "technique_critique_assessor",
+          "expected_schema": "IssueAssessment",
+          "failure_kind": "contract",
+          "correction_number": 0,
+          "type": "technique_build_progress",
+          "level": "warning"
+        },
+        {
+          "timestamp": "2026-11-06T17:31:33.432758+00:00",
+          "run_id": "eecd5daf-02f8-4841-a599-f97bd5039351",
+          "stage": "critique_assessment",
+          "status": "failed",
+          "originating_role": "technique_critique_assessor",
+          "expected_schema": "IssueAssessment",
+          "failure_kind": "contract",
+          "correction_number": 1,
+          "type": "technique_build_progress",
+          "level": "warning"
+        }
+      ],
+      "provider_requests": [
+        {
+          "reference": "outputs/technique_review_trials/nested-review-live-20261106-1/live/00-human-network/provider-request-01.json",
+          "sha256": "d90e518b5494aca2d5fd0d9715141b61076b4e1db4edaaf86d19a47e4df31a73",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/nested-review-live-20261106-1/live/00-human-network/provider-request-02.json",
+          "sha256": "7289330ed1e18092e08a054d429bfecff1181201cc346a3bd5276ff1af5830a9",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/nested-review-live-20261106-1/live/00-human-network/provider-request-03.json",
+          "sha256": "c4807c38c8d93a4ec353b0184127b23ca39dba4e08418c328f5856612cdcb09f",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": "structured_schema"
+        },
+        {
+          "reference": "outputs/technique_review_trials/nested-review-live-20261106-1/live/00-human-network/provider-request-04.json",
+          "sha256": "80025179f2b91e414d30fc0e9db2640df37d1f775da5df22b204ae44b996e1b5",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/nested-review-live-20261106-1/live/00-human-network/provider-request-05.json",
+          "sha256": "5d0c7ca9ea386e5ac4470f430ab6e2984d119b34b42b64f6c89f1b5a38fd982a",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": "structured_schema"
+        },
+        {
+          "reference": "outputs/technique_review_trials/nested-review-live-20261106-1/live/00-human-network/provider-request-06.json",
+          "sha256": "e6a4f77618e468d6990a1bc8d3406d7b35cd67a1a4655d03605fe219b9bd4c34",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/nested-review-live-20261106-1/live/00-human-network/provider-request-07.json",
+          "sha256": "560543214d22850cfd2945da956f51f74bb901a9e02a4c014708ab99932aa933",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": "structured_schema"
+        }
+      ],
+      "outcome_sha256": "806fc52e7414ba4ea289b3a9d566442e549adab9578adbefa09e8e17fa17e029"
+    },
+    {
+      "case": "01-human-filesystem",
+      "outcome": {
+        "status": "completed",
+        "review": {
+          "approved": true,
+          "decision_origin": "controller_findings",
+          "issue_dispositions": [],
+          "category": "authored_content",
+          "reason": "The draft provides a reusable, source-grounded read-access comparison methodology that establishes policy, process identity, allowed/denied controls and evidence requirements, with source support for Linux open(2) permission and denial semantics. The methodology is framed as advisory design without target execution. The request to make clear that the methodology tests file read access and identifies the file objects being read is satisfied by the applicability statement for Linux file read access evaluation and by explicit prerequisites and evidence requirements referencing object identifier/path/permission state. No material unsupported factual claims or missing deliverables are identified.",
+          "issues": [],
+          "suggestions": [],
+          "interpretations": [
+            {
+              "check_purpose": "prerequisite",
+              "draft_references": [
+                "d64288cb04697:b8",
+                "d64288cb04697:b21",
+                "d64288cb04697:b22"
+              ],
+              "prerequisite_or_policy": "Established policy source identified and documented specifying which process identities are authorized to read which objects under which conditions; policy reference and version recorded.",
+              "legitimate_outcome": "Policy is documented and the explicit read permission requirement for the object and mapping of identities to allowed/denied is recorded.",
+              "suspected_violation": "Not applicable; prerequisite establishment step.",
+              "distinguishing_control": "Retrieve authoritative policy documentation/configuration or independently known authorization baseline for the object and record explicit read permission requirement and identity mapping."
+            },
+            {
+              "check_purpose": "prerequisite",
+              "draft_references": [
+                "d64288cb04697:b26",
+                "d64288cb04697:b27"
+              ],
+              "prerequisite_or_policy": "Actual process identity resolution method known in principle, e.g., UID/GID, capabilities, SELinux/AppArmor context.",
+              "legitimate_outcome": "Identity attributes that will be used for comparison are recorded.",
+              "suspected_violation": "Not applicable; prerequisite establishment step.",
+              "distinguishing_control": "Determine how actual process identity is resolved in the target environment and record the identity attributes used for comparison."
+            },
+            {
+              "check_purpose": "legitimate_behavior",
+              "draft_references": [
+                "d64288cb04697:b30",
+                "d64288cb04697:b37"
+              ],
+              "prerequisite_or_policy": "Policy states read is permitted for the test process identity for the identified object.",
+              "legitimate_outcome": "Access succeeds if policy permits and caller has read permission on the object. Source support: Linux open(2) requires caller have read permission on the object for read access.",
+              "suspected_violation": "No violation expected under allowed control.",
+              "distinguishing_control": "Allowed control configuration where policy permits read for chosen identity; evidence set includes process identity attributes, requested access mode, kernel return code/error message, timestamp and object identifier."
+            },
+            {
+              "check_purpose": "legitimate_behavior",
+              "draft_references": [
+                "d64288cb04697:b40",
+                "d64288cb04697:b43"
+              ],
+              "prerequisite_or_policy": "Policy states read is prohibited for the test process identity for the identified object.",
+              "legitimate_outcome": "Access is denied. Source support: Linux open(2) documents that requested access to the file is not allowed when permission is lacking.",
+              "suspected_violation": "No violation expected under denied control.",
+              "distinguishing_control": "Denied control configuration where policy prohibits read for chosen identity; same evidence set as allowed control collected for comparison."
+            },
+            {
+              "check_purpose": "boundary_violation",
+              "draft_references": [
+                "d64288cb04697:b46",
+                "d64288cb04697:b51",
+                "d64288cb04697:b66"
+              ],
+              "prerequisite_or_policy": "Established policy with allowed and denied identities for a constant object.",
+              "legitimate_outcome": "Allowed identity + allowed control \u2192 success expected; denied identity + denied control \u2192 denial expected; cross combinations verify identity binding.",
+              "suspected_violation": "Outcome contradicts established policy for observed identity, e.g., denied identity succeeds or allowed identity is denied.",
+              "distinguishing_control": "Keep object and policy constant, vary process identity between allowed and denied identities; record divergence from expected outcomes as design artifact for future validation with evidence requirements."
+            }
+          ],
+          "no_security_checks_reason": ""
+        },
+        "counts": {
+          "limit": 21,
+          "requests": 11,
+          "roles": 5
+        }
+      },
+      "independent_assessments": [
+        {
+          "timestamp": "2026-11-06T17:43:03.217227+00:00",
+          "run_id": "8f696352-481c-4e04-9cd7-cb54549e2778",
+          "stage": "critique_assessment",
+          "status": "assessed",
+          "snapshot_id": "64288cb0469771ccec102314ac93c998c2beb44a91ea2ebc8b1df9e2761a4b1d",
+          "proposed_decision": true,
+          "assessment": {
+            "interpretation_reviews": [
+              {
+                "check_purpose": "prerequisite",
+                "interpretation_index": 0,
+                "draft_references": [
+                  "d64288cb04697:b8",
+                  "d64288cb04697:b21",
+                  "d64288cb04697:b22"
+                ],
+                "permitted_counterexample": "For a prerequisite establishment check no boundary violation is claimed; counterexample analysis is not applicable.",
+                "counterexample_matches_check": null,
+                "control_excludes_counterexample": null,
+                "control_references": [],
+                "actual_discriminator": "",
+                "critic_correct": true
+              },
+              {
+                "check_purpose": "prerequisite",
+                "interpretation_index": 1,
+                "draft_references": [
+                  "d64288cb04697:b26",
+                  "d64288cb04697:b27"
+                ],
+                "permitted_counterexample": "For a prerequisite establishment check no boundary violation is claimed; counterexample analysis is not applicable.",
+                "counterexample_matches_check": null,
+                "control_excludes_counterexample": null,
+                "control_references": [],
+                "actual_discriminator": "",
+                "critic_correct": true
+              },
+              {
+                "check_purpose": "legitimate_behavior",
+                "interpretation_index": 2,
+                "draft_references": [
+                  "d64288cb04697:b30",
+                  "d64288cb04697:b37"
+                ],
+                "permitted_counterexample": "For a legitimate-behavior check no violation is claimed; counterexample analysis is not applicable.",
+                "counterexample_matches_check": null,
+                "control_excludes_counterexample": null,
+                "control_references": [],
+                "actual_discriminator": "",
+                "critic_correct": true
+              },
+              {
+                "check_purpose": "legitimate_behavior",
+                "interpretation_index": 3,
+                "draft_references": [
+                  "d64288cb04697:b40",
+                  "d64288cb04697:b43"
+                ],
+                "permitted_counterexample": "For a legitimate-behavior check no violation is claimed; counterexample analysis is not applicable.",
+                "counterexample_matches_check": null,
+                "control_excludes_counterexample": null,
+                "control_references": [],
+                "actual_discriminator": "",
+                "critic_correct": true
+              },
+              {
+                "check_purpose": "boundary_violation",
+                "interpretation_index": 4,
+                "draft_references": [
+                  "d64288cb04697:b46",
+                  "d64288cb04697:b51",
+                  "d64288cb04697:b66"
+                ],
+                "permitted_counterexample": "Observation held constant: outcome contradicts established policy for observed identity, e.g., denied identity succeeds. A policy-compliant scenario with the same observation would require the established policy to actually permit the denied identity to succeed, which contradicts the explicit prerequisite that policy states read is prohibited for that identity. No permitted scenario can satisfy both the prerequisite of an established prohibited identity and the exact suspicious observation of success.",
+                "counterexample_matches_check": false,
+                "control_excludes_counterexample": false,
+                "control_references": [
+                  "d64288cb04697:b46",
+                  "d64288cb04697:b51",
+                  "d64288cb04697:b66"
+                ],
+                "actual_discriminator": "Keep object and policy constant, vary process identity between allowed and denied identities; record divergence from expected outcomes as a design artifact for future validation.",
+                "critic_correct": true
+              }
+            ],
+            "critic_supported": true,
+            "reason": "The draft provides a reusable read-access comparison methodology with established policy, process identity, allowed/denied controls and evidence requirements. Applicability states Linux file read access evaluation and prerequisites/evidence reference object identifier/path/permission state, satisfying the human_file_subject deliverable. Interpretation reviews show prerequisite and legitimate-behavior checks are correctly classified with no violation claimed, and the boundary-violation check is framed as a hypothesis requiring future validation with the stated identity-variation control. No material unsupported factual claim or missing requested deliverable is identified under the frozen acceptance criteria.",
+            "findings": []
+          },
+          "correction_number": 0,
+          "final_disposition": "accepted",
+          "type": "technique_build_progress",
+          "level": "info"
+        }
+      ],
+      "controller_events": [
+        {
+          "timestamp": "2026-11-06T17:31:38.421028+00:00",
+          "run_id": "8f696352-481c-4e04-9cd7-cb54549e2778",
+          "stage": "critique",
+          "status": "review_snapshot",
+          "snapshot_id": "64288cb0469771ccec102314ac93c998c2beb44a91ea2ebc8b1df9e2761a4b1d",
+          "draft_reference_count": 97,
+          "type": "technique_build_progress",
+          "level": "info"
+        },
+        {
+          "timestamp": "2026-11-06T17:37:16.290984+00:00",
+          "run_id": "8f696352-481c-4e04-9cd7-cb54549e2778",
+          "stage": "critique",
+          "status": "issues_validated",
+          "snapshot_id": "64288cb0469771ccec102314ac93c998c2beb44a91ea2ebc8b1df9e2761a4b1d",
+          "issues": [],
+          "source_inspection": [
+            {
+              "url": "https://man7.org/linux/man-pages/man2/open.2.html",
+              "characters": 132,
+              "inspected_intervals": []
+            }
+          ],
+          "type": "technique_build_progress",
+          "level": "info"
+        },
+        {
+          "timestamp": "2026-11-06T17:43:03.215822+00:00",
+          "run_id": "8f696352-481c-4e04-9cd7-cb54549e2778",
+          "stage": "critique_assessment",
+          "status": "control_references_resolved",
+          "snapshot_id": "64288cb0469771ccec102314ac93c998c2beb44a91ea2ebc8b1df9e2761a4b1d",
+          "interpretation_index": 4,
+          "provided_references": [
+            "d64288cb04697:b46",
+            "d64288cb04697:b51",
+            "d64288cb04697:b66"
+          ],
+          "resolved_references": [
+            "d64288cb04697:b46",
+            "d64288cb04697:b51",
+            "d64288cb04697:b66"
+          ],
+          "resolved_records": [
+            {
+              "reference": "d64288cb04697:b46",
+              "path": "body.line[46]",
+              "value": "5.1 Keep object and policy constant, vary process identity between allowed and denied identities."
+            },
+            {
+              "reference": "d64288cb04697:b51",
+              "path": "body.line[51]",
+              "value": "5.3 Record divergence from expected outcomes as a design artifact for future validation."
+            },
+            {
+              "reference": "d64288cb04697:b66",
+              "path": "body.line[66]",
+              "value": "- Boundary violation hypothesis: outcome contradicts established policy for the observed identity. Requires future validation with additional controls and evidence."
+            }
+          ],
+          "correction_number": 0,
+          "type": "technique_build_progress",
+          "level": "info"
+        },
+        {
+          "timestamp": "2026-11-06T17:43:03.217227+00:00",
+          "run_id": "8f696352-481c-4e04-9cd7-cb54549e2778",
+          "stage": "critique_assessment",
+          "status": "assessed",
+          "snapshot_id": "64288cb0469771ccec102314ac93c998c2beb44a91ea2ebc8b1df9e2761a4b1d",
+          "proposed_decision": true,
+          "assessment": {
+            "interpretation_reviews": [
+              {
+                "check_purpose": "prerequisite",
+                "interpretation_index": 0,
+                "draft_references": [
+                  "d64288cb04697:b8",
+                  "d64288cb04697:b21",
+                  "d64288cb04697:b22"
+                ],
+                "permitted_counterexample": "For a prerequisite establishment check no boundary violation is claimed; counterexample analysis is not applicable.",
+                "counterexample_matches_check": null,
+                "control_excludes_counterexample": null,
+                "control_references": [],
+                "actual_discriminator": "",
+                "critic_correct": true
+              },
+              {
+                "check_purpose": "prerequisite",
+                "interpretation_index": 1,
+                "draft_references": [
+                  "d64288cb04697:b26",
+                  "d64288cb04697:b27"
+                ],
+                "permitted_counterexample": "For a prerequisite establishment check no boundary violation is claimed; counterexample analysis is not applicable.",
+                "counterexample_matches_check": null,
+                "control_excludes_counterexample": null,
+                "control_references": [],
+                "actual_discriminator": "",
+                "critic_correct": true
+              },
+              {
+                "check_purpose": "legitimate_behavior",
+                "interpretation_index": 2,
+                "draft_references": [
+                  "d64288cb04697:b30",
+                  "d64288cb04697:b37"
+                ],
+                "permitted_counterexample": "For a legitimate-behavior check no violation is claimed; counterexample analysis is not applicable.",
+                "counterexample_matches_check": null,
+                "control_excludes_counterexample": null,
+                "control_references": [],
+                "actual_discriminator": "",
+                "critic_correct": true
+              },
+              {
+                "check_purpose": "legitimate_behavior",
+                "interpretation_index": 3,
+                "draft_references": [
+                  "d64288cb04697:b40",
+                  "d64288cb04697:b43"
+                ],
+                "permitted_counterexample": "For a legitimate-behavior check no violation is claimed; counterexample analysis is not applicable.",
+                "counterexample_matches_check": null,
+                "control_excludes_counterexample": null,
+                "control_references": [],
+                "actual_discriminator": "",
+                "critic_correct": true
+              },
+              {
+                "check_purpose": "boundary_violation",
+                "interpretation_index": 4,
+                "draft_references": [
+                  "d64288cb04697:b46",
+                  "d64288cb04697:b51",
+                  "d64288cb04697:b66"
+                ],
+                "permitted_counterexample": "Observation held constant: outcome contradicts established policy for observed identity, e.g., denied identity succeeds. A policy-compliant scenario with the same observation would require the established policy to actually permit the denied identity to succeed, which contradicts the explicit prerequisite that policy states read is prohibited for that identity. No permitted scenario can satisfy both the prerequisite of an established prohibited identity and the exact suspicious observation of success.",
+                "counterexample_matches_check": false,
+                "control_excludes_counterexample": false,
+                "control_references": [
+                  "d64288cb04697:b46",
+                  "d64288cb04697:b51",
+                  "d64288cb04697:b66"
+                ],
+                "actual_discriminator": "Keep object and policy constant, vary process identity between allowed and denied identities; record divergence from expected outcomes as a design artifact for future validation.",
+                "critic_correct": true
+              }
+            ],
+            "critic_supported": true,
+            "reason": "The draft provides a reusable read-access comparison methodology with established policy, process identity, allowed/denied controls and evidence requirements. Applicability states Linux file read access evaluation and prerequisites/evidence reference object identifier/path/permission state, satisfying the human_file_subject deliverable. Interpretation reviews show prerequisite and legitimate-behavior checks are correctly classified with no violation claimed, and the boundary-violation check is framed as a hypothesis requiring future validation with the stated identity-variation control. No material unsupported factual claim or missing requested deliverable is identified under the frozen acceptance criteria.",
+            "findings": []
+          },
+          "correction_number": 0,
+          "final_disposition": "accepted",
+          "type": "technique_build_progress",
+          "level": "info"
+        }
+      ],
+      "provider_requests": [
+        {
+          "reference": "outputs/technique_review_trials/nested-review-live-20261106-1/live/01-human-filesystem/provider-request-08.json",
+          "sha256": "fce234a20805e68f0c92f7551fbeb9feb3b22f9aa0e8d83e8199c171d523425c",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/nested-review-live-20261106-1/live/01-human-filesystem/provider-request-09.json",
+          "sha256": "4c084028cce1d7e8043a1f08971a3f285fa780b291ac6ea6973156438033def1",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": "structured_schema"
+        },
+        {
+          "reference": "outputs/technique_review_trials/nested-review-live-20261106-1/live/01-human-filesystem/provider-request-10.json",
+          "sha256": "4f58517ba69c4317a20c66504b27010677bf3cb1094222fbc27aded08ff14519",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/nested-review-live-20261106-1/live/01-human-filesystem/provider-request-11.json",
+          "sha256": "e94b5932a56addc21d20b4f26c6a58ce9a063b554eaad1bef4019ae0023a289d",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": "structured_schema"
+        }
+      ],
+      "outcome_sha256": "53770b738b4064311a8e69ebd6f636b40988bd5d141920e30eff711773f0a0ef"
+    },
+    {
+      "case": "02-http-selector",
+      "outcome": {
+        "status": "completed",
+        "review": {
+          "approved": false,
+          "decision_origin": "controller_findings",
+          "issue_dispositions": [],
+          "category": "authored_content",
+          "reason": "The draft misclassifies a header change as an authorization violation without establishing entitlement policy and test-object authorization, and it asserts that entitlement need not be established. This defeats the requested reusable method and the interpretation criterion.",
+          "issues": [
+            {
+              "id": "interp-entitlement-missing",
+              "category": "authored_content",
+              "criterion_id": "core:interpretation",
+              "material_impact": "The advertised method claims a header change alone confirms an IDOR, which would label legitimate object selection as a violation and would miss the required policy/entitlement check. The method therefore cannot reliably distinguish legitimate behavior from a boundary violation.",
+              "problem": "Draft states 'If changing the header changes the returned object, that alone confirms an IDOR vulnerability. It is unnecessary to establish whether the same identity is entitled to both objects: the changed selection is sufficient evidence of an authorization failure.' This treats object selection change as proof of authorization failure without establishing that the test identity is not entitled to the second object and without establishing the access-control policy.",
+              "requested_correction": "Require explicit prerequisite establishment of the authorization policy and entitlement baseline for the test identity, and require that the comparison demonstrates access to an object the identity is not entitled to. State that a header change alone is insufficient; the violation is established only when the changed selector returns an object outside the identity's authorized set under the declared policy.",
+              "requirement_ids": [
+                "method"
+              ],
+              "source_urls": [
+                "https://portswigger.net/web-security/access-control/idor"
+              ],
+              "draft_references": [
+                "df57d88e905f7:b17",
+                "df57d88e905f7:b18",
+                "df57d88e905f7:b19"
+              ],
+              "absence_scope": "inspected_passages",
+              "draft_excerpt": "If changing the header changes the returned object, that alone confirms an IDOR vulnerability.\nIt is unnecessary to establish whether the same identity is entitled to both objects: the changed\nselection is sufficient evidence of an authorization failure. Rejecting a missing selector supports",
+              "passage_ids": [
+                "d1d15aec23f3d9f9bc4e85bd8596a5ff6d1e53458817ebfd57af6f30a35b636a"
+              ],
+              "passages": [
+                {
+                  "url": "https://portswigger.net/web-security/access-control/idor",
+                  "start": 0,
+                  "end": 123
+                }
+              ],
+              "absence_of_support": ""
+            }
+          ],
+          "suggestions": [],
+          "interpretations": [
+            {
+              "check_purpose": "boundary_violation",
+              "draft_references": [
+                "df57d88e905f7:b10",
+                "df57d88e905f7:b12",
+                "df57d88e905f7:b17"
+              ],
+              "prerequisite_or_policy": "API contract identifies a request header as an object selector; test identity and two non-sensitive test objects are available. The draft does not require establishing the authorization policy or that the test identity is not entitled to the second object.",
+              "legitimate_outcome": "Changing the selector header may legitimately return a different object if the identity is entitled to both objects under the declared policy.",
+              "suspected_violation": "Draft labels a header change that returns a different object as an IDOR authorization failure.",
+              "distinguishing_control": "Change only the selector to a second object identifier while retaining same identity, endpoint and operation, and record status and returned object identity for both requests; negative control removing selector."
+            }
+          ],
+          "no_security_checks_reason": ""
+        },
+        "counts": {
+          "limit": 21,
+          "requests": 16,
+          "roles": 7
+        }
+      },
+      "independent_assessments": [
+        {
+          "timestamp": "2026-11-06T17:51:52.088828+00:00",
+          "run_id": "54c3696f-cfd2-4348-8cc5-e64c026d1663",
+          "stage": "critique_assessment",
+          "status": "assessed",
+          "snapshot_id": "f57d88e905f7cd4a54126bfdec7332a9c68231db147cf73d1b24e2a3bfa46741",
+          "proposed_decision": false,
+          "assessment": {
+            "interpretation_reviews": [
+              {
+                "check_purpose": "boundary_violation",
+                "interpretation_index": 0,
+                "draft_references": [
+                  "df57d88e905f7:b10",
+                  "df57d88e905f7:b12",
+                  "df57d88e905f7:b17",
+                  "df57d88e905f7:b13",
+                  "df57d88e905f7:b14",
+                  "df57d88e905f7:b18"
+                ],
+                "permitted_counterexample": "Test identity is legitimately entitled to both object A and object B under the declared policy; the API contract identifies the request header as a legitimate object selector for that identity. Changing the selector from A to B while retaining the same identity, endpoint and operation returns B, producing the same observation of a changed returned object.",
+                "counterexample_matches_check": true,
+                "control_excludes_counterexample": false,
+                "control_references": [
+                  "df57d88e905f7:b10",
+                  "df57d88e905f7:b12",
+                  "df57d88e905f7:b13",
+                  "df57d88e905f7:b14",
+                  "df57d88e905f7:b17",
+                  "df57d88e905f7:b18"
+                ],
+                "actual_discriminator": "Procedure steps are: 1. Read the API contract to identify the selector header. Record the test identity, endpoint, operation and both object identifiers. Request the first object using its selector value. 2. Change only the selector to the second object identifier, retaining the same identity, endpoint and operation. Record status and returned object identity for both requests. 3. Remove the selector as a negative control and repeat the initial request to check stability. No step establishes the authorization policy, entitlement baseline for the test identity, or that the identity is not entitled to the second object.",
+                "critic_correct": true
+              }
+            ],
+            "critic_supported": true,
+            "reason": "The critic correctly rejects the draft for misclassifying a header change as an authorization violation without establishing entitlement policy and test-object authorization. The draft unconditionally labels a changed returned object as an IDOR and states it is unnecessary to establish whether the same identity is entitled to both objects. The permitted counterexample of legitimate entitlement to both objects satisfies the stated prerequisites and the exact suspicious observation, and the actual procedure contains no control that excludes this scenario. The critic's issue identifies the concrete defect and requests the required prerequisite establishment and policy-based distinction, matching the independent assessment.",
+            "findings": []
+          },
+          "correction_number": 0,
+          "final_disposition": "accepted",
+          "type": "technique_build_progress",
+          "level": "info"
+        }
+      ],
+      "controller_events": [
+        {
+          "timestamp": "2026-11-06T17:43:07.618411+00:00",
+          "run_id": "54c3696f-cfd2-4348-8cc5-e64c026d1663",
+          "stage": "critique",
+          "status": "review_snapshot",
+          "snapshot_id": "f57d88e905f7cd4a54126bfdec7332a9c68231db147cf73d1b24e2a3bfa46741",
+          "draft_reference_count": 39,
+          "type": "technique_build_progress",
+          "level": "info"
+        },
+        {
+          "timestamp": "2026-11-06T17:47:38.578548+00:00",
+          "run_id": "54c3696f-cfd2-4348-8cc5-e64c026d1663",
+          "stage": "critique",
+          "status": "issues_validated",
+          "snapshot_id": "f57d88e905f7cd4a54126bfdec7332a9c68231db147cf73d1b24e2a3bfa46741",
+          "issues": [
+            {
+              "id": "interp-entitlement-missing",
+              "category": "authored_content",
+              "criterion_id": "core:interpretation",
+              "material_impact": "The advertised method claims a header change alone confirms an IDOR, which would label legitimate object selection as a violation and would miss the required policy/entitlement check. The method therefore cannot reliably distinguish legitimate behavior from a boundary violation.",
+              "problem": "Draft states 'If changing the header changes the returned object, that alone confirms an IDOR vulnerability. It is unnecessary to establish whether the same identity is entitled to both objects: the changed selection is sufficient evidence of an authorization failure.' This treats object selection change as proof of authorization failure without establishing that the test identity is not entitled to the second object and without establishing the access-control policy.",
+              "requested_correction": "Require explicit prerequisite establishment of the authorization policy and entitlement baseline for the test identity, and require that the comparison demonstrates access to an object the identity is not entitled to. State that a header change alone is insufficient; the violation is established only when the changed selector returns an object outside the identity's authorized set under the declared policy.",
+              "requirement_ids": [
+                "method"
+              ],
+              "source_urls": [
+                "https://portswigger.net/web-security/access-control/idor"
+              ],
+              "draft_references": [
+                "df57d88e905f7:b17",
+                "df57d88e905f7:b18",
+                "df57d88e905f7:b19"
+              ],
+              "absence_scope": "inspected_passages",
+              "draft_excerpt": "If changing the header changes the returned object, that alone confirms an IDOR vulnerability.\nIt is unnecessary to establish whether the same identity is entitled to both objects: the changed\nselection is sufficient evidence of an authorization failure. Rejecting a missing selector supports",
+              "passage_ids": [
+                "d1d15aec23f3d9f9bc4e85bd8596a5ff6d1e53458817ebfd57af6f30a35b636a"
+              ],
+              "passages": [
+                {
+                  "url": "https://portswigger.net/web-security/access-control/idor",
+                  "start": 0,
+                  "end": 123
+                }
+              ],
+              "absence_of_support": ""
+            }
+          ],
+          "source_inspection": [
+            {
+              "url": "https://portswigger.net/web-security/access-control/idor",
+              "characters": 123,
+              "inspected_intervals": [
+                [
+                  0,
+                  123
+                ]
+              ]
+            }
+          ],
+          "type": "technique_build_progress",
+          "level": "info"
+        },
+        {
+          "timestamp": "2026-11-06T17:51:52.087562+00:00",
+          "run_id": "54c3696f-cfd2-4348-8cc5-e64c026d1663",
+          "stage": "critique_assessment",
+          "status": "control_references_resolved",
+          "snapshot_id": "f57d88e905f7cd4a54126bfdec7332a9c68231db147cf73d1b24e2a3bfa46741",
+          "interpretation_index": 0,
+          "provided_references": [
+            "df57d88e905f7:b10",
+            "df57d88e905f7:b12",
+            "df57d88e905f7:b17"
+          ],
+          "resolved_references": [
+            "df57d88e905f7:b10",
+            "df57d88e905f7:b12",
+            "df57d88e905f7:b13",
+            "df57d88e905f7:b14",
+            "df57d88e905f7:b17",
+            "df57d88e905f7:b18"
+          ],
+          "resolved_records": [
+            {
+              "reference": "df57d88e905f7:b10",
+              "path": "body.line[10]",
+              "value": "1. Read the API contract to identify the selector header. Record the test identity, endpoint,"
+            },
+            {
+              "reference": "df57d88e905f7:b12",
+              "path": "body.line[12]",
+              "value": "2. Change only the selector to the second object identifier, retaining the same identity, endpoint"
+            },
+            {
+              "reference": "df57d88e905f7:b13",
+              "path": "body.line[13]",
+              "value": "   and operation. Record status and returned object identity for both requests."
+            },
+            {
+              "reference": "df57d88e905f7:b14",
+              "path": "body.line[14]",
+              "value": "3. Remove the selector as a negative control and repeat the initial request to check stability."
+            },
+            {
+              "reference": "df57d88e905f7:b17",
+              "path": "body.line[17]",
+              "value": "If changing the header changes the returned object, that alone confirms an IDOR vulnerability."
+            },
+            {
+              "reference": "df57d88e905f7:b18",
+              "path": "body.line[18]",
+              "value": "It is unnecessary to establish whether the same identity is entitled to both objects: the changed"
+            }
+          ],
+          "correction_number": 0,
+          "type": "technique_build_progress",
+          "level": "info"
+        },
+        {
+          "timestamp": "2026-11-06T17:51:52.088828+00:00",
+          "run_id": "54c3696f-cfd2-4348-8cc5-e64c026d1663",
+          "stage": "critique_assessment",
+          "status": "assessed",
+          "snapshot_id": "f57d88e905f7cd4a54126bfdec7332a9c68231db147cf73d1b24e2a3bfa46741",
+          "proposed_decision": false,
+          "assessment": {
+            "interpretation_reviews": [
+              {
+                "check_purpose": "boundary_violation",
+                "interpretation_index": 0,
+                "draft_references": [
+                  "df57d88e905f7:b10",
+                  "df57d88e905f7:b12",
+                  "df57d88e905f7:b17",
+                  "df57d88e905f7:b13",
+                  "df57d88e905f7:b14",
+                  "df57d88e905f7:b18"
+                ],
+                "permitted_counterexample": "Test identity is legitimately entitled to both object A and object B under the declared policy; the API contract identifies the request header as a legitimate object selector for that identity. Changing the selector from A to B while retaining the same identity, endpoint and operation returns B, producing the same observation of a changed returned object.",
+                "counterexample_matches_check": true,
+                "control_excludes_counterexample": false,
+                "control_references": [
+                  "df57d88e905f7:b10",
+                  "df57d88e905f7:b12",
+                  "df57d88e905f7:b13",
+                  "df57d88e905f7:b14",
+                  "df57d88e905f7:b17",
+                  "df57d88e905f7:b18"
+                ],
+                "actual_discriminator": "Procedure steps are: 1. Read the API contract to identify the selector header. Record the test identity, endpoint, operation and both object identifiers. Request the first object using its selector value. 2. Change only the selector to the second object identifier, retaining the same identity, endpoint and operation. Record status and returned object identity for both requests. 3. Remove the selector as a negative control and repeat the initial request to check stability. No step establishes the authorization policy, entitlement baseline for the test identity, or that the identity is not entitled to the second object.",
+                "critic_correct": true
+              }
+            ],
+            "critic_supported": true,
+            "reason": "The critic correctly rejects the draft for misclassifying a header change as an authorization violation without establishing entitlement policy and test-object authorization. The draft unconditionally labels a changed returned object as an IDOR and states it is unnecessary to establish whether the same identity is entitled to both objects. The permitted counterexample of legitimate entitlement to both objects satisfies the stated prerequisites and the exact suspicious observation, and the actual procedure contains no control that excludes this scenario. The critic's issue identifies the concrete defect and requests the required prerequisite establishment and policy-based distinction, matching the independent assessment.",
+            "findings": []
+          },
+          "correction_number": 0,
+          "final_disposition": "accepted",
+          "type": "technique_build_progress",
+          "level": "info"
+        }
+      ],
+      "provider_requests": [
+        {
+          "reference": "outputs/technique_review_trials/nested-review-live-20261106-1/live/02-http-selector/provider-request-12.json",
+          "sha256": "461ac00afe1902caa4da960349836ccbe666bb384dedddf3ea97100c6279ad9d",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/nested-review-live-20261106-1/live/02-http-selector/provider-request-13.json",
+          "sha256": "a7da6c5079474d50613935d16c3ab5b805c2f05bc9e8f59f0a821c1e2f75b435",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/nested-review-live-20261106-1/live/02-http-selector/provider-request-14.json",
+          "sha256": "0f2acc5cb0f4691e66fcfa224ce68909cd625291f9b2e5027f49b50d22f099dc",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": "structured_schema"
+        },
+        {
+          "reference": "outputs/technique_review_trials/nested-review-live-20261106-1/live/02-http-selector/provider-request-15.json",
+          "sha256": "0b42849e8fd92fa915e4eb8f2b3d1211b52f0444c474fc5e47f5c524dc763b1a",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/nested-review-live-20261106-1/live/02-http-selector/provider-request-16.json",
+          "sha256": "539516f66bdd0b27707596a534b49601cb637f49b5403b5da7818f9970b393bf",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": "structured_schema"
+        }
+      ],
+      "outcome_sha256": "50ba64cfce87226aed4b3b2560e8ae9c8b1ecc14722f5e3ce713f6da4882d084"
+    }
+  ],
+  "nested_critic_correction_exercised": false,
+  "limitations": [
+    "One small sequential trial; no causal or general yield claim.",
+    "Network repair exhausted before any critic correction.",
+    "Filesystem approval conflicts with frozen human adjudication.",
+    "The nested critic mapping contract was not exercised live.",
+    "No code changes during the trial, publication, or active-operation writes."
+  ]
+}

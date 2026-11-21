@@ -30,6 +30,10 @@ services:
       - CYBER_AGENT_LLM_MODEL=${CYBER_AGENT_LLM_MODEL:-}
       - CYBER_AGENT_SWARM_MODEL=${CYBER_AGENT_SWARM_MODEL:-}
       - CYBER_AGENT_EVALUATION_MODEL=${CYBER_AGENT_EVALUATION_MODEL:-}
+      - TECHNIQUE_DOCUMENT_LIMIT=${TECHNIQUE_DOCUMENT_LIMIT:-}
+      - TECHNIQUE_TRIGGER_LIMIT=${TECHNIQUE_TRIGGER_LIMIT:-}
+      - TECHNIQUE_SEARCH_REPRESENTATION=${TECHNIQUE_SEARCH_REPRESENTATION:-}
+      - TECHNIQUE_AUTO_DELIVERY=${TECHNIQUE_AUTO_DELIVERY:-false}
       - CYBER_AGENT_EMBEDDING_MODEL=${CYBER_AGENT_EMBEDDING_MODEL:-}
       - CYBER_AGENT_BROWSER_MODEL=${CYBER_AGENT_BROWSER_MODEL:-}
       - BROWSER_DEFAULT_TIMEOUT=${BROWSER_DEFAULT_TIMEOUT:-240000}
@@ -316,7 +320,7 @@ services:
 
   # Langfuse observability service (self-hosted) 
   langfuse-web:
-    image: docker.io/langfuse/langfuse:3
+    image: docker.langfuse.com/langfuse/langfuse:4.83.0
     container_name: cyber-langfuse
     restart: unless-stopped
     depends_on:
@@ -437,7 +441,7 @@ services:
           cpus: '0.5'
 
   langfuse-worker:
-    image: docker.io/langfuse/langfuse-worker:3
+    image: docker.langfuse.com/langfuse/langfuse-worker:4.83.0
     container_name: cyber-langfuse-worker
     restart: unless-stopped
     depends_on:

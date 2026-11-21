@@ -1,0 +1,27 @@
+{
+  "limit": 12,
+  "model": "muse-glimmer:30b-mlx",
+  "plans": [
+    {
+      "mode": "unknown",
+      "arm": "guidance"
+    }
+  ],
+  "guidance_sha256": "7f91190f9cc73efb226698bf0bffb086f7144f6f9aa5ee33bebac4289dd32d74",
+  "prior_generation_requests": 118,
+  "total_authorized_requests": 130,
+  "design": "Single fresh guidance-arm run with the shared production final-format contract.",
+  "grading": "Fixture-owned classification, cited request evidence, and cited identity/policy discovery records.",
+  "executed_script_sha256": "5300936b5263f9539ce83416877d77a0870ab63f3cd617fcd003b8ca7e927c6f",
+  "corrected_proposal_is_experiment_input": false,
+  "limits": [
+    "One run per arm/case",
+    "No context-length or seed control",
+    "Synthetic tools, not operation executor",
+    "No retrieval/adoption measurement"
+  ],
+  "authorization": "User explicitly approved up to 30 additional requests to complete the interrupted comparison.",
+  "restart_policy": "Separate format check; no earlier primary or exploratory outcome is replaced.",
+  "scope": "Single fresh task check of production final-format instructions, with semantic task policy unchanged.",
+  "historical_outcome_policy": "Earlier structured failure remains unresolved; no retrospective replacement."
+}

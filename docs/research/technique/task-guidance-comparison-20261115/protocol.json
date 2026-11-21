@@ -1,0 +1,79 @@
+{
+  "limit": 100,
+  "model": "muse-glimmer:30b-mlx",
+  "plans": [
+    {
+      "repeat": 0,
+      "mode": "fallback",
+      "arm": "guidance"
+    },
+    {
+      "repeat": 0,
+      "mode": "fallback",
+      "arm": "none"
+    },
+    {
+      "repeat": 0,
+      "mode": "enforced",
+      "arm": "guidance"
+    },
+    {
+      "repeat": 0,
+      "mode": "enforced",
+      "arm": "none"
+    },
+    {
+      "repeat": 0,
+      "mode": "shape",
+      "arm": "guidance"
+    },
+    {
+      "repeat": 0,
+      "mode": "shape",
+      "arm": "none"
+    },
+    {
+      "repeat": 1,
+      "mode": "fallback",
+      "arm": "none"
+    },
+    {
+      "repeat": 1,
+      "mode": "fallback",
+      "arm": "guidance"
+    },
+    {
+      "repeat": 1,
+      "mode": "enforced",
+      "arm": "none"
+    },
+    {
+      "repeat": 1,
+      "mode": "enforced",
+      "arm": "guidance"
+    },
+    {
+      "repeat": 1,
+      "mode": "shape",
+      "arm": "none"
+    },
+    {
+      "repeat": 1,
+      "mode": "shape",
+      "arm": "guidance"
+    }
+  ],
+  "guidance_sha256": "7f91190f9cc73efb226698bf0bffb086f7144f6f9aa5ee33bebac4289dd32d74",
+  "authorization": "User approved up to 100 new requests on 2026-11-15",
+  "executed_script_sha256": "58f9e38f69abf1872b3c7f444fae59b45443f0e86797787d397ad92deeaa5d16",
+  "fixture_labels_hidden": true,
+  "design": "Three synthetic endpoint behaviors x two guidance arms x two repeats. Arm order reversed in repeat two.",
+  "limitations": [
+    "Isolated task agent, not production operation workflow",
+    "Explicit known policy",
+    "No randomization or seed control",
+    "No length-matched context control",
+    "Guidance supplied directly, not selected through retrieval"
+  ],
+  "grading": "Classification against fixture truth; supported_correct additionally requires valid cited IDs and an A-to-B probe. Unknown/incomplete runs remain recorded."
+}

@@ -1,0 +1,630 @@
+{
+  "counts": {
+    "requests": 38,
+    "limit": 38
+  },
+  "outcomes": [
+    {
+      "mode": "vulnerable",
+      "arm": "guidance",
+      "index": 0,
+      "status": "completed",
+      "answer": {
+        "classification": "violation",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4",
+          "obs-5",
+          "obs-6"
+        ],
+        "explanation": "Identity mapping obs-1 shows session-red is A and session-blue is B. Policy obs-2 restricts A to [A] and B to [B]. Baseline for principal A with selector A in obs-3 returns object owner A record-A. Variant with same authentication session-red but selector B in obs-4 returns object owner B record-B with status 200, showing the X-Account header drives object selection. Entitlement control obs-5 and obs-6 confirm principal B baselines differ and selector still controls the object. Policy prerequisite is met: A is not authorized for B per obs-2, yet B\u2019s object data is returned to A\u2019s session in obs-4. This satisfies the header-selector authorization violation conditions."
+      },
+      "correct_classification": true,
+      "valid_evidence_ids": true,
+      "decisive_probe": true,
+      "discovery_evidence": true,
+      "supported_correct": true,
+      "requests": 8,
+      "observations": [
+        {
+          "id": "obs-1",
+          "kind": "identity",
+          "response": {
+            "session-red": "A",
+            "session-blue": "B"
+          }
+        },
+        {
+          "id": "obs-2",
+          "kind": "policy",
+          "response": {
+            "available": true,
+            "permissions": {
+              "A": [
+                "A"
+              ],
+              "B": [
+                "B"
+              ]
+            }
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "session-red",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "A",
+                "value": "record-A"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "session-red",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-5",
+          "principal": "session-blue",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-6",
+          "principal": "session-blue",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "A",
+                "value": "record-A"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "mode": "vulnerable",
+      "arm": "none",
+      "index": 1,
+      "status": "completed",
+      "answer": {
+        "classification": "violation",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4",
+          "obs-5",
+          "obs-6"
+        ],
+        "explanation": "Identity mapping shows session-red\u2192A and session-blue\u2192B (obs-1). Policy permits A only A and B only B (obs-2). All four account endpoint probes return status 200 with body error \"not authorized\" yet include the object payload for both matching and mismatching principal/selector pairs (obs-3, obs-4, obs-5, obs-6). The X-Account selector is therefore not enforced; unauthorized access / data exposure is observable."
+      },
+      "correct_classification": true,
+      "valid_evidence_ids": true,
+      "decisive_probe": true,
+      "discovery_evidence": true,
+      "supported_correct": true,
+      "requests": 8,
+      "observations": [
+        {
+          "id": "obs-1",
+          "kind": "identity",
+          "response": {
+            "session-red": "A",
+            "session-blue": "B"
+          }
+        },
+        {
+          "id": "obs-2",
+          "kind": "policy",
+          "response": {
+            "available": true,
+            "permissions": {
+              "A": [
+                "A"
+              ],
+              "B": [
+                "B"
+              ]
+            }
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "session-red",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "A",
+                "value": "record-A"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "session-red",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-5",
+          "principal": "session-blue",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "A",
+                "value": "record-A"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-6",
+          "principal": "session-blue",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "mode": "shared",
+      "arm": "none",
+      "index": 2,
+      "status": "completed",
+      "answer": {
+        "classification": "no_violation_observed",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4",
+          "obs-5",
+          "obs-6"
+        ],
+        "explanation": "Identity mapping obs-1 shows session-red\u2192A and session-blue\u2192B. Policy obs-2 grants A\u2192[A,B] and B\u2192[B]. Probes obs-3 to obs-6 all return status 200 with body.error 'not authorized'. The cross-principal disallowed case session-blue\u2192A in obs-5 is denied with no object returned. No observation shows successful unauthorized access via X-Account selector."
+      },
+      "correct_classification": true,
+      "valid_evidence_ids": true,
+      "decisive_probe": true,
+      "discovery_evidence": true,
+      "supported_correct": true,
+      "requests": 5,
+      "observations": [
+        {
+          "id": "obs-1",
+          "kind": "identity",
+          "response": {
+            "session-red": "A",
+            "session-blue": "B"
+          }
+        },
+        {
+          "id": "obs-2",
+          "kind": "policy",
+          "response": {
+            "available": true,
+            "permissions": {
+              "A": [
+                "A",
+                "B"
+              ],
+              "B": [
+                "B"
+              ]
+            }
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "session-red",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "A",
+                "value": "record-A"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "session-red",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-5",
+          "principal": "session-blue",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized"
+            }
+          }
+        },
+        {
+          "id": "obs-6",
+          "principal": "session-blue",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "mode": "shared",
+      "arm": "guidance",
+      "index": 3,
+      "status": "completed",
+      "answer": {
+        "classification": "no_violation_observed",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4",
+          "obs-5",
+          "obs-6"
+        ],
+        "explanation": "Identity mapping shows session-red=A and session-blue=B per obs-1. Policy per obs-2 grants A access to A and B and B access to B only. Baseline/entitlement controls: session-blue\u2192B returns object owner B per obs-5; session-red\u2192B returns object owner B per obs-4, consistent with policy. Unauthorized pair test: session-blue\u2192A returns status 200 with body {\"error\":\"not authorized\"} and no object payload per obs-6, i.e., no data attributable to A is disclosed to principal B. Header processing is evidenced by differing payloads for selector A vs B under the same principal, e.g., session-red\u2192A returns object owner A per obs-3 and session-red\u2192B returns object owner B per obs-4. No unauthorized disclosure via X-Account is demonstrated in the collected observations."
+      },
+      "correct_classification": true,
+      "valid_evidence_ids": true,
+      "decisive_probe": true,
+      "discovery_evidence": true,
+      "supported_correct": true,
+      "requests": 5,
+      "observations": [
+        {
+          "id": "obs-1",
+          "kind": "identity",
+          "response": {
+            "session-red": "A",
+            "session-blue": "B"
+          }
+        },
+        {
+          "id": "obs-2",
+          "kind": "policy",
+          "response": {
+            "available": true,
+            "permissions": {
+              "A": [
+                "A",
+                "B"
+              ],
+              "B": [
+                "B"
+              ]
+            }
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "session-red",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "A",
+                "value": "record-A"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "session-red",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-5",
+          "principal": "session-blue",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-6",
+          "principal": "session-blue",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "mode": "unknown",
+      "arm": "guidance",
+      "index": 4,
+      "status": "completed",
+      "answer": {
+        "classification": "inconclusive",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4",
+          "obs-5",
+          "obs-6"
+        ],
+        "explanation": "The X-Account header is processed server-side: changing selector A/B with the same authenticated principal changes the returned object owner/value, e.g., session-red with selector A returns owner A obs-3 and with selector B returns owner B obs-4; session-blue with selector A returns owner A obs-5 and with selector B returns owner B obs-6. Identity mapping is session-red\u2192A, session-blue\u2192B obs-1. All responses carry error \"not authorized\" with status 200. Policy context is unavailable obs-2, so the required policy prerequisite \u2013 documented mapping of authorized/denied principals to objects and a legitimate authorized baseline \u2013 cannot be established. Without policy evidence and a legitimate baseline, an authorization violation cannot be confirmed under the reusable header-selector test criteria."
+      },
+      "correct_classification": true,
+      "valid_evidence_ids": true,
+      "decisive_probe": true,
+      "discovery_evidence": true,
+      "supported_correct": true,
+      "requests": 5,
+      "observations": [
+        {
+          "id": "obs-1",
+          "kind": "identity",
+          "response": {
+            "session-red": "A",
+            "session-blue": "B"
+          }
+        },
+        {
+          "id": "obs-2",
+          "kind": "policy",
+          "response": {
+            "available": false,
+            "reason": "Policy record unavailable"
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "session-red",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "A",
+                "value": "record-A"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "session-red",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-5",
+          "principal": "session-blue",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "A",
+                "value": "record-A"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-6",
+          "principal": "session-blue",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "mode": "unknown",
+      "arm": "none",
+      "index": 5,
+      "status": "unresolved",
+      "error": "Authorized request allowance exhausted",
+      "error_type": "RuntimeError",
+      "requests": 7,
+      "observations": [
+        {
+          "id": "obs-1",
+          "kind": "identity",
+          "response": {
+            "session-red": "A",
+            "session-blue": "B"
+          }
+        },
+        {
+          "id": "obs-2",
+          "kind": "policy",
+          "response": {
+            "available": false,
+            "reason": "Policy record unavailable"
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "session-red",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "session-red",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "A",
+                "value": "record-A"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-5",
+          "principal": "session-blue",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "A",
+                "value": "record-A"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-6",
+          "principal": "session-blue",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "prior_requests": 62,
+  "total_requests": 100,
+  "authorization_extension_pending": true
+}

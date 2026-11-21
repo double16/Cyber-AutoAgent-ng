@@ -1,0 +1,201 @@
+{
+  "counts": {
+    "requests": 13,
+    "limit": 25
+  },
+  "outcomes": [
+    {
+      "mode": "unknown",
+      "arm": "none",
+      "index": 0,
+      "status": "completed",
+      "answer": {
+        "classification": "violation",
+        "evidence_ids": [
+          "obs-1",
+          "obs-3",
+          "obs-4",
+          "obs-5",
+          "obs-6"
+        ],
+        "explanation": "Identity mapping obs-1 shows session-red maps to A and session-blue maps to B. Account endpoint probes obs-3 to obs-6 all return status 200 with the requested object payload for both matching and mismatching principal/selector pairs, e.g., session-red with selector B returns object owner B, and session-blue with selector A returns object owner A. The error field does not prevent disclosure. Policy context obs-2 is unavailable. This demonstrates unauthorized access via X-Account selector is permitted."
+      },
+      "correct_classification": false,
+      "valid_evidence_ids": true,
+      "decisive_probe": true,
+      "discovery_evidence": false,
+      "supported_correct": false,
+      "requests": 5,
+      "observations": [
+        {
+          "id": "obs-1",
+          "kind": "identity",
+          "response": {
+            "session-red": "A",
+            "session-blue": "B"
+          }
+        },
+        {
+          "id": "obs-2",
+          "kind": "policy",
+          "response": {
+            "available": false,
+            "reason": "Policy record unavailable"
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "session-red",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "A",
+                "value": "record-A"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "session-red",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-5",
+          "principal": "session-blue",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "A",
+                "value": "record-A"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-6",
+          "principal": "session-blue",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "mode": "unknown",
+      "arm": "guidance",
+      "index": 1,
+      "status": "unresolved",
+      "error": "Failed to parse or validate native structured content: response: Invalid JSON: expected value at line 1 column 1 [json_invalid]",
+      "error_type": "StructuredOutputValidationError",
+      "requests": 8,
+      "observations": [
+        {
+          "id": "obs-1",
+          "kind": "identity",
+          "response": {
+            "session-red": "A",
+            "session-blue": "B"
+          }
+        },
+        {
+          "id": "obs-2",
+          "kind": "policy",
+          "response": {
+            "available": false,
+            "reason": "Policy record unavailable"
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "session-red",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "A",
+                "value": "record-A"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "session-red",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-5",
+          "principal": "session-blue",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "A",
+                "value": "record-A"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-6",
+          "principal": "session-blue",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "scope": "Exploratory reversed-order repetition, not replacement of primary results",
+  "additional_allowance_used": 18,
+  "additional_allowance": 30,
+  "cumulative_requests": 118,
+  "unused_requests": 12
+}

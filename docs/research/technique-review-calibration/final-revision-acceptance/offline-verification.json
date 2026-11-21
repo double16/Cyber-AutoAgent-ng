@@ -1,0 +1,88 @@
+{
+  "status": "offline_preflight_passed",
+  "receipt": {
+    "candidate_code_identity": "598761fad61761b3d61bbadbc3bcc0bd93c83525c4bfa6502d4ac5346567c4ad",
+    "subjects": {
+      "network-policy": "53ce293dceaba102e39f4ede2657dcd39a4223a3f387a53d3ed586f654d2d694",
+      "filesystem-policy": "d35b47e91dbcc3b888f1b7e826069cafa097b10c7ec5a069c425b821b26e44f0",
+      "http-selector-corrected": "ec9e05df99968ebcca58800056a54484ef2f0b728a9bffc68ca42ab869456b06"
+    },
+    "wire_modes": [
+      "native",
+      "tool"
+    ],
+    "status": "passed"
+  },
+  "outcomes": [
+    {
+      "case": "network-policy",
+      "wire_mode": "native",
+      "status": "offline_contract_passed",
+      "counts": {
+        "limit": 21,
+        "requests": 0,
+        "roles": 2
+      },
+      "scripted_model_dispatches": 4
+    },
+    {
+      "case": "filesystem-policy",
+      "wire_mode": "native",
+      "status": "offline_contract_passed",
+      "counts": {
+        "limit": 21,
+        "requests": 0,
+        "roles": 4
+      },
+      "scripted_model_dispatches": 4
+    },
+    {
+      "case": "http-selector-corrected",
+      "wire_mode": "native",
+      "status": "offline_contract_passed",
+      "counts": {
+        "limit": 21,
+        "requests": 0,
+        "roles": 6
+      },
+      "scripted_model_dispatches": 4
+    },
+    {
+      "case": "network-policy",
+      "wire_mode": "tool",
+      "status": "offline_contract_passed",
+      "counts": {
+        "limit": 21,
+        "requests": 0,
+        "roles": 2
+      },
+      "scripted_model_dispatches": 4
+    },
+    {
+      "case": "filesystem-policy",
+      "wire_mode": "tool",
+      "status": "offline_contract_passed",
+      "counts": {
+        "limit": 21,
+        "requests": 0,
+        "roles": 4
+      },
+      "scripted_model_dispatches": 4
+    },
+    {
+      "case": "http-selector-corrected",
+      "wire_mode": "tool",
+      "status": "offline_contract_passed",
+      "counts": {
+        "limit": 21,
+        "requests": 0,
+        "roles": 6
+      },
+      "scripted_model_dispatches": 4
+    }
+  ],
+  "live_requests": 0,
+  "parser_tests_passed": 13,
+  "live_gate_check": "Rejected before dispatch: corrected HTTP label and new allowance are pending",
+  "generation_trial_started": false
+}

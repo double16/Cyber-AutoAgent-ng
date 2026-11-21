@@ -1,0 +1,910 @@
+{
+  "counts": {
+    "requests": 62,
+    "limit": 100
+  },
+  "outcomes": [
+    {
+      "repeat": 0,
+      "mode": "fallback",
+      "arm": "guidance",
+      "index": 0,
+      "status": "completed",
+      "answer": {
+        "classification": "violation",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4",
+          "obs-5"
+        ],
+        "explanation": "The endpoint selects the returned object from the client-supplied X-Account selector header instead of enforcing the authenticated principal.\n\nPolicy prerequisite: principal A may read only account A; principal B may read only account B.\n\nBaseline control:\n- obs-1 principal=A selector=A \u2192 200 owner=A record-A\n- obs-3 principal=B selector=B \u2192 200 owner=B record-B\nEntitlement control holds: baselines differ as policy requires.\n\nVariant unauthorized disclosure:\n- obs-2 principal=A selector=B \u2192 200 owner=B record-B. Same authentication as obs-1, but object changes to B, matching H_variant.\n- obs-4 principal=B selector=A \u2192 200 owner=A record-A. Bidirectional header-driven selection.\nStatus code and response shape remain 200 OK, confirming server processed the header change rather than rejecting it.\n\nHeader processing / negative control:\n- obs-5 principal=A selector=invalid \u2192 200 owner=A record-A. Header is processed server-side; invalid value falls back to authenticated principal, confirming selector is active.\n\nAll four interpretation conditions are met: policy prerequisite established, baseline legitimate, variant shows unauthorized disclosure with explicit owner evidence attributable to the other principal, and controls hold. This is an IDOR-like header-selector bypass where client-supplied header controls object selection."
+      },
+      "correct_classification": true,
+      "valid_evidence_ids": true,
+      "decisive_probe": true,
+      "supported_correct": true,
+      "requests": 7,
+      "observations": [
+        {
+          "id": "obs-1",
+          "principal": "A",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "A",
+              "value": "record-A"
+            }
+          }
+        },
+        {
+          "id": "obs-2",
+          "principal": "A",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "B",
+              "value": "record-B"
+            }
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "B",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "B",
+              "value": "record-B"
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "B",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "A",
+              "value": "record-A"
+            }
+          }
+        },
+        {
+          "id": "obs-5",
+          "principal": "A",
+          "selector": "invalid",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "A",
+              "value": "record-A"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "repeat": 0,
+      "mode": "fallback",
+      "arm": "none",
+      "index": 1,
+      "status": "completed",
+      "answer": {
+        "classification": "violation",
+        "evidence_ids": [
+          "obs-2",
+          "obs-4"
+        ],
+        "explanation": "The endpoint returns 200 for mismatched principal/selector pairs. Principal A with selector B reads owner B record-A in obs-2, and principal B with selector A reads owner A record-A in obs-4. The selector header is honored without being checked against the authenticated principal, allowing unauthorized cross-account read. Baselines obs-1 and obs-3 confirm normal access works."
+      },
+      "correct_classification": true,
+      "valid_evidence_ids": true,
+      "decisive_probe": true,
+      "supported_correct": true,
+      "requests": 3,
+      "observations": [
+        {
+          "id": "obs-1",
+          "principal": "A",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "A",
+              "value": "record-A"
+            }
+          }
+        },
+        {
+          "id": "obs-2",
+          "principal": "A",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "B",
+              "value": "record-B"
+            }
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "B",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "B",
+              "value": "record-B"
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "B",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "A",
+              "value": "record-A"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "repeat": 0,
+      "mode": "enforced",
+      "arm": "guidance",
+      "index": 2,
+      "status": "completed",
+      "answer": {
+        "classification": "no_violation_observed",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4"
+        ],
+        "explanation": "Policy requires principal A may read only account A and principal B may read only account B. Baseline legitimacy is shown by obs-1 principal=A selector=A returning owner A record-A with 200, and obs-3 principal=B selector=B returning owner B record-B with 200, establishing distinct entitlements. Header processing is confirmed because changing the selector changes the outcome. Variant test obs-2 principal=A selector=B returns 403 denied, not a successful disclosure of B\u2019s data, and cross test obs-4 principal=B selector=A returns 403 denied. No variant request with same authentication returns a different object identifier attributable to the unauthorized principal with a successful response. Negative control and entitlement control hold. Therefore the X-Account selector header does not permit unauthorized object access; the endpoint enforces the policy."
+      },
+      "correct_classification": true,
+      "valid_evidence_ids": true,
+      "decisive_probe": true,
+      "supported_correct": true,
+      "requests": 6,
+      "observations": [
+        {
+          "id": "obs-1",
+          "principal": "A",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "A",
+              "value": "record-A"
+            }
+          }
+        },
+        {
+          "id": "obs-2",
+          "principal": "A",
+          "selector": "B",
+          "response": {
+            "status": 403,
+            "body": {
+              "error": "denied"
+            }
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "B",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "B",
+              "value": "record-B"
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "B",
+          "selector": "A",
+          "response": {
+            "status": 403,
+            "body": {
+              "error": "denied"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "repeat": 0,
+      "mode": "enforced",
+      "arm": "none",
+      "index": 3,
+      "status": "completed",
+      "answer": {
+        "classification": "no_violation_observed",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4"
+        ],
+        "explanation": "Principal A can read account A (obs-1) but is denied account B (obs-2). Principal B can read account B (obs-3) but is denied account A (obs-4). The X-Account selector header is enforced and does not permit unauthorized cross-account access."
+      },
+      "correct_classification": true,
+      "valid_evidence_ids": true,
+      "decisive_probe": true,
+      "supported_correct": true,
+      "requests": 6,
+      "observations": [
+        {
+          "id": "obs-1",
+          "principal": "A",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "A",
+              "value": "record-A"
+            }
+          }
+        },
+        {
+          "id": "obs-2",
+          "principal": "A",
+          "selector": "B",
+          "response": {
+            "status": 403,
+            "body": {
+              "error": "denied"
+            }
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "B",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "B",
+              "value": "record-B"
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "B",
+          "selector": "A",
+          "response": {
+            "status": 403,
+            "body": {
+              "error": "denied"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "repeat": 0,
+      "mode": "shape",
+      "arm": "guidance",
+      "index": 4,
+      "status": "completed",
+      "answer": {
+        "classification": "violation",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4"
+        ],
+        "explanation": "Policy requires principal A may read only account A and principal B may read only account B. Baseline obs-1 principal=A selector=A returns owner A record-A, confirming legitimate baseline. Entitlement control obs-3 principal=B selector=B returns owner B record-B, confirming distinct entitlements. Variant obs-2 principal=A selector=B with same authentication as baseline returns owner B record-B, i.e., data attributable to principal B is disclosed to principal A. Status is successful and response shape changes from baseline, confirming server processed the header change. Negative control obs-4 principal=A selector=invalid returns owner A record-A, confirming header is processed server-side. All policy, baseline, variant and control conditions hold, establishing unauthorized object access via the X-Account selector header."
+      },
+      "correct_classification": true,
+      "valid_evidence_ids": true,
+      "decisive_probe": true,
+      "supported_correct": true,
+      "requests": 6,
+      "observations": [
+        {
+          "id": "obs-1",
+          "principal": "A",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "A",
+              "value": "record-A"
+            }
+          }
+        },
+        {
+          "id": "obs-2",
+          "principal": "A",
+          "selector": "B",
+          "response": {
+            "status": 206,
+            "body": {
+              "records": [
+                {
+                  "owner": "B",
+                  "value": "record-B"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "B",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "B",
+              "value": "record-B"
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "A",
+          "selector": "invalid",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "A",
+              "value": "record-A"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "repeat": 0,
+      "mode": "shape",
+      "arm": "none",
+      "index": 5,
+      "status": "completed",
+      "answer": {
+        "classification": "violation",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4"
+        ],
+        "explanation": "The endpoint honors the X-Account selector header independently of the authenticated principal. Principal A can read account B (obs-2) and principal B can read account A (obs-3), violating the policy that principal A may read only account A and principal B may read only account B. Authorized baselines obs-1 and obs-4 confirm normal reads for matching principal/selector pairs, while mismatched pairs still succeed with status 206 and return the other account\u2019s data."
+      },
+      "correct_classification": true,
+      "valid_evidence_ids": true,
+      "decisive_probe": true,
+      "supported_correct": true,
+      "requests": 3,
+      "observations": [
+        {
+          "id": "obs-1",
+          "principal": "A",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "A",
+              "value": "record-A"
+            }
+          }
+        },
+        {
+          "id": "obs-2",
+          "principal": "A",
+          "selector": "B",
+          "response": {
+            "status": 206,
+            "body": {
+              "records": [
+                {
+                  "owner": "B",
+                  "value": "record-B"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "B",
+          "selector": "A",
+          "response": {
+            "status": 206,
+            "body": {
+              "records": [
+                {
+                  "owner": "A",
+                  "value": "record-A"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "B",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "B",
+              "value": "record-B"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "repeat": 1,
+      "mode": "fallback",
+      "arm": "none",
+      "index": 6,
+      "status": "completed",
+      "answer": {
+        "classification": "violation",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4"
+        ],
+        "explanation": "Policy requires principal A may read only account A and principal B may read only account B. obs-1 shows principal A with selector A returns owner A, and obs-3 shows principal B with selector B returns owner B, establishing authorized baselines. obs-2 shows principal A with selector B returns 200 with owner B, and obs-4 shows principal B with selector A returns 200 with owner A. The endpoint therefore honors the X-Account selector header over the authenticated principal, permitting cross-account reads and unauthorized object access."
+      },
+      "correct_classification": true,
+      "valid_evidence_ids": true,
+      "decisive_probe": true,
+      "supported_correct": true,
+      "requests": 6,
+      "observations": [
+        {
+          "id": "obs-1",
+          "principal": "A",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "A",
+              "value": "record-A"
+            }
+          }
+        },
+        {
+          "id": "obs-2",
+          "principal": "A",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "B",
+              "value": "record-B"
+            }
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "B",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "B",
+              "value": "record-B"
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "B",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "A",
+              "value": "record-A"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "repeat": 1,
+      "mode": "fallback",
+      "arm": "guidance",
+      "index": 7,
+      "status": "completed",
+      "answer": {
+        "classification": "violation",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4",
+          "obs-5"
+        ],
+        "explanation": "Policy requires principal A may read only account A and principal B may read only account B. Baseline obs-1 principal=A selector=A returns owner A record-A. Entitlement control obs-3 principal=B selector=B returns owner B record-B, confirming distinct baselines. Variant obs-2 principal=A selector=B with same authentication as baseline returns owner B record-B with 200 OK, showing selection based on the client-supplied X-Account selector header rather than the authenticated principal. Cross check obs-4 principal=B selector=A returns owner A record-A. Negative control obs-5 principal=A selector=invalid falls back to authenticated principal A, confirming header processing. All conditions for a header-selector authorization violation are met: policy prerequisite established, legitimate baseline, unauthorized disclosure with same authentication and successful response shape, and controls hold."
+      },
+      "correct_classification": true,
+      "valid_evidence_ids": true,
+      "decisive_probe": true,
+      "supported_correct": true,
+      "requests": 7,
+      "observations": [
+        {
+          "id": "obs-1",
+          "principal": "A",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "A",
+              "value": "record-A"
+            }
+          }
+        },
+        {
+          "id": "obs-2",
+          "principal": "A",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "B",
+              "value": "record-B"
+            }
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "B",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "B",
+              "value": "record-B"
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "B",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "A",
+              "value": "record-A"
+            }
+          }
+        },
+        {
+          "id": "obs-5",
+          "principal": "A",
+          "selector": "invalid",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "A",
+              "value": "record-A"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "repeat": 1,
+      "mode": "enforced",
+      "arm": "none",
+      "index": 8,
+      "status": "completed",
+      "answer": {
+        "classification": "no_violation_observed",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4"
+        ],
+        "explanation": "Principal A can read account A (obs-1, 200) but is denied account B (obs-2, 403). Principal B can read account B (obs-4, 200) but is denied account A (obs-3, 403). The X-Account selector header is enforced per principal; no unauthorized object access is observed."
+      },
+      "correct_classification": true,
+      "valid_evidence_ids": true,
+      "decisive_probe": true,
+      "supported_correct": true,
+      "requests": 3,
+      "observations": [
+        {
+          "id": "obs-1",
+          "principal": "A",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "A",
+              "value": "record-A"
+            }
+          }
+        },
+        {
+          "id": "obs-2",
+          "principal": "A",
+          "selector": "B",
+          "response": {
+            "status": 403,
+            "body": {
+              "error": "denied"
+            }
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "B",
+          "selector": "A",
+          "response": {
+            "status": 403,
+            "body": {
+              "error": "denied"
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "B",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "B",
+              "value": "record-B"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "repeat": 1,
+      "mode": "enforced",
+      "arm": "guidance",
+      "index": 9,
+      "status": "completed",
+      "answer": {
+        "classification": "no_violation_observed",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4"
+        ],
+        "explanation": "Policy requires principal A may read only account A and principal B may read only account B. Baseline legitimacy is confirmed: obs-1 principal A selector A returns 200 owner A record-A; obs-3 principal B selector B returns 200 owner B record-B. Header processing is confirmed by deterministic change on selector change. Variant tests show enforcement: obs-2 principal A selector B returns 403 denied; obs-4 principal B selector A returns 403 denied. No successful 200 response with the other principal\u2019s object is observed, and entitlement control shows distinct baselines. All conditions for an authorization violation are not met; the endpoint rejects unauthorized selector values."
+      },
+      "correct_classification": true,
+      "valid_evidence_ids": true,
+      "decisive_probe": true,
+      "supported_correct": true,
+      "requests": 6,
+      "observations": [
+        {
+          "id": "obs-1",
+          "principal": "A",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "A",
+              "value": "record-A"
+            }
+          }
+        },
+        {
+          "id": "obs-2",
+          "principal": "A",
+          "selector": "B",
+          "response": {
+            "status": 403,
+            "body": {
+              "error": "denied"
+            }
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "B",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "B",
+              "value": "record-B"
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "B",
+          "selector": "A",
+          "response": {
+            "status": 403,
+            "body": {
+              "error": "denied"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "repeat": 1,
+      "mode": "shape",
+      "arm": "none",
+      "index": 10,
+      "status": "completed",
+      "answer": {
+        "classification": "violation",
+        "evidence_ids": [
+          "obs-2",
+          "obs-3"
+        ],
+        "explanation": "Principal A with selector B returned account B data (obs-2) and principal B with selector A returned account A data (obs-3). The endpoint honors the X-Account selector header without binding it to the authenticated principal, allowing cross-account reads in violation of the policy that principal A may read only account A and principal B may read only account B."
+      },
+      "correct_classification": true,
+      "valid_evidence_ids": true,
+      "decisive_probe": true,
+      "supported_correct": true,
+      "requests": 3,
+      "observations": [
+        {
+          "id": "obs-1",
+          "principal": "A",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "A",
+              "value": "record-A"
+            }
+          }
+        },
+        {
+          "id": "obs-2",
+          "principal": "A",
+          "selector": "B",
+          "response": {
+            "status": 206,
+            "body": {
+              "records": [
+                {
+                  "owner": "B",
+                  "value": "record-B"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "B",
+          "selector": "A",
+          "response": {
+            "status": 206,
+            "body": {
+              "records": [
+                {
+                  "owner": "A",
+                  "value": "record-A"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "B",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "B",
+              "value": "record-B"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "repeat": 1,
+      "mode": "shape",
+      "arm": "guidance",
+      "index": 11,
+      "status": "completed",
+      "answer": {
+        "classification": "violation",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4"
+        ],
+        "explanation": "Policy requires principal A may read only account A and principal B may read only account B. Baseline for principal A with selector A returns owner A record-A (obs-1). Entitlement control shows principal B with selector B returns owner B record-B (obs-3), confirming distinct entitlements. Variant with same authentication principal A but selector changed to B returns data attributable to principal B owner B record-B (obs-2) with successful status, demonstrating selection based on the client-supplied header rather than the authenticated principal. Negative control with selector invalid returns principal A\u2019s own data (obs-4), confirming the header is processed server-side. All policy, baseline, variant disclosure, and control conditions are satisfied, establishing unauthorized object access via the X-Account selector header."
+      },
+      "correct_classification": true,
+      "valid_evidence_ids": true,
+      "decisive_probe": true,
+      "supported_correct": true,
+      "requests": 6,
+      "observations": [
+        {
+          "id": "obs-1",
+          "principal": "A",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "A",
+              "value": "record-A"
+            }
+          }
+        },
+        {
+          "id": "obs-2",
+          "principal": "A",
+          "selector": "B",
+          "response": {
+            "status": 206,
+            "body": {
+              "records": [
+                {
+                  "owner": "B",
+                  "value": "record-B"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "B",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "B",
+              "value": "record-B"
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "A",
+          "selector": "invalid",
+          "response": {
+            "status": 200,
+            "body": {
+              "owner": "A",
+              "value": "record-A"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,57 @@
+{
+  "scope": "Conditional generation/publication, not retrieval, execution or task benefit",
+  "pipeline_completed": 3,
+  "denominator": 3,
+  "human_accepted_useful_documents": null,
+  "pipeline_requests": 25,
+  "earlier_pilot_and_author_check_requests": 21,
+  "total_requests": 46,
+  "authorized_total": 51,
+  "unused_requests": 5,
+  "cases": [
+    {
+      "case": "network",
+      "status": "generated_pending_human_adjudication",
+      "document_sha256": "8ad1810e756c0c6a2750f0ed507ea8e07776f37ef40796489982a873dd7f26a2",
+      "body_sha256": "9a019b4eebf6f4152aed99ae7b45f7d0e7e6cf95009832a2d77518fd54afdd01",
+      "body_lines": 124,
+      "message_token": false,
+      "author_invocations": 1,
+      "publication_invocations": 1,
+      "attribution_repairs": 0,
+      "requests_for_completed_attempt": 6,
+      "earlier_budget_incomplete_requests": 0,
+      "human_adjudication": "pending"
+    },
+    {
+      "case": "filesystem",
+      "status": "generated_pending_human_adjudication",
+      "document_sha256": "d47b51ca73455a67be2677295b1fdbc2b8f174786ef75c0b2dbc1b4fb074df90",
+      "body_sha256": "84e54a539a18e3f272fea4d297f44ba90e1b207c51527b65b26dc83450317dee",
+      "body_lines": 80,
+      "message_token": false,
+      "author_invocations": 1,
+      "publication_invocations": 1,
+      "attribution_repairs": 0,
+      "requests_for_completed_attempt": 5,
+      "earlier_budget_incomplete_requests": 3,
+      "human_adjudication": "pending"
+    },
+    {
+      "case": "http",
+      "status": "generated_pending_human_adjudication",
+      "document_sha256": "7f91190f9cc73efb226698bf0bffb086f7144f6f9aa5ee33bebac4289dd32d74",
+      "body_sha256": "2ce39a1f86b6bf3b3fe4406cd6136e39b066cd49ac3cffde7ab5902b6c213fd5",
+      "body_lines": 89,
+      "message_token": false,
+      "author_invocations": 2,
+      "publication_invocations": 3,
+      "attribution_repairs": 1,
+      "requests_for_completed_attempt": 11,
+      "earlier_budget_incomplete_requests": 0,
+      "human_adjudication": "pending"
+    }
+  ],
+  "prior_budget_failures_retained": true,
+  "limitation": "HTTP pipeline approval coexists with a confirmed false-negative rule; no useful-document yield claim"
+}

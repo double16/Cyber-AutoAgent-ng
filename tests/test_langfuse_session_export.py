@@ -1,6 +1,8 @@
 import json
+from datetime import datetime
 from types import SimpleNamespace
 
+import pytest
 import yaml
 
 from modules import langfuse_session_export as exporter
@@ -17,12 +19,18 @@ def _generation(*, observation_id, start_time, input_data, output):
 
 
 def _client(session, traces):
-    return SimpleNamespace(
-        api=SimpleNamespace(
-            sessions=SimpleNamespace(get=lambda _session_id: session),
-            trace=SimpleNamespace(get=lambda trace_id: traces[trace_id]),
-        )
-    )
+    rows = []
+    for trace in traces.values():
+        metadata = vars(trace).get("metadata", {})
+        rows.append(dict(
+            id=f"root-{trace.id}", trace_id=trace.id, type="SPAN", is_root_observation=True,
+            name=trace.name, metadata=metadata, start_time=vars(trace).get("timestamp", ""),
+        ))
+        for index, observation in enumerate(trace.observations):
+            rows.append(dict(vars(observation), trace_id=trace.id, id=vars(observation).get("id", str(index))))
+    return SimpleNamespace(api=SimpleNamespace(observations=SimpleNamespace(
+        get_many=lambda **kwargs: SimpleNamespace(data=rows),
+    )))
 
 
 def test_exports_ordered_prompt_review_content_and_excludes_tool_outputs():
@@ -129,24 +137,41 @@ def test_redacts_sensitive_data_in_text_and_nested_tool_arguments():
     assert exporter.REDACTED in serialized
 
 
-def test_marks_unavailable_traces_but_exports_available_content():
-    trace = SimpleNamespace(id="available", name="trace", metadata={}, observations=[])
-    client = _client(
-        SimpleNamespace(traces=[SimpleNamespace(id="available"), SimpleNamespace(id="missing")]),
-        {"available": trace},
-    )
-    original_get = client.api.trace.get
+def test_export_does_not_publish_partial_results_on_api_failure():
+    client = SimpleNamespace(api=SimpleNamespace(observations=SimpleNamespace(
+        get_many=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("read failed")),
+    )))
+    with pytest.raises(exporter.ExportError, match="read failed"):
+        exporter.LangfuseSessionExporter(client).export("session-1")
 
-    def get(trace_id):
-        if trace_id == "missing":
-            raise RuntimeError("not found")
-        return original_get(trace_id)
 
-    client.api.trace.get = get
-    packet = exporter.LangfuseSessionExporter(client).export("session-1")
+def test_export_forwards_explicit_time_window(monkeypatch):
+    windows = []
+    monkeypatch.setattr(exporter, "read_session_traces", lambda client, session_id, **kw: windows.append(kw) or [])
+    start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    with pytest.raises(exporter.ExportError, match="requested time window"):
+        exporter.LangfuseSessionExporter(object()).export("s", from_start_time=start)
+    assert windows == [{"from_start_time": start}]
 
-    assert packet["traces"][0]["trace_id"] == "available"
-    assert packet["unavailable_traces"] == [{"trace_id": "missing", "error": "not found"}]
+
+def test_main_passes_explicit_window_and_reports_api_failure(monkeypatch, capsys):
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "public")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "secret")
+    monkeypatch.setattr(exporter, "Langfuse", lambda **kwargs: object())
+    windows = []
+
+    def fail(self, session_id, **window):
+        windows.append(window)
+        raise exporter.ExportError("API unavailable")
+
+    monkeypatch.setattr(exporter.LangfuseSessionExporter, "export", fail)
+    assert exporter.main([
+        "--session-id", "s", "--from-time", "2026-01-01T00:00:00+00:00",
+        "--to-time", "2026-02-01T00:00:00+00:00",
+    ]) == 1
+    assert windows[0]["from_start_time"].month == 1
+    assert windows[0]["to_start_time"].month == 2
+    assert "API unavailable" in capsys.readouterr().err
 
 
 def test_attaches_redacted_max_token_failure_by_agent_run_when_generation_id_is_unavailable():

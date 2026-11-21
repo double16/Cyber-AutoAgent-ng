@@ -1,0 +1,36 @@
+{
+  "full_repository": {
+    "passed": 8179,
+    "skipped": 46,
+    "deselected": 89,
+    "warnings": 29,
+    "duration_seconds": 732.89
+  },
+  "focused_delivery_tests": 41,
+  "source_inspection_plus_delivery_tests": 42,
+  "ruff": "passed",
+  "diff_check": "passed",
+  "coverage_floor": "all measured Python files >=80% statement and branch",
+  "files": {
+    "src/modules/techniques/delivery.py": {
+      "sha256": "ce3e4003ba5a377de904054a87a1cf9b0870c921c45b7af896e0482b0b0c70fd",
+      "statement_coverage": 100.0,
+      "branch_coverage": 98.21428571428571
+    },
+    "src/modules/techniques/service.py": {
+      "sha256": "ac72351037098250fd4a190ae5840b6d3113b5d13a3fc94c56845131b6c544ed",
+      "statement_coverage": 97.38805970149254,
+      "branch_coverage": 90.625
+    },
+    "src/modules/agents/cyber_autoagent.py": {
+      "sha256": "4dd7c97cbe503b42d52f921f6e727f587b091cc0dd5562a591bf13b0d5738c0d",
+      "statement_coverage": 90.47619047619048,
+      "branch_coverage": 85.5072463768116
+    },
+    "src/modules/agents/multi_agent_workflow.py": {
+      "sha256": "66ffdc110cdf9e12b996dde361e297f86ad94b434c1f15fde91d3acfc53db262",
+      "statement_coverage": 90.7276868018653,
+      "branch_coverage": 84.97757847533633
+    }
+  }
+}

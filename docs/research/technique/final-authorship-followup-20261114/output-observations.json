@@ -1,0 +1,16 @@
+[
+  {
+    "case": "network",
+    "document_sha256": "41a043c2660a8d157fbca6083ddd914ebb04404a341f7e4f279fbb0e65de2980",
+    "literal_message_token": true,
+    "body_line_count": 1,
+    "status": "assistant_observation_not_human_adjudication"
+  },
+  {
+    "case": "filesystem",
+    "document_sha256": "cfe65a2e5a015d394bd0751b768e911033ea083321b13327620dd65dc27e2d30",
+    "literal_message_token": true,
+    "body_line_count": 1,
+    "status": "assistant_observation_not_human_adjudication"
+  }
+]

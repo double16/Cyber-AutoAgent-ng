@@ -435,3 +435,60 @@ def test_tool_catalog_wrapper_filters_by_keywords_for_shell_command(monkeypatch,
     assert "command: nmap" not in text
     assert "**Tools found**:" not in text
     assert "**Command line tools found**:" not in text
+
+
+def test_catalog_returns_complete_runtime_schema_and_refreshes(monkeypatch):
+    _patch_strands_tool_decorator(monkeypatch)
+    description = "Read assigned filesystem context. " * 12
+    tools = {"read_context": {"description": description, "inputSchema": {
+        "json": {"type": "object", "properties": {"kind": {"type": "string"}}, "required": ["kind"]}
+    }}}
+    agent = _FakeAgent(tools)
+    catalog = tc.tool_catalog_wrapper(agent, [])
+    result = catalog("read_context")
+    assert description in result
+    assert description not in catalog(None)
+    assert "exact name" in catalog(None)
+    assert '"required": ["kind"]' in result
+    assert "NO RESULTS" in catalog("unavailable_capability")
+    tools["network_probe"] = {"description": "Inspect network service", "inputSchema": {}}
+    assert "network_probe" in catalog("network_probe")
+    del tools["read_context"]
+    assert "NO RESULTS" in catalog("read_context")
+
+
+@pytest.mark.parametrize("name", ["http_compare", "network_probe", "filesystem_read", "MCP_ReadFile"])
+def test_catalog_uses_live_sdk_registry_schema(name):
+    from strands import Agent, tool
+
+    @tool(name=name)
+    def inspect_resource(resource: str) -> str:
+        """Inspect one assigned resource.
+
+        Args:
+            resource: The assigned resource identifier, not an evidence observation ID.
+        """
+        return resource
+
+    agent = Agent(model=SimpleNamespace(stateful=False), tools=[inspect_resource], callback_handler=None)
+    catalog = tc.tool_catalog_wrapper(agent, [])
+    result = catalog(name)
+    assert f"name: {name}" in result
+    assert '"required": ["resource"]' in result
+    assert "not an evidence observation ID" in result
+    assert "NO RESULTS" in catalog("missing_capability")
+
+
+def test_exact_catalog_query_preserves_canonical_case_and_avoids_ambiguity(monkeypatch):
+    _patch_strands_tool_decorator(monkeypatch)
+    tools = {name: {"description": "Read assigned resource", "inputSchema": {"json": {"title": name}}}
+             for name in ["ReadFile", "readFile"]}
+    catalog = tc.tool_catalog_wrapper(_FakeAgent(tools), [])
+    exact = catalog("ReadFile")
+    assert "name: ReadFile" in exact and "name: readFile" not in exact
+    assert '"title": "ReadFile"' in exact
+    ambiguous = catalog("READFILE")
+    assert "name: ReadFile" in ambiguous and "name: readFile" in ambiguous
+    assert "Input schema:" not in ambiguous
+    del tools["readFile"]
+    assert '"title": "ReadFile"' in catalog("readfile")

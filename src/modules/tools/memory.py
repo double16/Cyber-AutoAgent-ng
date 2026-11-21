@@ -97,6 +97,7 @@ from modules.config.types import get_default_base_dir
 from modules.handlers.utils import filter_none_values, sanitize_toon_value
 from modules.storage import SQLiteMigrationRunner
 from modules.storage.credential_encryption import CredentialEncryptionError, CredentialPayloadCipher
+from modules.storage.qdrant import QDRANT_WRITE_LOCK as _QDRANT_WRITE_LOCK
 from modules.storage.workflow_json import (
     StoredWorkflowDataError,
     decode_workflow_json,
@@ -190,10 +191,6 @@ _MEMORY_CONFIG: dict[str, str] | None = None
 _MEMORY_CLIENT: Optional["QdrantMemoryClient"] = None
 _DATABASE_STORE: Optional["ApplicationStore"] = None
 _MEMORY_EVENT_EMITTER: Callable[[dict[str, Any]], None] | None = None
-
-# Local Qdrant clients share one outputs-backed database within this process.
-_QDRANT_WRITE_LOCK = threading.Lock()
-
 
 PlanStatus = Literal["active", "pending", "done", "partial_failure", "blocked", "not_applicable"]
 TaskStatus = Literal["active", "pending", "done", "partial_failure", "blocked", "superseded", "replanned"]
@@ -1181,6 +1178,7 @@ class PlanPhase:
     dynamic_kind: str = ""
     provided_workstreams: tuple[str, ...] = ()
     source_manifest_refs: tuple[str, ...] = ()
+    technique_contexts: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, int) or self.id < 0:
@@ -1212,6 +1210,10 @@ class PlanPhase:
             raise ValueError(f"phase.task_creation_mode must be one of: {', '.join(sorted(valid_modes))}")
         if not isinstance(self.dynamic_kind, str):
             raise ValueError("phase.dynamic_kind must be a string")
+        if not isinstance(self.technique_contexts, tuple) or any(
+            not isinstance(value, str) or not value.strip() for value in self.technique_contexts
+        ):
+            raise ValueError("phase.technique_contexts must contain non-empty context identifiers")
         if not isinstance(self.provided_workstreams, tuple) or not all(
             isinstance(workstream, str) and workstream.strip() for workstream in self.provided_workstreams
         ):
@@ -1236,6 +1238,9 @@ class PlanPhase:
         raw_source_refs = obj.get("source_manifest_refs", [])
         if not isinstance(raw_source_refs, list):
             raise ValueError("phase.source_manifest_refs must be a list")
+        raw_contexts = obj.get("technique_contexts", [])
+        if not isinstance(raw_contexts, list):
+            raise ValueError("phase.technique_contexts must be a list")
         return PlanPhase(
             id=int(obj.get("id")),
             title=str(obj.get("title", "")),
@@ -1250,6 +1255,7 @@ class PlanPhase:
             dynamic_kind=str(obj.get("dynamic_kind") or ""),
             provided_workstreams=tuple(workstream.strip() for workstream in raw_workstreams),
             source_manifest_refs=tuple(raw_source_refs),
+            technique_contexts=tuple(raw_contexts),
         )
 
     @staticmethod
@@ -1287,6 +1293,7 @@ class PlanPhase:
             "dynamic_kind": self.dynamic_kind or None,
             "provided_workstreams": list(self.provided_workstreams),
             "source_manifest_refs": list(self.source_manifest_refs),
+            "technique_contexts": list(self.technique_contexts),
         })
 
 
@@ -5923,16 +5930,9 @@ def _validate_confirmation_manifest(candidate: dict[str, Any], reference: str) -
             canonical_reexposure_ref = _resolve_confirmation_artifact_reference(
                 reexposure_ref, requirements, "reexposure_artifact"
             )
-            candidate_assertions = list(candidate.get("evidence_assertions") or [])
-            secret_assertions = [
-                {**assertion, "artifact": canonical_reexposure_ref}
-                for assertion in candidate_assertions
-                if isinstance(assertion, dict) and assertion.get("type") == "secret_exposure"
-            ]
-            if not secret_assertions or not all(
-                _assertion_matches_artifact(assertion, canonical_reexposure_ref)
-                for assertion in secret_assertions
-            ):
+            secret_assertions = _secret_assertions(candidate)
+            comparison = _compare_secret_exposure(candidate, canonical_reexposure_ref)
+            if not comparison["available"] or not comparison["all_predicates_reproduced"]:
                 required_predicates = sorted(
                     _canonical_assertion_predicate(assertion) for assertion in secret_assertions
                 )
@@ -6133,6 +6133,77 @@ def record_finding_validation(
         },
         sort_keys=True,
     )
+
+
+def _secret_assertions(candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read authoritative structured predicates, never finding prose."""
+
+    packet = candidate.get("verification_packet")
+    source = packet if isinstance(packet, dict) else candidate
+    return [item for item in source.get("evidence_assertions", [])
+            if isinstance(item, dict) and item.get("type") == "secret_exposure"]
+
+
+def _compare_secret_exposure(candidate: dict[str, Any], reference: str) -> dict[str, Any]:
+    """Compare detected value predicates independently of bytes and source coordinates."""
+
+    canonical = canonical_artifact_reference(reference)
+    assertions = _secret_assertions(candidate)
+    expected = {(item["kind"], item["digest"]) for item in assertions}
+    try:
+        Path(_artifact_path_from_ref(canonical)).read_bytes()
+    except OSError:
+        return {"artifact": canonical, "available": False, "all_predicates_reproduced": False,
+                "matching_predicates": []}
+    matches = [
+        {"kind": item.kind, "digest": item.digest,
+         "source_location": {"line_number": item.line_number, "column_start": item.column_start,
+                             "column_end": item.column_end}}
+        for item in detect_secret_exposures(canonical) if (item.kind, item.digest) in expected
+    ]
+    return {"artifact": canonical, "available": True,
+            "all_predicates_reproduced": bool(expected) and len(matches) == len(expected),
+            "matching_predicates": matches}
+
+
+def build_compare_secret_exposure_tool(task: Task) -> Any | None:
+    """Expose comparison only to the assigned execution agent for structured secret findings."""
+
+    if task.kind != "finding_validation" or not task.reference_id:
+        return None
+    operation_id = _operation_id()
+    store = _get_database_store()
+    record = store.get_finding(operation_id, task.reference_id)
+    if not record or not _secret_assertions(record.get("candidate_data") or {}):
+        return None
+    _load_finding_validation_binding(store, operation_id, task.reference_id, task.task_uid)
+    if record.get("verification_task_uid") != task.task_uid:
+        raise ValueError("Secret comparison requires a controller-bound verification task")
+
+    @tool
+    def compare_secret_exposure(artifact_ref: str) -> str:
+        """Compare this assigned finding's secret predicates with a fresh operation-local artifact.
+
+        Returns availability, matching predicates and fresh locations without secret values.
+        A detector miss means failed reproduction, not universal absence or remediation.
+        """
+
+        if task.kind != "finding_validation" or _operation_id() != operation_id:
+            raise ValueError("Secret comparison requires its bound operation and validation task")
+        current, candidate, _ = _load_finding_validation_binding(
+            store, operation_id, task.reference_id, task.task_uid
+        )
+        active = [item for item in store.get_tasks(operation_id) if item.status == "active"]
+        if (current.get("verification_task_uid") != task.task_uid or len(active) != 1
+                or active[0].task_uid != task.task_uid or not _secret_assertions(candidate)):
+            raise ValueError("Secret comparison requires its active bound verification task")
+        reference = canonical_artifact_reference(artifact_ref)
+        originals = {canonical_artifact_reference(item["artifact"]) for item in _secret_assertions(candidate)}
+        if reference in originals:
+            raise ValueError("Secret comparison requires a fresh artifact, not candidate source evidence")
+        return json.dumps(_compare_secret_exposure(candidate, reference), sort_keys=True)
+
+    return compare_secret_exposure
 
 
 def build_record_finding_validation_tool(task: Task) -> Any:
@@ -6823,7 +6894,9 @@ class TaskProposal(_StrictTaskWireModel):
             "Structured planning workstream and coverage family; module contracts may restrict its allowed values"
         ),
     )
-    task_role: str = Field(default="mapping", description="Planning role: mapping, synthesis, or direct_single_step")
+    task_role: Literal["mapping", "synthesis", "direct_single_step"] = Field(
+        default="mapping", description="Planning role: mapping, synthesis, or direct_single_step",
+    )
     depends_on_workstreams: list[str] = Field(
         default_factory=list,
         description="Declared workstream prerequisites for a synthesis task",
@@ -6957,8 +7030,6 @@ class TaskProposal(_StrictTaskWireModel):
             raise ValueError("basis_description must be non-empty when provided")
         if self.workstream is not None and not self.workstream.strip():
             raise ValueError("workstream must be non-empty when supplied")
-        if self.task_role not in {"mapping", "synthesis", "direct_single_step"}:
-            raise ValueError("task_role must be mapping, synthesis, or direct_single_step")
         if any(not item.strip() for item in self.depends_on_workstreams):
             raise ValueError("depends_on_workstreams must not contain empty values")
         if self.inapplicability_reason is not None and not self.inapplicability_reason.strip():
@@ -7188,6 +7259,7 @@ _TASK_PROPOSAL_INPUT_SCHEMA = {
                         "methods": [],
                         "limits": {},
                         "snapshot_refs": ["artifact:artifacts/inventory_manifest.json"],
+                        "workstream": "inventory_assessment",
                         "criteria": [{"description": "Assess the assigned frozen inventory unit"}],
                         "target_ids": ["target-1"],
                     },
@@ -9715,6 +9787,7 @@ def create_tasks(tasks: TaskProposalList) -> str:
     Snapshot example:
     {"tasks": [{"title": "Assess frozen inventory", "objective": "Assess each frozen inventory unit",
     "methods": [], "limits": {}, "snapshot_refs": ["artifact:artifacts/inventory.json"],
+    "workstream": "inventory_assessment",
     "criteria": [{"description": "Assess the assigned frozen inventory unit"}],
     "target_ids": ["target-1"]}]}
 
@@ -10969,7 +11042,7 @@ class QdrantMemoryClient:
         self.config = dict(config or {})
         self.has_existing_memories = has_existing_memories
         self.silent = silent
-        self.collection_name = str(self.config.get("collection_name", self.COLLECTION_NAME))
+        self.collection_name = str(self.config.get("collection_name") or "").strip() or self.COLLECTION_NAME
         self.embedding_dimensions = int(self.config.get("embedding_dimensions", 1024))
         self.target_values = self._target_values(self.config)
         self.operation_id = str(self.config.get("operation_id") or "").strip()
@@ -11014,27 +11087,12 @@ class QdrantMemoryClient:
         return list(dict.fromkeys(values))
 
     def _build_embeddings(self) -> Any:
-        provider = str(self.config.get("embedding_provider") or os.getenv("CYBER_AGENT_PROVIDER", "bedrock")).lower()
-        model = str(self.config.get("embedding_model") or os.getenv("CYBER_AGENT_EMBEDDING_MODEL", ""))
-        if provider == "ollama":
-            return OllamaEmbeddings(
-                model=model,
-                base_url=str(self.config.get("ollama_base_url") or os.getenv("OLLAMA_HOST", "http://localhost:11434")),
-                client_kwargs={"trust_env": False},
-            )
-        if provider == "gemini":
-            return GoogleGenerativeAIEmbeddings(model=model, client_args={"trust_env": False})
-        if provider == "litellm":
-            return _LiteLLMEmbeddings(model)
-        if model.startswith("bedrock/"):
-            model = model.split("/", 1)[1]
-        from botocore.config import Config as BotocoreConfig
+        from modules.storage.qdrant import build_embeddings
 
-        return BedrockEmbeddings(
-            model_id=model,
-            region_name=str(self.config.get("aws_region") or os.getenv("AWS_REGION", "us-east-1")),
-            config=BotocoreConfig(proxies={}),
-        )
+        return build_embeddings(self.config, {
+            "ollama": OllamaEmbeddings, "gemini": GoogleGenerativeAIEmbeddings,
+            "litellm": _LiteLLMEmbeddings, "bedrock": BedrockEmbeddings,
+        })
 
     def _build_client(self) -> QdrantClient:
         if self.qdrant_url:

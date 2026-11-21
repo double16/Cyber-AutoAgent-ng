@@ -1,0 +1,40 @@
+{
+  "brief": "Controlled header-selector authorization comparison with policy/identity evidence, unchanged authentication, allowed/denied/shared controls and inconclusive treatment of unknowns.",
+  "grounding": "knowledge_allowed for original methodology; explicit source attribution verified against fetched publisher/maintainer text.",
+  "source_required_obligations": [],
+  "unmet_source_required_obligations": [],
+  "conflicts": [],
+  "sources": [
+    {
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/v4.2/document/4-Web_Application_Security_Testing/05-Authorization_Testing/04-Testing_for_Insecure_Direct_Object_References.md",
+      "title": "Testing for Insecure Direct Object References (WSTG-ATHZ-04)",
+      "retrieved_at": "2026-11-15",
+      "selected": true,
+      "selection_reason": "OWASP maintainer guidance supports object-reference variation using multiple users, known object ownership and application business rules to distinguish unauthorized access.",
+      "limits": "Does not prescribe the exact header-selector procedure or invalid-value fallback behavior. Identity, control design and interpretation remain original methodology; no live target claim is verified."
+    },
+    {
+      "url": "https://raw.githubusercontent.com/OWASP/wstg/v4.2/document/4-Web_Application_Security_Testing/05-Authorization_Testing/02-Testing_for_Bypassing_Authorization_Schema.md",
+      "title": "Testing for Bypassing Authorization Schema (WSTG-ATHZ-02)",
+      "retrieved_at": "2026-11-15",
+      "selected": true,
+      "selection_reason": "OWASP maintainer guidance discusses horizontal/vertical authorization comparisons with distinct sessions, and special request headers that can influence URL selection.",
+      "limits": "The header examples concern URL overrides rather than all account-selection headers. A changed or unchanged invalid-value response does not establish permission or prove absence of a selector. This technique must retain policy and object evidence."
+    },
+    {
+      "url": "https://portswigger.net/web-security/access-control/idor",
+      "title": "Insecure direct object references (IDOR) \u2014 Web Security Academy",
+      "retrieved_at": "2026-11-15",
+      "selected": true,
+      "selection_reason": "The publisher explains user-supplied object selection and a conditional account-record access-control failure when other controls are absent. Supports the draft attribution and the distinction between selection and an authorization failure.",
+      "limits": "Does not establish any target entitlement, header handling or exploitability. It is conceptual background, not proof of every procedure step."
+    }
+  ],
+  "rejected_fetches": [
+    {
+      "urls": "OWASP latest authorization-testing HTML routes",
+      "reason": "Redirected to generic latest foreword, not the requested test documents; not selected as mechanism evidence."
+    }
+  ],
+  "assessment": "Three actually fetched references are useful background. No source independently specifies the complete proposed workflow or proves live target behavior."
+}

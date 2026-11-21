@@ -73,3 +73,21 @@ describe('CredentialManagementService', () => {
     expect(execFile).toHaveBeenLastCalledWith(expect.stringContaining('.venv'), expect.any(Array), expect.anything(), expect.any(Function));
   });
 });
+
+it('forwards rotation lifecycle arguments and explicit Python configuration', async () => {
+  const env = {...process.env};
+  try {
+    process.env.CYBER_PROJECT_ROOT = '/workspace/project'; process.env.CYBER_PYTHON = '/custom/python';
+    const {CredentialManagementService} = await import('../../../src/services/CredentialManagementService.js');
+    const service = new CredentialManagementService();
+    for (const [method, command] of [['cancelRotation', 'cancel-rotation'], ['startRotation', 'start-rotation'], ['failRotation', 'fail-rotation']] as const) {
+      if (method === 'startRotation') await service[method]('target', 'request', {} as any);
+      else await service[method]('target', 'request', 'reason', {} as any);
+      expect(execFile).toHaveBeenLastCalledWith('/custom/python', expect.arrayContaining([command, '--request-id', 'request']), {cwd: '/workspace/project'}, expect.any(Function));
+    }
+    process.env.CYBER_CREDENTIAL_STORE_KEY = 'test-only-key';
+    process.env.CYBER_CREDENTIAL_STORE_PREVIOUS_KEYS = 'test-only-old-key';
+    await service.list('target', {deploymentMode: 'full-stack'} as any);
+    expect(execFile).toHaveBeenLastCalledWith('docker', expect.arrayContaining(['-e', 'CYBER_CREDENTIAL_STORE_KEY', '-e', 'CYBER_CREDENTIAL_STORE_PREVIOUS_KEYS']), expect.any(Function));
+  } finally {process.env = env;}
+});

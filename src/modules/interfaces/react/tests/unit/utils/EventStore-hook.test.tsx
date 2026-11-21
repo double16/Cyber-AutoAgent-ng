@@ -1,0 +1,36 @@
+import React from 'react';
+import {expect, it} from '@jest/globals';
+import TestRenderer, {act} from '../test-renderer.js';
+import {EventStore, useEventStore} from '../../../src/utils/EventStore.js';
+(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+it('reads recent events across complete chunks and preserves empty ranges', () => {
+  const store = new EventStore();
+  const events = Array.from({length: 220}, (_, id) => ({id: String(id), type: 'output', content: String(id)} as any));
+  store.appendBatch(events);
+  expect(store.getRecent(140)).toEqual(events.slice(-140));
+  expect(store.getRecent(0)).toEqual([]);
+  expect(store.getRange(250, 260)).toEqual([]);
+  expect(store.getRange(0, 50)).toEqual(events.slice(0, 50));
+  const empty = new EventStore(0);
+  empty.appendBatch(events);
+  expect(empty.count).toBe(0);
+  expect(empty.toArray()).toEqual([]);
+});
+it('publishes appended, batched, split, recent and cleared hook state', () => {
+  let state!: ReturnType<typeof useEventStore>;
+  const Harness = () => {state = useEventStore(); return null;};
+  let renderer!: ReturnType<typeof TestRenderer.create>;
+  act(() => {renderer = TestRenderer.create(<Harness/>);});
+  const a = {id: 'a', type: 'output', content: 'a'} as any;
+  const b = {...a, id: 'b'};
+  act(() => state.append(a));
+  act(() => state.appendBatch([b]));
+  expect(state.count).toBe(2);
+  expect(state.getEvents()).toEqual([a,b]);
+  expect(state.getRecent(1)).toEqual([b]);
+  expect(state.split(1)).toEqual({completed: [a], active: [b]});
+  act(() => state.clear());
+  expect(state.getEvents()).toEqual([]);
+  expect(state.count).toBe(0);
+  act(() => renderer.unmount());
+});

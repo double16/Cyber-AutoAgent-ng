@@ -1,0 +1,67 @@
+{
+  "full_suite": {
+    "passed": 8211,
+    "skipped": 46,
+    "deselected": 89,
+    "warnings": 29,
+    "seconds": 788.6,
+    "command": "UV_CACHE_DIR=$PWD/.uv-cache uv run ./.github/scripts/run-python-coverage.sh"
+  },
+  "coverage_floor": "All selected Python files pass 80% statement and branch floors",
+  "ruff": "passed",
+  "diff_check": "passed",
+  "files": {
+    "src/modules/techniques/matching.py": {
+      "sha256": "9793901d1af03acaccb4bcba20be76f077957f6dc4f4b5435008b67fec5dc764",
+      "statement_percent": 100.0,
+      "branch_percent": 94.11764705882354
+    },
+    "src/modules/techniques/selection_cache.py": {
+      "sha256": "08c6bb3bfdc2081a02ddf57044277bde6eef804315775ae9becd46c38311c171",
+      "statement_percent": 100.0,
+      "branch_percent": 100.0
+    },
+    "src/modules/techniques/triggers.py": {
+      "sha256": "5ce88a6f6f043e3a3544521b585acebb1d6bbaabca05e056fc2a7f4f4728913f",
+      "statement_percent": 99.11504424778761,
+      "branch_percent": 94.26229508196721
+    },
+    "src/modules/techniques/integration.py": {
+      "sha256": "99ddb9358c00107346e7703207e55f11ee8cf099f1db22ed36bae7a787ebbddb",
+      "statement_percent": 95.06172839506173,
+      "branch_percent": 92.85714285714286
+    },
+    "src/modules/techniques/service.py": {
+      "sha256": "0b8bad217117342ee318ac5a75dba8120baa02dd8570b346792ac2d4f946f363",
+      "statement_percent": 97.07495429616088,
+      "branch_percent": 90.74074074074075
+    },
+    "src/modules/agents/hypothesis_context.py": {
+      "sha256": "722a3dfa0e344c85d465506cd7c3c4bcc47261129451ddcee2952ee7e69cfbc0",
+      "statement_percent": 99.15611814345992,
+      "branch_percent": 95.83333333333333
+    },
+    "src/modules/agents/hypothesis_review.py": {
+      "sha256": "e0193ad23c735c8ddf78da36e394683b654544075ea776d4031fcd68c8168004",
+      "statement_percent": 99.02912621359224,
+      "branch_percent": 98.35164835164835
+    }
+  },
+  "live_checks": {
+    "generation_requests": 50,
+    "relevance_probe": "3 scoped fixtures completed",
+    "semantic_probe": {
+      "baseline_correct": 2,
+      "comparison_correct": 4,
+      "cases": 4
+    },
+    "full_controller": {
+      "task_status": "partial_failure",
+      "correct_classification": false,
+      "accepted_result": null,
+      "feedback_score": 0,
+      "generation_requests": 45
+    },
+    "effectiveness": "End-to-end improvement remains unproven"
+  }
+}

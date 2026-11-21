@@ -1,0 +1,73 @@
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from dotenv import load_dotenv
+from modules.techniques.review_calibration import CalibrationCase, code_identity
+
+parser=argparse.ArgumentParser()
+parser.add_argument("--run",action="store_true")
+args=parser.parse_args()
+repo=Path.cwd()
+trial=repo/"outputs/technique_review_trials/incremental-review-20261106-1"
+research=repo/"docs/research/technique-review-incremental-corrections/live-acceptance-1"
+protocol=json.loads((research/"protocol.json").read_text())
+cases=[CalibrationCase.model_validate(row) for row in json.loads((research/"cases.json").read_text())]
+subjects={case.id:case.digest() for case in cases}
+assert subjects=={row["id"]:row["sha256"] for row in protocol["subjects"]}
+assert code_identity(repo)==protocol["candidate_code_identity"]
+if args.run and protocol["status"]!="authorized":
+    raise RuntimeError("Live positive acceptance requires confirmed labels and a new authorized allowance")
+load_dotenv(repo/".env",override=False)
+env=dict(os.environ,PYTHONPATH=str(repo/"src"))
+worker=repo/"src/modules/techniques/review_calibration_worker.py"
+receipt_path=trial/"preflight.json"
+receipt={"candidate_code_identity":protocol["candidate_code_identity"],"subjects":subjects,"wire_modes":["native","tool"],"status":"passed"}
+
+def execute(case,root,budget,offline,mode):
+    assert code_identity(repo)==protocol["candidate_code_identity"]
+    root.mkdir(parents=True,mode=0o700)
+    job={"case":case.model_dump(),"arm":"candidate","root":str(root),"budget":str(budget),"model":protocol["model"],"budget_module":str(trial/"budget_adapter.py"),"offline_module":str(repo/"src/modules/techniques/review_calibration_offline.py"),"offline":offline,"wire_mode":mode}
+    path=root/"job.json"
+    path.write_text(json.dumps(job,indent=2))
+    with (root/"worker.log").open("w") as stream:
+        process=subprocess.run([sys.executable,str(worker),str(path)],cwd=repo,env=env,stdout=stream,stderr=stream,check=False)
+    if process.returncode:
+        raise RuntimeError("Worker process failed; preserve this attempt")
+    result=json.loads((root/"outcome.json").read_text())
+    assert code_identity(repo)==protocol["candidate_code_identity"]
+    return result
+
+if not receipt_path.exists():
+    outcomes=[]
+    for mode in ("native","tool"):
+        for index,case in enumerate(cases):
+            result=execute(case,trial/"preflight"/mode/f"{index:02d}-{case.id}",trial/f"offline-{mode}-budget.json",True,mode)
+            outcomes.append({"case":case.id,"wire_mode":mode,"status":result["status"],"counts":result["counts"],"scripted_model_dispatches":result.get("scripted_model_dispatches")})
+            if result["status"]!="offline_contract_passed":
+                raise RuntimeError("Offline preflight failed; live dispatch prohibited")
+    receipt_path.write_text(json.dumps(receipt,indent=2))
+    (trial/"preflight-outcomes.json").write_text(json.dumps(outcomes,indent=2))
+assert json.loads(receipt_path.read_text())==receipt
+if args.run:
+    outcomes=[]
+    for index,case in enumerate(cases):
+        latest=[CalibrationCase.model_validate(row) for row in json.loads((research/"cases.json").read_text())]
+        case=next(row for row in latest if row.id==case.id)
+        assert case.digest()==subjects[case.id]
+        root=trial/"live"/f"{index:02d}-{case.id}"
+        if case.adjudication=="pending":
+            outcomes.append({"case":case.id,"status":"pending_human_adjudication","label":case.adjudication})
+            (trial/"results.json").write_text(json.dumps(outcomes,indent=2))
+            break
+        if (root/"outcome.json").exists():
+            previous=json.loads((root/"job.json").read_text())
+            assert CalibrationCase.model_validate(previous["case"]).digest()==case.digest()
+            result=json.loads((root/"outcome.json").read_text())
+        else:
+            result=execute(case,root,trial/"live-budget.json",False,"native")
+        outcomes.append({"case":case.id,**result})
+        (trial/"results.json").write_text(json.dumps(outcomes,indent=2))
+print("Live processing stopped; inspect exact outcomes" if args.run else "Offline preflight passed; no live requests")

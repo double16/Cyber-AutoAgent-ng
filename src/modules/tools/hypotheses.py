@@ -30,9 +30,15 @@ class Hypothesis(BaseModel):
     suspected_mechanism: Text
     attacker_controlled_input: Text
     safe_test_steps: list[Text] = Field(min_length=1)
-    positive_expectations: list[Text] = Field(min_length=1)
-    negative_expectations: list[Text] = Field(min_length=1)
-    required_evidence: list[Text] = Field(min_length=1)
+    positive_expectations: list[Text] = Field(
+        min_length=1, description="Observation distinguishing the suspected security consequence from legitimate behavior.",
+    )
+    negative_expectations: list[Text] = Field(
+        min_length=1, description="Legitimate baseline and control outcomes against which the positive result is compared.",
+    )
+    required_evidence: list[Text] = Field(
+        min_length=1, description="Evidence needed to establish prerequisites and distinguish the claimed consequence.",
+    )
     supporting_refs: list[Text] = Field(
         min_length=1, description="Current-operation artifact: or artifact_id: references, not memory IDs or URLs.",
     )
@@ -294,6 +300,7 @@ def build_revise_hypothesis_tool(
         with mutation_lock:
             return apply_revision(hypothesis_id, replacement, reason)
 
+    revise_hypothesis._cyber_technique_observation_origin = "analysis"
     return revise_hypothesis
 
 
@@ -419,6 +426,7 @@ def build_record_hypotheses_tool(
         task.recovery_context["hypothesis_publications"] = publications
         return json.dumps(binding)
 
+    record_hypotheses._cyber_technique_observation_origin = "analysis"
     return record_hypotheses
 
 
@@ -451,6 +459,7 @@ def build_read_hypotheses_tool(
         return json.dumps({"item_id": item_id, "dispositions": dispositions, "hypotheses": page,
                            "next_offset": offset + len(page) if offset + len(page) < len(records) else None})
 
+    read_hypotheses._cyber_technique_observation_origin = "analysis"
     return read_hypotheses
 
 

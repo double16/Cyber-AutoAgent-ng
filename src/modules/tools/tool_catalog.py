@@ -250,16 +250,21 @@ def tool_catalog_wrapper(agent: Agent, shell_commands: list[str]):
             parts = re.split(r"[\s,;]+", (keywords or ""))
         else:
             parts = []
-        keywords = [w.strip().lower() for w in parts if w.strip()]
+        terms = [w.strip() for w in parts if w.strip()]
+        keywords = [w.lower() for w in terms]
         found_tools = []
         catalog = ""
         all_tools = agent.tool_registry.get_all_tools_config()
-        specific_tool = len(keywords) == 1 and (keywords[0] in all_tools or keywords[0] in shell_commands)
+        exact_matches = [name for name in all_tools if len(keywords) == 1 and name.lower() == keywords[0]]
+        exact_tool = next((name for name in exact_matches if name == terms[0]), None)
+        if exact_tool is None and len(exact_matches) == 1:
+            exact_tool = exact_matches[0]
+        specific_tool = len(keywords) == 1 and (exact_tool is not None or keywords[0] in shell_commands)
         shell_found = False
         for tool_name, tool_spec in all_tools.items():
             if tool_name == "shell":
                 shell_found = True
-            if specific_tool and tool_name != keywords[0]:
+            if specific_tool and tool_name != exact_tool:
                 continue
             if keywords:
                 if not any(w in tool_name.lower() or w in tool_spec.get("description", "").lower() for w in keywords):
@@ -267,13 +272,18 @@ def tool_catalog_wrapper(agent: Agent, shell_commands: list[str]):
             found_tools.append(tool_name)
 
             tool_desc = tool_spec.get("description", "")
-            if len(tool_desc) > 200:
-                tool_desc = tool_desc[:200] + " ..."
+            if specific_tool:
+                schema_help = "\nInput schema: " + json.dumps(tool_spec.get("inputSchema", {}), ensure_ascii=False)
+            else:
+                tool_desc = tool_desc[:200] + (" ..." if len(tool_desc) > 200 else "")
+                schema_help = "\nQuery this tool by its exact name for its full description and input schema."
             catalog += f"""
 {_SEPARATOR}
 name: {tool_name}
 
 {tool_desc}
+
+{schema_help}
 
 {_SEPARATOR}
 """

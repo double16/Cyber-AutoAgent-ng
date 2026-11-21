@@ -1,0 +1,41 @@
+{
+  "status": "prepared",
+  "review_mode": "single",
+  "candidate_code_identity": "a17349c14faced6e8c9e18789028880e61a2bd01bd073eaa64a524d485c1737a",
+  "provider": "ollama",
+  "model": "muse-glimmer:30b",
+  "execution": "sequential",
+  "provider_request_cap": 21,
+  "role_invocation_cap": 21,
+  "prior_live_requests": 227,
+  "live_requests": 0,
+  "authorization": "Offline preflight only; separate live authorization required.",
+  "subjects": [
+    {
+      "id": "human-network",
+      "sha256": "67892aee0da7a4f176a6f5dc93abcd4d4071f02bb8a3a6a49ffb143f1790640e",
+      "label": "acceptable"
+    },
+    {
+      "id": "human-filesystem",
+      "sha256": "83ed73fa5c630d7dc7371e200b8721f5c8c3602058ad4839abe806b4f0b65a85",
+      "label": "needs_correction"
+    },
+    {
+      "id": "http-selector",
+      "sha256": "3229959bafb3b2dbfb6ad7cb29b0bef8e0a836b40f31401ef359ea8c3440e88c",
+      "label": "needs_correction"
+    },
+    {
+      "id": "generate-filesystem",
+      "sha256": "3e2c413cd9ee4f207f32a51e8f08083f2e5d0847f28d0bd80a1af78e626e8a80",
+      "label": "acceptable"
+    },
+    {
+      "id": "http-selector-corrected",
+      "sha256": "d575bfe46ef3cf6caf76a449b0781bfdd429dba89a3fac00578b0093f5bf7fb4",
+      "label": "acceptable"
+    }
+  ],
+  "acceptance": "Correct decisions and actionable justified corrections on all five cases; no source-completeness rejection for knowledge-allowed content."
+}

@@ -605,7 +605,9 @@ def setup_langfuse_connection(logger, deployment_mode):
     # Set OpenTelemetry environment variables that Strands SDK will use
     os.environ["OTEL_SERVICE_NAME"] = "cyber-autoagent"
     os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = f"{host}/api/public/otel"
-    os.environ["OTEL_EXPORTER_OTLP_HEADERS"] = f"Authorization=Basic {auth_token}"
+    os.environ["OTEL_EXPORTER_OTLP_HEADERS"] = (
+        f"Authorization=Basic {auth_token},x-langfuse-ingestion-version=4"
+    )
 
     logger.info("Langfuse connection configured at %s", host)
     logger.info("OTLP endpoint: %s", os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"])

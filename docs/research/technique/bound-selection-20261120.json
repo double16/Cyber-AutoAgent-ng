@@ -1,0 +1,501 @@
+{
+  "model": "muse-glimmer:30b-mlx",
+  "arms": {
+    "initial": {
+      "requests": 9,
+      "cases": [
+        {
+          "case": "explicit-missing-control-0",
+          "correct_selection": true,
+          "attempts": 1,
+          "judgments": [
+            {
+              "requirement_id": "request",
+              "verdict": "unmet",
+              "passages": [],
+              "explanation": "The passage provides inspection of credential syntax and encoding and recording decoded fields, but explicitly states 'No temporal validation procedure is provided.' The requested expiry validation with before-expiry and after-expiry comparisons is therefore missing.",
+              "missing_capability": "d"
+            }
+          ],
+          "detail_review": "Inadequate: the missing-capability field contains only d, despite a correct explanation."
+        },
+        {
+          "case": "explicit-missing-control-1",
+          "correct_selection": true,
+          "attempts": 1,
+          "judgments": [
+            {
+              "requirement_id": "request",
+              "verdict": "unmet",
+              "passages": [],
+              "explanation": "The passage provides inspection of credential syntax and encoding and recording decoded fields, but explicitly states 'No temporal validation procedure is provided.'",
+              "missing_capability": "d"
+            }
+          ],
+          "detail_review": "Inadequate: the missing-capability field contains only d, despite a correct explanation."
+        },
+        {
+          "case": "explicit-missing-control-2",
+          "correct_selection": true,
+          "attempts": 1,
+          "judgments": [
+            {
+              "requirement_id": "request",
+              "verdict": "unmet",
+              "passages": [],
+              "explanation": "The passage provides inspection of credential syntax and encoding and recording decoded fields, but explicitly states 'No temporal validation procedure is provided.'",
+              "missing_capability": "d"
+            }
+          ],
+          "detail_review": "Inadequate: the missing-capability field contains only d, despite a correct explanation."
+        },
+        {
+          "case": "hidden-upload-0",
+          "correct_selection": true,
+          "attempts": 1,
+          "judgments": [
+            {
+              "requirement_id": "request",
+              "verdict": "covered",
+              "passages": [
+                {
+                  "passage_id": 1,
+                  "quote": "purpose: Design multipart upload hypotheses"
+                }
+              ],
+              "explanation": "The module purpose matches the requested work and the passage gives a multipart upload hypothesis procedure: Map the client-controlled multipart file and filename fields. Establish a permitted file baseline. Vary one filename using harmless owner-provided fixtures. Establish storage boundary and downstream handling before claiming a consequence. Compare rejection or confined storage with verified storage outside the permitted location. Retain baseline, variations and independent state evidence.",
+              "missing_capability": ""
+            }
+          ]
+        },
+        {
+          "case": "hidden-upload-1",
+          "correct_selection": true,
+          "attempts": 1,
+          "judgments": [
+            {
+              "requirement_id": "request",
+              "verdict": "covered",
+              "passages": [
+                {
+                  "passage_id": 1,
+                  "quote": "purpose: Design multipart upload hypotheses"
+                }
+              ],
+              "explanation": "The module purpose matches the requested work and the passage gives a multipart upload hypothesis procedure: Map the client-controlled multipart file and filename fields. Establish a permitted file baseline. Vary one filename using harmless owner-provided fixtures. Establish storage boundary and downstream handling before claiming a consequence. Compare rejection or confined storage with verified storage outside the permitted location. Retain baseline, variations and independent state evidence.",
+              "missing_capability": ""
+            }
+          ]
+        },
+        {
+          "case": "hidden-upload-2",
+          "correct_selection": true,
+          "attempts": 1,
+          "judgments": [
+            {
+              "requirement_id": "request",
+              "verdict": "covered",
+              "passages": [
+                {
+                  "passage_id": 1,
+                  "quote": "purpose: Design multipart upload hypotheses"
+                }
+              ],
+              "explanation": "The module purpose matches the requested work and the passage gives a multipart upload hypothesis procedure: Map the client-controlled multipart file and filename fields. Establish a permitted file baseline. Vary one filename using harmless owner-provided fixtures. Establish storage boundary and downstream handling before claiming a consequence. Compare rejection or confined storage with verified storage outside the permitted location. Retain baseline, variations and independent state evidence.",
+              "missing_capability": ""
+            }
+          ]
+        },
+        {
+          "case": "optional-details-0",
+          "correct_selection": true,
+          "attempts": 1,
+          "judgments": [
+            {
+              "requirement_id": "request",
+              "verdict": "covered",
+              "passages": [
+                {
+                  "passage_id": 1,
+                  "quote": "purpose: Design object-access comparison hypotheses"
+                }
+              ],
+              "explanation": "Purpose explicitly matches the requested capability.",
+              "missing_capability": ""
+            }
+          ]
+        },
+        {
+          "case": "optional-details-1",
+          "correct_selection": true,
+          "attempts": 1,
+          "judgments": [
+            {
+              "requirement_id": "request",
+              "verdict": "covered",
+              "passages": [
+                {
+                  "passage_id": 1,
+                  "quote": "purpose: Design object-access comparison hypotheses"
+                }
+              ],
+              "explanation": "Purpose explicitly matches the requested capability.",
+              "missing_capability": ""
+            }
+          ]
+        },
+        {
+          "case": "optional-details-2",
+          "correct_selection": true,
+          "attempts": 1,
+          "judgments": [
+            {
+              "requirement_id": "request",
+              "verdict": "covered",
+              "passages": [
+                {
+                  "passage_id": 1,
+                  "quote": "purpose: Design object-access comparison hypotheses"
+                }
+              ],
+              "explanation": "Purpose explicitly matches the requested capability.",
+              "missing_capability": ""
+            }
+          ]
+        }
+      ]
+    },
+    "complete_capability": {
+      "requests": 9,
+      "cases": [
+        {
+          "case": "explicit-missing-control-0",
+          "correct_selection": true,
+          "attempts": 1,
+          "judgments": [
+            {
+              "requirement_id": "request",
+              "verdict": "unmet",
+              "passages": [],
+              "explanation": "The passage provides inspection of credential syntax and encoding and recording decoded fields, but explicitly states 'No temporal validation procedure is provided.'",
+              "missing_capability": "Design expiry validation with before-expiry and after-expiry comparisons"
+            }
+          ],
+          "detail_review": "Names the full requested before-expiry and after-expiry comparison."
+        },
+        {
+          "case": "explicit-missing-control-1",
+          "correct_selection": true,
+          "attempts": 1,
+          "judgments": [
+            {
+              "requirement_id": "request",
+              "verdict": "unmet",
+              "passages": [],
+              "explanation": "The passage provides inspection of credential syntax and encoding and recording decoded fields, but explicitly states 'No temporal validation procedure is provided.'",
+              "missing_capability": "Design expiry validation with before-expiry and after-expiry comparisons"
+            }
+          ],
+          "detail_review": "Names the full requested before-expiry and after-expiry comparison."
+        },
+        {
+          "case": "explicit-missing-control-2",
+          "correct_selection": true,
+          "attempts": 1,
+          "judgments": [
+            {
+              "requirement_id": "request",
+              "verdict": "unmet",
+              "passages": [],
+              "explanation": "The passage provides inspection of credential syntax and encoding and recording decoded fields, but explicitly states 'No temporal validation procedure is provided.'",
+              "missing_capability": "Design expiry validation with before-expiry and after-expiry comparisons"
+            }
+          ],
+          "detail_review": "Names the full requested before-expiry and after-expiry comparison."
+        },
+        {
+          "case": "hidden-upload-0",
+          "correct_selection": true,
+          "attempts": 1,
+          "judgments": [
+            {
+              "requirement_id": "request",
+              "verdict": "covered",
+              "passages": [
+                {
+                  "passage_id": 1,
+                  "quote": "purpose: Design multipart upload hypotheses"
+                }
+              ],
+              "explanation": "The module purpose matches the requested work and the passage gives a multipart upload hypothesis procedure: Map the client-controlled multipart file and filename fields. Establish a permitted file baseline. Vary one filename using harmless owner-provided fixtures. Establish storage boundary and downstream handling before claiming a consequence. Compare rejection or confined storage with verified storage outside the permitted location. Retain baseline, variations and independent state evidence.",
+              "missing_capability": ""
+            }
+          ]
+        },
+        {
+          "case": "hidden-upload-1",
+          "correct_selection": true,
+          "attempts": 1,
+          "judgments": [
+            {
+              "requirement_id": "request",
+              "verdict": "covered",
+              "passages": [
+                {
+                  "passage_id": 1,
+                  "quote": "purpose: Design multipart upload hypotheses"
+                }
+              ],
+              "explanation": "The module purpose matches the requested work and the passage gives a multipart upload hypothesis procedure: Map the client-controlled multipart file and filename fields. Establish a permitted file baseline. Vary one filename using harmless owner-provided fixtures. Establish storage boundary and downstream handling before claiming a consequence. Compare rejection or confined storage with verified storage outside the permitted location. Retain baseline, variations and independent state evidence.",
+              "missing_capability": ""
+            }
+          ]
+        },
+        {
+          "case": "hidden-upload-2",
+          "correct_selection": true,
+          "attempts": 1,
+          "judgments": [
+            {
+              "requirement_id": "request",
+              "verdict": "covered",
+              "passages": [
+                {
+                  "passage_id": 1,
+                  "quote": "purpose: Design multipart upload hypotheses"
+                }
+              ],
+              "explanation": "The module purpose matches the requested work and the passage gives a multipart upload hypothesis procedure: Map the client-controlled multipart file and filename fields. Establish a permitted file baseline. Vary one filename using harmless owner-provided fixtures. Establish storage boundary and downstream handling before claiming a consequence. Compare rejection or confined storage with verified storage outside the permitted location. Retain baseline, variations and independent state evidence.",
+              "missing_capability": ""
+            }
+          ]
+        },
+        {
+          "case": "optional-details-0",
+          "correct_selection": true,
+          "attempts": 1,
+          "judgments": [
+            {
+              "requirement_id": "request",
+              "verdict": "covered",
+              "passages": [
+                {
+                  "passage_id": 1,
+                  "quote": "purpose: Design object-access comparison hypotheses"
+                }
+              ],
+              "explanation": "Purpose explicitly matches the requested capability.",
+              "missing_capability": ""
+            }
+          ]
+        },
+        {
+          "case": "optional-details-1",
+          "correct_selection": true,
+          "attempts": 1,
+          "judgments": [
+            {
+              "requirement_id": "request",
+              "verdict": "covered",
+              "passages": [
+                {
+                  "passage_id": 1,
+                  "quote": "purpose: Design object-access comparison hypotheses"
+                }
+              ],
+              "explanation": "Purpose explicitly matches the requested capability.",
+              "missing_capability": ""
+            }
+          ]
+        },
+        {
+          "case": "optional-details-2",
+          "correct_selection": true,
+          "attempts": 1,
+          "judgments": [
+            {
+              "requirement_id": "request",
+              "verdict": "covered",
+              "passages": [
+                {
+                  "passage_id": 1,
+                  "quote": "purpose: Design object-access comparison hypotheses"
+                }
+              ],
+              "explanation": "Purpose explicitly matches the requested capability.",
+              "missing_capability": ""
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "component_tests": {
+    "passed": 290,
+    "skipped": 7
+  },
+  "full_coverage": {
+    "passed": 8306,
+    "skipped": 46,
+    "deselected": 89,
+    "duration_seconds": 810.16,
+    "floor": "Every selected Python file >=80% lines and branches",
+    "ruff": "passed",
+    "whitespace": "passed"
+  },
+  "schema": {
+    "$defs": {
+      "Passage": {
+        "additionalProperties": false,
+        "properties": {
+          "passage_id": {
+            "description": "Use the exact one-based ID of the passage in the submitted revision.",
+            "title": "Passage Id",
+            "type": "integer"
+          },
+          "quote": {
+            "default": "",
+            "description": "Optional legacy quote. New reviews should return passage_id only. If supplied, preserve whitespace; do not paraphrase, add ellipses or quote across passage boundaries.",
+            "title": "Quote",
+            "type": "string"
+          }
+        },
+        "required": [
+          "passage_id"
+        ],
+        "title": "Passage",
+        "type": "object"
+      },
+      "SupportedRequirementJudgment": {
+        "additionalProperties": false,
+        "properties": {
+          "requirement_id": {
+            "const": "request",
+            "title": "Requirement Id",
+            "type": "string"
+          },
+          "verdict": {
+            "enum": [
+              "covered",
+              "conditional"
+            ],
+            "title": "Verdict",
+            "type": "string"
+          },
+          "passages": {
+            "items": {
+              "$ref": "#/$defs/Passage"
+            },
+            "minItems": 1,
+            "title": "Passages",
+            "type": "array"
+          },
+          "explanation": {
+            "minLength": 1,
+            "title": "Explanation",
+            "type": "string"
+          },
+          "missing_capability": {
+            "default": "",
+            "title": "Missing Capability",
+            "type": "string"
+          }
+        },
+        "required": [
+          "requirement_id",
+          "verdict",
+          "passages",
+          "explanation"
+        ],
+        "title": "SupportedRequirementJudgment",
+        "type": "object"
+      },
+      "UnmetRequirementJudgment": {
+        "additionalProperties": false,
+        "properties": {
+          "requirement_id": {
+            "const": "request",
+            "title": "Requirement Id",
+            "type": "string"
+          },
+          "verdict": {
+            "const": "unmet",
+            "title": "Verdict",
+            "type": "string"
+          },
+          "passages": {
+            "items": {
+              "$ref": "#/$defs/Passage"
+            },
+            "title": "Passages",
+            "type": "array"
+          },
+          "explanation": {
+            "minLength": 1,
+            "title": "Explanation",
+            "type": "string"
+          },
+          "missing_capability": {
+            "description": "Name the requested procedure or control that the document lacks.",
+            "minLength": 1,
+            "pattern": "[\\s\\S]*\\S[\\s\\S]*",
+            "title": "Missing Capability",
+            "type": "string"
+          }
+        },
+        "required": [
+          "requirement_id",
+          "verdict",
+          "explanation",
+          "missing_capability"
+        ],
+        "title": "UnmetRequirementJudgment",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "reason": {
+        "minLength": 1,
+        "title": "Reason",
+        "type": "string"
+      },
+      "judgments": {
+        "items": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SupportedRequirementJudgment"
+            },
+            {
+              "$ref": "#/$defs/UnmetRequirementJudgment"
+            }
+          ]
+        },
+        "maxItems": 1,
+        "minItems": 1,
+        "title": "Judgments",
+        "type": "array"
+      }
+    },
+    "required": [
+      "reason",
+      "judgments"
+    ],
+    "title": "BoundSelectionReview",
+    "type": "object"
+  },
+  "schema_sha256": "b812fd4ba14915625a9249e0a01374cae655ae96868f94f1d2f994c2e4476d56",
+  "source_sha256": {
+    "src/modules/techniques/selection_review.py": "765e0ad540b67e62c1e298dc5f47952ad31ad3282e24dceab347b06d802d3ec9",
+    "src/modules/techniques/service.py": "0e5792737590a3b9793db6b58a798c3dd35cb24fbe06167e8ec846744d4e27f0",
+    "tests/techniques/test_selection_review.py": "112b556cb8d08adbe13866c65ec59f17dce464b7aaffa8c8cf8acd243eb9a174",
+    "tests/techniques/test_selection_cache.py": "d0fcf0ca2608cd2d202108b6061d9a59e59b122900623001f489558eb1bc9f28",
+    "tests/techniques/test_structured_roles.py": "74094796692b8650e5dbfcfd31ae5ae815cc2dbd4d1e9f365eb7c7a4c61aaa5d"
+  },
+  "limitations": [
+    "Reconstructed complete-document fixtures, not exact production operation replay",
+    "No target traffic or downstream effectiveness measurement",
+    "Corrected arm runs later than initial arm; this is a regression check, not a controlled estimate of broad performance"
+  ],
+  "promotion": "Corrected arm meets the controlled regression gate; deployment and production effectiveness review remain separate."
+}

@@ -1,0 +1,32 @@
+[
+  {
+    "case": "network",
+    "body_sha256": "963ee267ba5a18e325301acb8a4a51f09a6af8efc2d23e3040d92499964f3002",
+    "source": "docs/research/technique/author-lines-live-20261115/network.md",
+    "observations": [
+      "The procedure makes state-entry evidence part of its generic evidence list; it should make the required observations depend on the enforcement mechanism.",
+      "Policy baseline, identity correlation, controlled variation and unknown-evidence handling are present. No execution result validates their effectiveness."
+    ],
+    "adjudication": "assistant review only; not human acceptance or observed task benefit"
+  },
+  {
+    "case": "filesystem",
+    "body_sha256": "db78eb3e51257d192d98ffd40bbbd7e0977c01d0b749fb1cbeda4d12235d0c2c",
+    "source": "docs/research/technique/author-lines-live-20261115/filesystem.md",
+    "observations": [
+      "The prerequisites call for an intended principal set, but the procedure starts from observed metadata. The independent intended-policy baseline should remain explicit throughout.",
+      "An allowed-control failure is labeled a boundary-violation indicator. This needs disposition that distinguishes a denial or setup failure from unauthorized access. The document does state that the comparison does not prove vulnerability."
+    ],
+    "adjudication": "assistant review only; not human acceptance or observed task benefit"
+  },
+  {
+    "case": "http",
+    "body_sha256": "d54d5cd9b684265925bf0445250ed67028426a341accae55794aa94f06ba52cd",
+    "source": "docs/research/technique/author-lines-live-20261115/http.md",
+    "observations": [
+      "The example compare function is an explicit pass stub, not an executable comparison implementation.",
+      "The text requires policy, object identity, valid credentials and controlled response comparisons before establishing an authorization violation. Its final impact caveat should distinguish already-observed disclosure from impact that remains untested."
+    ],
+    "adjudication": "assistant review only; not human acceptance or observed task benefit"
+  }
+]

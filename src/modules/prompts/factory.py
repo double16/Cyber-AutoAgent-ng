@@ -724,6 +724,10 @@ class ModulePromptLoader:
         self.last_loaded_report_prompt_source: str | None = None
 
 
+    def resolve_module_directory(self, module_name: str) -> Path | None:
+        """Resolve a module using configured plugin precedence."""
+        return self._find_module_dir(module_name)
+
     @lru_cache
     def _find_module_dir(self, module_name: str) -> Path | None:
         """Find the first matching module directory in plugin roots.

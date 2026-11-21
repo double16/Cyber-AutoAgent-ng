@@ -1,0 +1,68 @@
+[
+  {
+    "case": "human-network",
+    "wire_mode": "native",
+    "status": "offline_contract_passed",
+    "counts": {
+      "limit": 21,
+      "requests": 0,
+      "roles": 2
+    },
+    "scripted_model_dispatches": 4
+  },
+  {
+    "case": "human-filesystem",
+    "wire_mode": "native",
+    "status": "offline_contract_passed",
+    "counts": {
+      "limit": 21,
+      "requests": 0,
+      "roles": 4
+    },
+    "scripted_model_dispatches": 4
+  },
+  {
+    "case": "http-selector",
+    "wire_mode": "native",
+    "status": "offline_contract_passed",
+    "counts": {
+      "limit": 21,
+      "requests": 0,
+      "roles": 6
+    },
+    "scripted_model_dispatches": 4
+  },
+  {
+    "case": "human-network",
+    "wire_mode": "tool",
+    "status": "offline_contract_passed",
+    "counts": {
+      "limit": 21,
+      "requests": 0,
+      "roles": 2
+    },
+    "scripted_model_dispatches": 4
+  },
+  {
+    "case": "human-filesystem",
+    "wire_mode": "tool",
+    "status": "offline_contract_passed",
+    "counts": {
+      "limit": 21,
+      "requests": 0,
+      "roles": 4
+    },
+    "scripted_model_dispatches": 4
+  },
+  {
+    "case": "http-selector",
+    "wire_mode": "tool",
+    "status": "offline_contract_passed",
+    "counts": {
+      "limit": 21,
+      "requests": 0,
+      "roles": 6
+    },
+    "scripted_model_dispatches": 4
+  }
+]

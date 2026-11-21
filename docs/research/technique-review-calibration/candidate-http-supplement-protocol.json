@@ -1,0 +1,14 @@
+{
+  "status": "prepared",
+  "scope": "candidate HTTP only",
+  "authorization": "User requested testing HTTP candidate",
+  "additional_provider_request_cap": 10,
+  "additional_role_invocation_cap": 10,
+  "execution": "sequential",
+  "candidate_code_identity": "b5bb8dbc4cc3262f78365468252ee0f8f3d94f66c12c9570c150ddcf81f1bf92",
+  "subject_sha256": "8256461295337490dd96397b11569debd5dc46d372e616e7ae92502219197978",
+  "original_trial_status": "30 requests exhausted; preserved",
+  "baseline_http_supplement_requests": 5,
+  "prompt_changes": false,
+  "replacement_of_failed_trial": false
+}
