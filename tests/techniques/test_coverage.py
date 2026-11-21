@@ -109,11 +109,12 @@ def test_targeted_research_follows_gaps_and_deduplicates_documents(scripted_serv
 
     state.service.research = Research()
     state.service.runner = runner
-    _, markdown = state.service.get("Requested CVE verification")
+    revision, markdown = state.service.get("Requested CVE verification")
     assert len(requests) == 2
     assert "Missing requested CVE version coverage" in requests[1][0]
     assert requests[1][1] == {"https://vendor.example/1"}
-    assert "Considered 2 fetched documents" in markdown
+    assert "Considered 2 fetched documents" not in markdown
+    assert "Considered 2 fetched documents" in state.service.store.render(revision)
     assert {event["research_round"] for event in rounds if "research_round" in event} == {1, 2}
 
 

@@ -1498,3 +1498,11 @@ supplied list, and unmet judgments require a nonempty missing-capability explana
 conditional judgments require passage references. Python continues to validate complete requirement
 coverage and citations. Stored reviews retain their existing format; selection cache fingerprints
 include the output schema so old generation contracts cannot satisfy a changed schema.
+
+Agent-facing technique rendering preserves authored procedures, sources, and revision identity while omitting lifecycle feedback and internal source-coverage commentary. Full diagnostic exports retain that history.
+
+Generated revisions carry a controller-owned generation version, separate from Markdown schema
+version. Only versions matching `TECHNIQUE_GENERATION_VERSION` are eligible for lookup or executor
+replay. Unversioned revisions remain stored for historical review. Module-authored guidance follows
+its existing lifecycle. Increment the constant for material authoring changes; replacements are
+generated on demand rather than through a bulk rebuild.

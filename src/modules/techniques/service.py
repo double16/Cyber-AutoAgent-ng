@@ -40,6 +40,7 @@ from modules.techniques.review_contract import ReviewContract
 from modules.techniques.review_integrity import bind_review_prompt
 from modules.techniques.selection_review import document_passages, selection_output_model
 from modules.techniques.storage import TechniqueStore
+from modules.techniques.versioning import TECHNIQUE_GENERATION_VERSION, generation_eligible
 
 APPLICABILITY_RULES = (
     "Assess compatibility with the explicit methodology request, phase and methodology restrictions only. "
@@ -401,14 +402,14 @@ class TechniqueService:
             for row in candidates:
                 revision = row["revision_id"]
                 document = self.store.document(revision)
-                passages = document_passages(document.markdown)
+                passages = document_passages(document.render_guidance(revision))
                 requested = [item.model_dump() for item in requirements or []] or [
                     {"id": "request", "description": request},
                 ]
                 candidate = {
                     "revision_id": revision,
                     "sha256": document.sha256,
-                    "metadata": document.metadata.model_dump(),
+                    "metadata": document.metadata.model_dump(exclude={"source_coverage", "active"}),
                     "passages": [{"id": key, "text": value} for key, value in passages.items()],
                 }
                 prompt = (
@@ -492,7 +493,7 @@ class TechniqueService:
 
     @contextmanager
     def _build_lease(self, request: str):
-        key = hashlib.sha256(" ".join(request.lower().split()).encode()).hexdigest()
+        key = hashlib.sha256(f"{TECHNIQUE_GENERATION_VERSION}:{" ".join(request.lower().split())}".encode()).hexdigest()
         owner = str(uuid.uuid4())
         if not self.repository.lease(key, owner):
             raise RuntimeError("This technique is being built; retry the lookup shortly")
@@ -525,10 +526,11 @@ class TechniqueService:
                 return None
             lifecycle = self.repository.get(revision)
             document = self.store.document(revision)
-            if (lifecycle is None or not lifecycle["active"] or (context.phase_contexts
-                    and not set(context.phase_contexts).intersection(document.metadata.phases))):
+            if (lifecycle is None or not lifecycle["active"] or not generation_eligible(lifecycle)
+                    or (context.phase_contexts
+                        and not set(context.phase_contexts).intersection(document.metadata.phases))):
                 return None
-            return revision, self.store.render(revision), decision.receipt(context)
+            return revision, self.store.render(revision, guidance=True), decision.receipt(context)
 
     def get(
         self, request: str, context: MethodologyContext | None = None, *, on_decision: Callable | None = None,
@@ -555,7 +557,8 @@ class TechniqueService:
         if self.exports is not None and (outcome == "generated" or revision in self._pending_produced_exports):
             destination = self.exports.directory / f"{revision}.produced.md"
             try:
-                snapshot = destination if destination.exists() else self.exports.write(revision, markdown)
+                snapshot = (destination if destination.exists()
+                            else self.exports.write(revision, self.store.render(revision)))
                 fields["snapshot_path"] = snapshot.relative_to(self.exports.directory.parent).as_posix()
                 self._pending_produced_exports.discard(revision)
             except Exception:
@@ -567,7 +570,7 @@ class TechniqueService:
             "technique_resolved",
             revision_id=revision,
             title=metadata["title"],
-            origin=metadata["origin"],
+            origin=self.repository.get(revision)["origin"],
             outcome=outcome,
             **fields,
         )
@@ -609,11 +612,13 @@ class TechniqueService:
         resolution_fields = ({"applicability": decision.applicability,
                               "unmet_prerequisite_count": len(decision.unmet_prerequisites)} if decision else {})
         if selected:
-            return self._resolved(selected, self.store.render(selected), "reused", **resolution_fields)
+            return self._resolved(selected, self.store.render(selected, guidance=True), "reused", **resolution_fields)
         with self._build_lease(request):
             selected = self._select(request, context, requirements, reviews=reviews)
             if selected:
-                return self._resolved(selected, self.store.render(selected), "reused", **resolution_fields)
+                return self._resolved(
+                    selected, self.store.render(selected, guidance=True), "reused", **resolution_fields,
+                )
             research_queries = []
             documents, selection, _research_round = self._research_coverage(
                 request, requirements, context=context, research_queries=research_queries,
@@ -677,11 +682,15 @@ class TechniqueService:
             )
             from modules.techniques.documents import revision_id
 
-            prior = self.repository.get(revision_id(lineage, document.sha256))
+            prior = self.repository.get(revision_id(
+                lineage, f"{document.sha256}:generation:{TECHNIQUE_GENERATION_VERSION}",
+            ))
             if prior is not None and not prior["active"]:
                 raise ValueError("Final document repeats an inactive revision; stored feedback cannot be reset")
             revision = self.store.publish(document, lineage, "generated")
-            return self._resolved(revision, self.store.render(revision), "generated", **resolution_fields)
+            return self._resolved(
+                revision, self.store.render(revision, guidance=True), "generated", **resolution_fields,
+            )
 
     def resolve_bundle(
         self, request: str, context: MethodologyContext | None = None, *, operation: str = "", task: str = "",

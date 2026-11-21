@@ -24395,6 +24395,7 @@ def test_complete_hypothesis_prompts_agree_on_publication_and_repair(worker_flow
         assert "declared_identity_roles[1]" in prompt
         assert "registration_flow:declared-flow" in prompt
         assert "generation only, not proposed future tests" in prompt
+        assert "Declare future identity needs even when sessions are not yet available" in prompt
         assert "One role is not a cross-role gap" in prompt
         assert "Missing session readiness does not justify an empty" in prompt
         assert "explicitly linked parameter records" in prompt
@@ -24431,7 +24432,9 @@ def test_complete_hypothesis_prompts_agree_on_publication_and_repair(worker_flow
     assert "Python binds publication_sha256; omit it" in evaluator
     assert "Always include top-level status" in evaluator
     assert "INSIDE subject_reviews[].no_hypothesis_basis" in evaluator
-    assert "Complete shape example using the bound IDs" in evaluator
+    assert "Complete shape example using the bound IDs" not in evaluator
+    assert "Bound subject and hypothesis IDs" in evaluator
+    assert "Illustrative review only" not in evaluator
     assert "read_inspection_result" in controller._task_evaluator_system_prompt()
     assert "at least one content-bearing saved inspection" in evaluator
     assert "Each assessment must cite content-bearing" in evaluator
@@ -24464,7 +24467,8 @@ def test_complete_hypothesis_prompts_agree_on_publication_and_repair(worker_flow
         if "Required hypothesis review output" in prompt:
             assert "Always include top-level status" in fitted
             assert "INSIDE subject_reviews[].no_hypothesis_basis" in fitted
-            assert "Complete shape example using the bound IDs" in fitted
+            assert "Bound subject and hypothesis IDs" in fitted
+        assert "Illustrative review only" not in fitted
 
 
 @pytest.mark.parametrize("subject", ["https://service.test/entry", "tcp://service.test:1234", "/workspace/source.py"])

@@ -45,7 +45,8 @@ def test_general_generation_needs_one_reference_not_per_requirement_source_judgm
     assert len(state.research_calls) == 1
     assert not any(role in {"technique_requirement_assessor", "technique_requirement_reviewer"}
                    for role, _, _ in state.calls)
-    assert "Knowledge-allowed content is not source-verified" in document
+    assert "Knowledge-allowed content is not source-verified" not in document
+    assert "Knowledge-allowed content is not source-verified" in state.service.store.render(revision)
 
 
 def test_source_required_direct_lookup_remains_blocked_without_authority(scripted_service):

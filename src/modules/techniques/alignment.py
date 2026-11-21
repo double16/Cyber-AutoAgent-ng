@@ -20,6 +20,9 @@ AUTHORING_ADDITIONS = (
     "expected outcomes and evidence requirements without waiting for an explicit request. "
     "For hypothesis generation, give concrete future validation steps and useful illustrative payloads, "
     "clearly distinguished from observed results. "
+    "For example, stable tokens or cache headers motivate checks; a security consequence needs "
+    "cross-session exposure or acceptance enabling an unauthorized action. Likewise, distinguish "
+    "intentionally public configuration from secrets or metadata whose access policy requires protection. "
 )
 
 REVIEW_GUIDANCE = (

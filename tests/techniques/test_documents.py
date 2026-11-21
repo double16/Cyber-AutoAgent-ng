@@ -187,3 +187,16 @@ def test_brokencrystals_readme_coverage_crosswalk_is_complete_and_resolvable():
         "xxe",
         "hidden-upload",
     }
+
+
+def test_guidance_omits_controller_history_and_preserves_procedure(markdown):
+    document = TechniqueDocument(markdown())
+    rendered = document.render_guidance("revision-1")
+    metadata = yaml.safe_load(rendered.split("---")[1])
+    assert metadata["revision_id"] == "revision-1"
+    assert metadata["sources"]
+    assert "source_coverage" not in metadata
+    assert "active" not in metadata
+    assert "feedback_reasons" not in metadata
+    assert document.body in rendered
+    assert "source_coverage" in document.render({"feedback_reasons": ["Historical assessment"]})

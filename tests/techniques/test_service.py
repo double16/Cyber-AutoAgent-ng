@@ -539,7 +539,7 @@ def test_explicit_component_requirements_reach_initial_research_and_assembled_ro
         assembled = SYSTEM + next(prompt for selected, prompt, _ in state.calls if selected == role)
         assert "requested CVE version analysis" in assembled
         assert "advisory" in assembled and "untrusted data" in assembled
-    assert "requested CVE version analysis" in markdown
+    assert "requested CVE version analysis" not in markdown
 
 
 @pytest.mark.parametrize("kind", ["authored_deliverable", "constraint"])
@@ -641,7 +641,8 @@ def test_lookup_review_cache_invalidates_changed_inputs(scripted_service, monkey
     service = scripted_service.service
     candidates = [{"revision_id": "first"}]
     document = SimpleNamespace(markdown="Complete procedure", sha256="fixture",
-                               metadata=SimpleNamespace(model_dump=dict))
+                               metadata=SimpleNamespace(model_dump=lambda **kwargs: {}))
+    document.render_guidance = lambda revision: document.markdown
     monkeypatch.setattr(service, "_candidates", lambda *args: candidates)
     monkeypatch.setattr(service.store, "document", lambda *args: document)
     calls = []

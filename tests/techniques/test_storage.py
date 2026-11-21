@@ -159,3 +159,91 @@ def test_embedding_status_distinguishes_rebuild_and_reuse(store, markdown):
     )
     assert rebuilt.embedding_status()["embedding_documents"] == 1
     assert rebuilt.render(revision) == store.render(revision)
+
+
+@pytest.mark.parametrize("version", [None, 0, 2])
+def test_obsolete_generation_is_excluded_but_preserved(store, markdown, version):
+    revision = store.publish(TechniqueDocument(markdown()), "old", "generated")
+    with store.repository.transaction() as connection:
+        connection.execute("UPDATE technique_revisions SET generation_version = ?, pending_sync = 1 "
+                           "WHERE revision_id = ?", (version, revision))
+    assert store.search("JWT", active=True) == []
+    assert store.search_triggers("JWT", ["hypothesis_generation"]) == []
+    assert store.triggers(["hypothesis_generation"]) == []
+    assert store.document(revision).body
+    assert store.render(revision)
+    with pytest.raises(ValueError):
+        store.render(revision, guidance=True)
+    with pytest.raises(ValueError):
+        store.repository.use("operation", "task", revision)
+
+
+def test_generation_stamp_and_module_compatibility(store, markdown):
+    from modules.techniques.versioning import TECHNIQUE_GENERATION_VERSION
+
+    generated = store.publish(TechniqueDocument(markdown()), "generated", "generated")
+    module = store.publish(TechniqueDocument(markdown()), "module", "module:web")
+    assert store.repository.get(generated)["generation_version"] == TECHNIQUE_GENERATION_VERSION
+    assert store.repository.get(module)["generation_version"] is None
+    assert {row["revision_id"] for row in store.search("JWT", active=True)} == {generated, module}
+    assert store.render(module, guidance=True)
+
+
+def test_generation_increment_creates_distinct_revision_without_changing_source(store, markdown, monkeypatch):
+    import modules.techniques.repository as repository
+    import modules.techniques.storage as storage
+
+    document = TechniqueDocument(markdown())
+    first = store.publish(document, "same-lineage", "generated")
+    store.repository.use("operation", "task", first, {"delivered_documents": ["original snapshot"]})
+    monkeypatch.setattr(storage, "TECHNIQUE_GENERATION_VERSION", 2)
+    monkeypatch.setattr(repository, "TECHNIQUE_GENERATION_VERSION", 2)
+    second = store.publish(document, "same-lineage", "generated")
+    assert second != first
+    assert store.repository.get(second)["source_sha256"] == document.sha256
+    assert store.repository.get(first)["generation_version"] == 1
+    assert store.repository.get(second)["generation_version"] == 2
+    assert "original snapshot" in store.repository.pending_uses("operation", "task")[0]["use_context"]
+
+
+def test_stale_documents_do_not_consume_retrieval_limit(store, markdown):
+    stale = store.publish(TechniqueDocument(markdown()), "stale", "generated")
+    with store.repository.transaction() as connection:
+        connection.execute("UPDATE technique_revisions SET generation_version = NULL, pending_sync = 1 "
+                           "WHERE revision_id = ?", (stale,))
+    current = store.publish(TechniqueDocument(markdown()), "current", "generated")
+    assert [row["revision_id"] for row in store.search("JWT", active=True, limit=1)] == [current]
+    assert {row["revision_id"] for row in store.search_triggers("JWT", ["hypothesis_generation"], limit=1)} == {current}
+
+
+def test_reopen_rebuilds_old_index_without_trusting_persisted_eligibility(store, markdown):
+    revision = store.publish(TechniqueDocument(markdown()), "stale", "generated")
+    with store.repository.transaction() as connection:
+        connection.execute("UPDATE technique_revisions SET generation_version = NULL WHERE revision_id = ?",
+                           (revision,))
+    # Simulate an index from the previous compatibility epoch.
+    store.qdrant.delete_collection(store.index)
+    restored = TechniqueStore(store.qdrant, store.embeddings,
+                              {"embedding_dimensions": 3, "embedding_model": "test"}, store.repository)
+    assert restored.search("JWT", active=True) == []
+    assert restored.render(revision)
+
+
+def test_migration_keeps_existing_generated_revision_unversioned(tmp_path):
+    from modules.storage.sqlite import SQLiteMigrationRunner
+    from modules.techniques.repository import TechniqueRepository
+
+    path = str(tmp_path / "legacy.db")
+    migrations = SQLiteMigrationRunner._load_migrations()
+    from unittest.mock import patch
+
+    with patch.object(SQLiteMigrationRunner, "_load_migrations",
+                      return_value=[row for row in migrations if row[0] < 16]):
+        repository = TechniqueRepository(path)
+        with repository.transaction() as connection:
+            connection.execute("INSERT INTO technique_revisions "
+                               "(revision_id,lineage,source_sha256,origin,active,document_collection,created_at) "
+                               "VALUES ('legacy','lineage','digest','generated',1,'documents',0)")
+    migrated = TechniqueRepository(path)
+    assert migrated.get("legacy")["generation_version"] is None
+    assert migrated.get("legacy")["source_sha256"] == "digest"

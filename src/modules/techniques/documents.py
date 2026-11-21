@@ -72,6 +72,12 @@ class TechniqueDocument:
         self.markdown = markdown
         self.sha256 = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
 
+    def render_guidance(self, revision: str) -> str:
+        """Render authored guidance without historical controller commentary."""
+        metadata = self.metadata.model_dump(exclude={"source_coverage", "active"})
+        metadata["revision_id"] = revision
+        return f"---\n{yaml.safe_dump(metadata, sort_keys=False, allow_unicode=True)}---\n\n{self.body}\n"
+
     def render(self, lifecycle: dict[str, Any]) -> str:
         metadata = self.metadata.model_dump()
         metadata.update(lifecycle)

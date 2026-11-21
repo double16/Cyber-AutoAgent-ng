@@ -19448,8 +19448,11 @@ Do not use partial_failure when every review is retain and no criterion or prere
 """
         if hypothesis_review:
             hypothesis_review += (
-                "\nComplete shape example using the bound IDs (illustrative judgments only):\n"
-                + (review_binding or BoundHypothesisReview.capture(task, self.runtime.operation_id)).example + "\n"
+                "\nBound subject and hypothesis IDs (choose judgments using the structured output schema):\n"
+                + json.dumps([{ "item_id": row["item_id"],
+                    "hypothesis_ids": [item["hypothesis_id"] for item in row["hypotheses"]]}
+                    for row in json.loads((review_binding or BoundHypothesisReview.capture(
+                        task, self.runtime.operation_id)).example)["subject_reviews"]]) + "\n"
             )
             return (
                 "Review the assigned hypothesis publication only. Do not execute proposed tests or gather new "

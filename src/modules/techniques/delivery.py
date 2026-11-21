@@ -10,6 +10,7 @@ from strands.hooks import BeforeModelCallEvent, HookOrder, HookProvider
 from modules.handlers.conversation_budget import get_agent_prompt_limits, safe_estimate_tokens
 from modules.techniques.context import methodology_context
 from modules.techniques.documents import json_payload
+from modules.techniques.versioning import generation_eligible
 
 logger = logging.getLogger(__name__)
 MODE = "automatic_selected_document"
@@ -50,7 +51,7 @@ def automatic_snapshots(service, operation, task, *, active_only=False):
         if context.get("delivery_mode") == MODE:
             if active_only:
                 lifecycle = service.repository.get(row["revision_id"])
-                if lifecycle is None or not lifecycle["active"]:
+                if lifecycle is None or not lifecycle["active"] or not generation_eligible(lifecycle):
                     continue
             documents = context["delivered_documents"]
             if not isinstance(documents, list) or not documents or any(
@@ -175,12 +176,13 @@ class AutomaticGuidanceHook(HookProvider):
             receipt = {**selected["receipt"], "delivery_mode": MODE}
             payload = None
         lifecycle = self.service.repository.get(revision)
-        if lifecycle is None or not lifecycle["active"]:
+        if lifecycle is None or not lifecycle["active"] or not generation_eligible(lifecycle):
             self._event("inactive", revision_id=revision)
             return
         if payload is None:
             payload = PREAMBLE + json_payload("selected_technique", {
-                "revision_id": revision, "compatibility": receipt, "document": self.service.store.render(revision),
+                "revision_id": revision, "compatibility": receipt,
+                "document": self.service.store.render(revision, guidance=True),
             })
         present = any(payload in block.get("text", "") for row in agent.messages for block in row.get("content", []))
         target = next((message for message in reversed(agent.messages) if message.get("role") == "user"), None)

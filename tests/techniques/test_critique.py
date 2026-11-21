@@ -307,11 +307,11 @@ def test_all_assigned_requirements_survive_advisory_revision(scripted_service):
             return '{"summary":"Improve","recommendations":["Clarify the interpretation"]}'
         return original(role, prompt, tools)
     state.service.runner = runner
-    _, text = state.service.get("Boundary guidance", requirements=requirements)
+    revision, _text = state.service.get("Boundary guidance", requirements=requirements)
     assert len(authors) == 2
     for requirement in requirements:
         assert all(requirement.description in prompt for prompt in authors)
-        assert requirement.id in text
+        assert requirement.id in state.service.store.render(revision)
     assert len(state.research_calls) == 1
 
 

@@ -54,7 +54,8 @@ operation provenance is unknown. Assigned-subject scope permits relevant linked 
 inspection without expanding testing scope. Names are investigation leads, not proof of functionality.
 The generation task's authentication requirement governs generation only, not proposed future tests.
 Declare each hypothesis's own authentication_requirement: no roles for unauthenticated tests, one
-declared role for single-session tests, or account/role/tenant comparisons when supported by observations.
+declared role for single-session tests, or account/role/tenant comparisons when the proposed steps
+compare identities. Declare future identity needs even when sessions are not yet available.
 Consider unauthenticated versus each relevant role and same-role accounts where an access boundary
 supports them; different-role tests require distinct declared roles. One role is not a cross-role gap.
 Declared roles alone do not justify tests. Preserve ownership and trust-boundary observations and their

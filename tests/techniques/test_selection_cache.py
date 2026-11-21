@@ -125,3 +125,22 @@ def test_output_schema_changes_invalidate_selection_cache(cached, monkeypatch):
         )
         assert p.service._select("JWT handling", MethodologyContext())
         assert sum("COMPLETE technique" in prompt for _, prompt, _ in p.calls) == count + 1
+
+
+def test_generation_epoch_changes_selection_cache_key(cached, monkeypatch):
+    import modules.techniques.selection_cache as cache
+
+    with cached.service.events.scope(operation_id="operation", task_uid="task"):
+        previous = cache_key(cached.service, "same-prompt")
+        monkeypatch.setattr(cache, "TECHNIQUE_GENERATION_VERSION", cache.TECHNIQUE_GENERATION_VERSION + 1)
+        assert cache_key(cached.service, "same-prompt") != previous
+
+
+def test_cached_review_cannot_resurrect_obsolete_generation(cached):
+    context = MethodologyContext(phase_contexts=["hypothesis_generation"])
+    with cached.service.events.scope(operation_id="operation", task_uid="task"):
+        assert cached.service.select_existing("JWT handling", context)
+        with cached.service.repository.transaction() as connection:
+            connection.execute("UPDATE technique_revisions SET origin = 'generated', generation_version = NULL, "
+                               "pending_sync = 1 WHERE revision_id = ?", (cached.selection,))
+        assert cached.service.select_existing("JWT handling", context) is None

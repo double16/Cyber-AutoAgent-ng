@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from modules.storage.sqlite import SQLiteMigrationRunner
+from modules.techniques.versioning import TECHNIQUE_GENERATION_VERSION, generation_eligible
 
 
 class TechniqueRepository:
@@ -45,8 +46,8 @@ class TechniqueRepository:
             conn.execute(
                 "INSERT INTO technique_revisions "
                 "(revision_id, lineage, source_sha256, origin, active, inactive_reason, "
-                "document_collection, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "document_collection, created_at, generation_version) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     revision,
                     lineage,
@@ -56,6 +57,7 @@ class TechniqueRepository:
                     "" if active else "module_inactive",
                     collection,
                     time.time(),
+                    TECHNIQUE_GENERATION_VERSION if origin == "generated" else None,
                 ),
             )
 
@@ -68,8 +70,8 @@ class TechniqueRepository:
 
     def use(self, operation: str, task: str, revision: str, use_context: dict | None = None) -> None:
         with self.transaction() as conn:
-            row = conn.execute("SELECT active FROM technique_revisions WHERE revision_id = ?", (revision,)).fetchone()
-            if row is None or not row[0]:
+            row = conn.execute("SELECT * FROM technique_revisions WHERE revision_id = ?", (revision,)).fetchone()
+            if row is None or not row["active"] or not generation_eligible(dict(row)):
                 raise ValueError("Cannot use an inactive or unknown technique")
             conn.execute(
                 "INSERT OR IGNORE INTO technique_uses(operation_id, task_uid, revision_id, created_at, use_context) "

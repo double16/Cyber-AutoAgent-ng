@@ -1,0 +1,691 @@
+{
+  "generation_version": 1,
+  "base_commit": "bd48daaa2b7cc8bdeb1c16fe84ed21602f90b031",
+  "protocol": {
+    "model": "muse-glimmer:30b-mlx",
+    "cases": [
+      [
+        "csrf",
+        "https://service.test/api/auth/simple-csrf-flow",
+        "Retained client source declares GET /api/auth/simple-csrf-flow. No inputs or server handling observed. Cookie-based authentication and a protected state-changing action remain future prerequisites.",
+        "79742ca817de489a-fc0e7e44c0eba6c3.json",
+        "partial_failure"
+      ],
+      [
+        "oidc",
+        "https://service.test/api/auth/oidc-client",
+        "Retained client source declares GET /api/auth/oidc-client. Response and backend handling unobserved. It is not established whether this returns intentionally public client configuration or protected registration data.",
+        "f6da35dac089902a-53653867ac288c7e.json",
+        "partial_failure"
+      ],
+      [
+        "conditional-file",
+        "/workspace/export-handler.py",
+        "Source handler joins an attacker-supplied filename to an export directory and opens it. Containment enforcement unobserved. An owner-provided allowed file and harmless sibling fixture are available for future comparison.",
+        null,
+        "done"
+      ]
+    ],
+    "repetitions": 3,
+    "path": "Actual _evaluate_task with current prompts, native finalization and controller validation",
+    "limitations": "Reconstructed frozen evidence and historical hypothesis content; no target I/O, no live operation, no new authoring. Not a causal A/B experiment."
+  },
+  "requests": 18,
+  "controller_valid_trials": 9,
+  "status_agreement_trials": 8,
+  "total_trials": 9,
+  "trials": [
+    {
+      "case": "csrf",
+      "expected": "partial_failure",
+      "status": "partial_failure",
+      "reason": "Publication revisions or frozen acceptance corrections required",
+      "correct": true,
+      "controller_valid": true,
+      "review": {
+        "status": "partial_failure",
+        "reason": "Publication revisions or frozen acceptance corrections required",
+        "instructions": "",
+        "repair": {
+          "kind": "acceptance",
+          "evidence_gaps": [],
+          "execution_receipt_gaps": []
+        },
+        "publication_sha256": "392f779ff30a646f26b1ca0657a3a9f00bb4ff29e3b818af3376d67116811d26",
+        "subject_reviews": [
+          {
+            "item_id": "subject",
+            "decision": "retain",
+            "reason": "Publication contains three hypotheses for the assigned endpoint. Semantic review identifies grounding and discrimination deficiencies requiring revision; subject coverage is otherwise present.",
+            "hypotheses": [
+              {
+                "semantic_checks": {
+                  "grounding": {
+                    "verdict": "revise",
+                    "reason": "Grounding relies on name suggestion and client GET declaration. Inspection shows no inputs or server handling observed and cookie auth and protected action remain future prerequisites."
+                  },
+                  "test_discrimination": {
+                    "verdict": "revise",
+                    "reason": "Positive expectations describe token validation failure without distinguishing legitimate token handling or establishing the protected state-changing action and token retrieval."
+                  },
+                  "identity_requirements": {
+                    "verdict": "revise",
+                    "reason": "CSRF validation requires an authenticated session to obtain a token and test protected action. Declared authentication_requirement comparison none with no roles does not match the proposed steps."
+                  }
+                },
+                "hypothesis_id": "ad79033ac2ad4bdf6df0a221",
+                "decision": "revise",
+                "reason": "Observed basis is endpoint name suggestion and GET declaration with no inputs. No server handling, token issuance, or state-changing operation is observed. Preconditions for CSRF validation test are unmet."
+              },
+              {
+                "semantic_checks": {
+                  "grounding": {
+                    "verdict": "revise",
+                    "reason": "Grounding assumes token issuance in query string and Referer leakage. Inspection reports no inputs or server handling observed; token issuance mechanism is unconfirmed."
+                  },
+                  "test_discrimination": {
+                    "verdict": "revise",
+                    "reason": "Positive expectations conflate token presence in URL with Referer leakage without establishing that the endpoint returns a token or that Referer is sent to third-party origins for this flow."
+                  },
+                  "identity_requirements": {
+                    "verdict": "revise",
+                    "reason": "Token leakage via authenticated session requires an authenticated context. Declared comparison none with no roles is mismatched to preconditions requiring cookie-based authentication."
+                  }
+                },
+                "hypothesis_id": "be445cff718ed837cdefba23",
+                "decision": "revise",
+                "reason": "No evidence token is issued via GET or exposed in query string. Observed basis is name suggestion and GET declaration with no inputs; server behavior unestablished."
+              },
+              {
+                "semantic_checks": {
+                  "grounding": {
+                    "verdict": "revise",
+                    "reason": "Grounding assumes GET returns a token and cache headers are relevant. Inspection shows no inputs or server handling observed; token issuance and response headers are unconfirmed."
+                  },
+                  "test_discrimination": {
+                    "verdict": "revise",
+                    "reason": "Positive expectations describe token stability across sessions without establishing token issuance per session or distinguishing cache behavior from normal token rotation."
+                  },
+                  "identity_requirements": {
+                    "verdict": "revise",
+                    "reason": "Cache reuse test requires authenticated sessions to compare tokens across sessions. Declared comparison none with no roles does not provide required identity context."
+                  }
+                },
+                "hypothesis_id": "fe781a7e042f86aba30c1993",
+                "decision": "revise",
+                "reason": "No evidence endpoint returns a token or that caching is applied. Observed basis is GET declaration with no inputs and inferred operation."
+              }
+            ]
+          }
+        ],
+        "prerequisite_gaps": [],
+        "unresolved_criterion_ids": []
+      },
+      "attempts": 1,
+      "requests": 2,
+      "elapsed_seconds": 175.7877391250804,
+      "raw_record": "outputs/technique_review_trials/generation-version-20261120/csrf-0.json",
+      "raw_record_sha256": "673cfdaef327e89114cb13518fa474b3a9726471e59b798e6d8704671ebf068f"
+    },
+    {
+      "case": "csrf",
+      "expected": "partial_failure",
+      "status": "partial_failure",
+      "reason": "Publication revisions or frozen acceptance corrections required",
+      "correct": true,
+      "controller_valid": true,
+      "review": {
+        "status": "partial_failure",
+        "reason": "Publication revisions or frozen acceptance corrections required",
+        "instructions": "",
+        "repair": {
+          "kind": "acceptance",
+          "evidence_gaps": [],
+          "execution_receipt_gaps": []
+        },
+        "publication_sha256": "392f779ff30a646f26b1ca0657a3a9f00bb4ff29e3b818af3376d67116811d26",
+        "subject_reviews": [
+          {
+            "item_id": "subject",
+            "decision": "revise",
+            "reason": "Three published hypotheses lack grounded observed basis for the assigned endpoint. Inspection shows only a client GET declaration with no inputs and no server handling observed; cookie-based authentication and a protected state-changing action remain future prerequisites. Grounding and test discrimination are insufficient.",
+            "hypotheses": [
+              {
+                "semantic_checks": {
+                  "grounding": {
+                    "verdict": "revise",
+                    "reason": "No observed state-changing action or token issuance linked to the endpoint; server behavior unestablished per inspection."
+                  },
+                  "test_discrimination": {
+                    "verdict": "revise",
+                    "reason": "Positive expectations describe token misuse without evidence of token issuance or a protected action to test against."
+                  },
+                  "identity_requirements": {
+                    "verdict": "revise",
+                    "reason": "CSRF test requires authenticated session context; authentication_requirement declares comparison none with no roles, mismatching the proposed steps."
+                  }
+                },
+                "hypothesis_id": "ad79033ac2ad4bdf6df0a221",
+                "decision": "revise",
+                "reason": "Observed basis is endpoint name suggestion and a GET declaration with no inputs. No state-changing operation linked to simple-csrf-flow, no token retrieval evidence, and server validation unestablished. Preconditions are unmet and positive expectations do not distinguish legitimate CSRF protection from the claimed bypass."
+              },
+              {
+                "semantic_checks": {
+                  "grounding": {
+                    "verdict": "revise",
+                    "reason": "Client source declares GET with no inputs; server response and token presence unobserved. Grounding relies on name suggestion."
+                  },
+                  "test_discrimination": {
+                    "verdict": "revise",
+                    "reason": "Positive expectations assume token in URL and Referer leakage without observed token issuance or baseline behavior to distinguish."
+                  },
+                  "identity_requirements": {
+                    "verdict": "revise",
+                    "reason": "Token leakage via authenticated session requires an authenticated context; declared comparison none with no roles is inadequate."
+                  }
+                },
+                "hypothesis_id": "be445cff718ed837cdefba23",
+                "decision": "revise",
+                "reason": "No evidence that GET returns a CSRF token, that token appears in query string, or that Referer leakage is observable. Operation not observed and inputs unrecorded. Mechanism is assumed from endpoint name only."
+              },
+              {
+                "semantic_checks": {
+                  "grounding": {
+                    "verdict": "revise",
+                    "reason": "Endpoint name and GET declaration alone do not establish token issuance or caching behavior."
+                  },
+                  "test_discrimination": {
+                    "verdict": "revise",
+                    "reason": "Positive expectations about Cache-Control and token stability lack observed token values or baseline to differentiate legitimate per-session tokens from cache reuse."
+                  },
+                  "identity_requirements": {
+                    "verdict": "revise",
+                    "reason": "Cache and token reuse tests need authenticated session context; declared comparison none with no roles is mismatched."
+                  }
+                },
+                "hypothesis_id": "fe781a7e042f86aba30c1993",
+                "decision": "revise",
+                "reason": "No observed token issuance or response headers. Caching hypothesis assumes GET returns a token and that cache semantics are relevant, but server behavior is unestablished."
+              }
+            ]
+          }
+        ],
+        "prerequisite_gaps": [],
+        "unresolved_criterion_ids": []
+      },
+      "attempts": 1,
+      "requests": 2,
+      "elapsed_seconds": 188.4511195421219,
+      "raw_record": "outputs/technique_review_trials/generation-version-20261120/csrf-1.json",
+      "raw_record_sha256": "b3c5c68446e1a2d2291efedd4280ef9bfed850427cedc119c040917565f64f16"
+    },
+    {
+      "case": "csrf",
+      "expected": "partial_failure",
+      "status": "partial_failure",
+      "reason": "Publication revisions or frozen acceptance corrections required",
+      "correct": true,
+      "controller_valid": true,
+      "review": {
+        "status": "partial_failure",
+        "reason": "Publication revisions or frozen acceptance corrections required",
+        "instructions": "",
+        "repair": {
+          "kind": "acceptance",
+          "evidence_gaps": [],
+          "execution_receipt_gaps": []
+        },
+        "publication_sha256": "392f779ff30a646f26b1ca0657a3a9f00bb4ff29e3b818af3376d67116811d26",
+        "subject_reviews": [
+          {
+            "item_id": "subject",
+            "decision": "retain",
+            "reason": "Publication contains three hypotheses for the assigned endpoint. Semantic review finds grounding and test discrimination deficiencies requiring revision; subject coverage is otherwise present.",
+            "hypotheses": [
+              {
+                "semantic_checks": {
+                  "grounding": {
+                    "verdict": "revise",
+                    "reason": "No observed token issuance or state-changing operation linked to simple-csrf-flow. Inspection states no inputs or server handling observed; cookie auth and protected action remain prerequisites."
+                  },
+                  "test_discrimination": {
+                    "verdict": "revise",
+                    "reason": "Positive expectations describe token validation failure without observed token retrieval or identified state change. No baseline vs controlled variation distinguished."
+                  },
+                  "identity_requirements": {
+                    "verdict": "revise",
+                    "reason": "CSRF validation requires authenticated session context. Declared authentication_requirement comparison none with no roles does not match the intended access boundary."
+                  }
+                },
+                "hypothesis_id": "ad79033ac2ad4bdf6df0a221",
+                "decision": "revise",
+                "reason": "Observed basis is endpoint name suggestion and a client GET declaration with no inputs. Server handling and a protected state-changing action are unestablished and remain future prerequisites per inspection. Grounding connects to name only, not to observed token issuance or state change."
+              },
+              {
+                "semantic_checks": {
+                  "grounding": {
+                    "verdict": "revise",
+                    "reason": "Inspection reports no inputs or server handling observed. Token presence in URL and Referer leakage are assumed, not evidenced."
+                  },
+                  "test_discrimination": {
+                    "verdict": "revise",
+                    "reason": "Positive expectations assume token in query string and Referer exposure without observed issuance. No distinguishing baseline for legitimate delivery vs leakage."
+                  },
+                  "identity_requirements": {
+                    "verdict": "revise",
+                    "reason": "Token leakage via Referer requires authenticated session to obtain token. Declared comparison none with no roles mismatches required identity context."
+                  }
+                },
+                "hypothesis_id": "be445cff718ed837cdefba23",
+                "decision": "revise",
+                "reason": "Grounding relies on endpoint name and client GET declaration. No evidence of token in query string, response body/header, or Referer leakage is observed. Server behavior unestablished and inputs unrecorded."
+              },
+              {
+                "semantic_checks": {
+                  "grounding": {
+                    "verdict": "revise",
+                    "reason": "No observed response headers or token values. Cache reuse hypothesis is unsupported by inspected client source."
+                  },
+                  "test_discrimination": {
+                    "verdict": "revise",
+                    "reason": "Positive expectations about Cache-Control and token stability lack observed token issuance or baseline request/response evidence."
+                  },
+                  "identity_requirements": {
+                    "verdict": "revise",
+                    "reason": "Cache behavior per session requires authenticated context to compare same vs different sessions. Declared comparison none with no roles is insufficient."
+                  }
+                },
+                "hypothesis_id": "fe781a7e042f86aba30c1993",
+                "decision": "revise",
+                "reason": "Grounding assumes GET returns a token and cache headers are relevant. Inspection states no server handling observed and no inputs. Token issuance and caching behavior are unobserved."
+              }
+            ]
+          }
+        ],
+        "prerequisite_gaps": [],
+        "unresolved_criterion_ids": []
+      },
+      "attempts": 1,
+      "requests": 2,
+      "elapsed_seconds": 170.0792098750826,
+      "raw_record": "outputs/technique_review_trials/generation-version-20261120/csrf-2.json",
+      "raw_record_sha256": "d5291fb1800cc5952b826784348a08590e6fda056222f62a7b9e4c897849f9de"
+    },
+    {
+      "case": "oidc",
+      "expected": "partial_failure",
+      "status": "partial_failure",
+      "reason": "Publication revisions or frozen acceptance corrections required",
+      "correct": true,
+      "controller_valid": true,
+      "review": {
+        "status": "partial_failure",
+        "reason": "Publication revisions or frozen acceptance corrections required",
+        "instructions": "",
+        "repair": {
+          "kind": "acceptance",
+          "evidence_gaps": [],
+          "execution_receipt_gaps": []
+        },
+        "publication_sha256": "b93926732bb187620219673bb2ccaf7f55b526183b5560f2b5bbc0af8471d6a9",
+        "subject_reviews": [
+          {
+            "item_id": "subject",
+            "decision": "revise",
+            "reason": "Hypothesis is grounded on client source declaration of GET /api/auth/oidc-client with server behavior unobserved. Retained inspection states response and backend handling unobserved and it is not established whether this returns intentionally public client configuration or protected registration data. Suspected mechanism assumes exposure of sensitive registration metadata without authentication, but no observed response schema or evidence of protected data is provided. Grounding is insufficient to support the claimed disclosure boundary.",
+            "hypotheses": [
+              {
+                "semantic_checks": {
+                  "grounding": {
+                    "verdict": "revise",
+                    "reason": "Observed basis is client GET declaration with inputs unrecorded and server_behavior unestablished. No inspected response or policy evidence establishes that the endpoint returns protected registration data."
+                  },
+                  "test_discrimination": {
+                    "verdict": "revise",
+                    "reason": "Positive expectations assume sensitive client metadata is returned unauthenticated. No observed response schema or baseline distinguishes intentional public OIDC discovery from unauthorized disclosure."
+                  },
+                  "identity_requirements": {
+                    "verdict": "adequate",
+                    "reason": "Unauthenticated test with comparison none matches declared authentication_requirement."
+                  }
+                },
+                "hypothesis_id": "ac2cbd4ad84c8d11039960f7",
+                "decision": "revise",
+                "reason": "Grounding relies on client declaration only; server behavior, response content and whether data is public vs protected are unobserved. Test discrimination lists expectations for sensitive fields but lacks an observed basis linking the endpoint to protected registration data, so the positive vs legitimate public OIDC configuration outcome is not distinguished."
+              }
+            ]
+          }
+        ],
+        "prerequisite_gaps": [],
+        "unresolved_criterion_ids": []
+      },
+      "attempts": 1,
+      "requests": 2,
+      "elapsed_seconds": 143.4032231660094,
+      "raw_record": "outputs/technique_review_trials/generation-version-20261120/oidc-0.json",
+      "raw_record_sha256": "038157951b97854a1120fd3a02f61018ce2f6268598105167353121654f35a12"
+    },
+    {
+      "case": "oidc",
+      "expected": "partial_failure",
+      "status": "partial_failure",
+      "reason": "Publication revisions or frozen acceptance corrections required",
+      "correct": true,
+      "controller_valid": true,
+      "review": {
+        "status": "partial_failure",
+        "reason": "Publication revisions or frozen acceptance corrections required",
+        "instructions": "",
+        "repair": {
+          "kind": "acceptance",
+          "evidence_gaps": [],
+          "execution_receipt_gaps": []
+        },
+        "publication_sha256": "b93926732bb187620219673bb2ccaf7f55b526183b5560f2b5bbc0af8471d6a9",
+        "subject_reviews": [
+          {
+            "item_id": "subject",
+            "decision": "revise",
+            "reason": "Hypothesis is grounded on a client GET declaration for /api/auth/oidc-client with server behavior unobserved. The retained inspection notes response and backend handling are unobserved and it is not established whether the endpoint returns intentionally public client configuration or protected registration data. Positive expectations assume disclosure of sensitive registration fields such as client_secret without evidence of the response schema or access boundary, so grounding and test discrimination are insufficient as published.",
+            "hypotheses": [
+              {
+                "semantic_checks": {
+                  "grounding": {
+                    "verdict": "revise",
+                    "reason": "Client declaration of GET to oidc-client is present, but no observed response, schema or access control is evidenced. The intended trust boundary of unauthenticated disclosure of registration metadata is not supported by inspected observations."
+                  },
+                  "test_discrimination": {
+                    "verdict": "revise",
+                    "reason": "Positive expectations list public OIDC fields and sensitive client_secret together without a baseline for legitimate public configuration. No controlled variation distinguishes authorized public config from unauthorized sensitive disclosure."
+                  },
+                  "identity_requirements": {
+                    "verdict": "adequate",
+                    "reason": "Unauthenticated test with comparison none and no roles matches the proposed unauthenticated disclosure check."
+                  }
+                },
+                "hypothesis_id": "ac2cbd4ad84c8d11039960f7",
+                "decision": "revise",
+                "reason": "Observed basis is a client source GET declaration only; server handling and response content are unobserved. Suspected mechanism assumes unauthenticated exposure of sensitive registration metadata, but inspection states it is not established whether the endpoint returns public configuration or protected data. Positive expectations conflate normal public OIDC client configuration with sensitive fields like client_secret, lacking a clear distinguishing control and outcome."
+              }
+            ]
+          }
+        ],
+        "prerequisite_gaps": [],
+        "unresolved_criterion_ids": []
+      },
+      "attempts": 1,
+      "requests": 2,
+      "elapsed_seconds": 180.57530133402906,
+      "raw_record": "outputs/technique_review_trials/generation-version-20261120/oidc-1.json",
+      "raw_record_sha256": "a8cd198927620fa30106e716e6d1f1efc9525dbaaa4e1e474fd956b9051c1973"
+    },
+    {
+      "case": "oidc",
+      "expected": "partial_failure",
+      "status": "done",
+      "reason": "",
+      "correct": false,
+      "controller_valid": true,
+      "review": {
+        "status": "done",
+        "reason": "",
+        "instructions": "",
+        "repair": {
+          "kind": "none",
+          "evidence_gaps": [],
+          "execution_receipt_gaps": []
+        },
+        "publication_sha256": "b93926732bb187620219673bb2ccaf7f55b526183b5560f2b5bbc0af8471d6a9",
+        "subject_reviews": [
+          {
+            "item_id": "subject",
+            "decision": "retain",
+            "reason": "Hypothesis is grounded in retained client source declaring GET to /api/auth/oidc-client and proposes a conditional unauthenticated disclosure test with explicit preconditions and distinguishing expectations.",
+            "hypotheses": [
+              {
+                "semantic_checks": {
+                  "grounding": {
+                    "verdict": "adequate",
+                    "reason": "Client source inspection shows GET to ${we.Auth}/oidc-client; subject is https://service.test/api/auth/oidc-client. Mechanism assumes unauthenticated exposure of OIDC client metadata; preconditions make uncertainty explicit."
+                  },
+                  "test_discrimination": {
+                    "verdict": "adequate",
+                    "reason": "Positive expectations require 200 JSON with client_id/redirect_uris/client_secret accessible without token; negative expectations cover 401/403/404/empty. Distinguishes public config from protected registration data."
+                  },
+                  "identity_requirements": {
+                    "verdict": "adequate",
+                    "reason": "Test is unauthenticated disclosure; authentication_requirement comparison none with empty roles matches proposed steps."
+                  }
+                },
+                "hypothesis_id": "ac2cbd4ad84c8d11039960f7",
+                "decision": "retain",
+                "reason": "Observed client declaration links to subject; mechanism is conditional on server handler returning registration metadata without auth. Test steps separate unauthenticated baseline from authenticated variation with required evidence."
+              }
+            ]
+          }
+        ],
+        "prerequisite_gaps": [],
+        "unresolved_criterion_ids": []
+      },
+      "attempts": 1,
+      "requests": 2,
+      "elapsed_seconds": 131.30249650008045,
+      "raw_record": "outputs/technique_review_trials/generation-version-20261120/oidc-2.json",
+      "raw_record_sha256": "fc78d9b236cbf797d590f3c5a809e151b1462f521f86ff84bdd65db3611751db"
+    },
+    {
+      "case": "conditional-file",
+      "expected": "done",
+      "status": "done",
+      "reason": "",
+      "correct": true,
+      "controller_valid": true,
+      "review": {
+        "status": "done",
+        "reason": "",
+        "instructions": "",
+        "repair": {
+          "kind": "none",
+          "evidence_gaps": [],
+          "execution_receipt_gaps": []
+        },
+        "publication_sha256": "2523dd3283196ac1bd65f45f516991d81b854e99ee33d8fa9760d2a44008d721",
+        "subject_reviews": [
+          {
+            "item_id": "subject",
+            "decision": "retain",
+            "reason": "Hypothesis is grounded in inspected source observation of filename join to export directory with containment unobserved and owner-provided fixtures available. Mechanism, attacker-controlled input, preconditions and safe test steps are consistent with the observed basis and propose a conditional path-traversal read test with baseline/variation comparison.",
+            "hypotheses": [
+              {
+                "semantic_checks": {
+                  "grounding": {
+                    "verdict": "adequate",
+                    "reason": "Source inspection notes attacker-supplied filename joined to export directory and containment unobserved, matching subject and mechanism. Owner-provided allowed file and harmless sibling fixture are cited as future comparison basis."
+                  },
+                  "test_discrimination": {
+                    "verdict": "adequate",
+                    "reason": "Positive expectation of marker from harmless sibling outside allowed root vs negative expectation of allowed baseline readable but sibling denied/contained provides distinct outcomes. Required evidence includes allowed root policy, baseline/variation markers and resolved paths."
+                  },
+                  "identity_requirements": {
+                    "verdict": "adequate",
+                    "reason": "Authentication requirement comparison none with no roles declared matches unauthenticated file-read test design. No identity comparison is proposed."
+                  }
+                },
+                "hypothesis_id": "0bda7d9b17d1dc7013b008b9",
+                "decision": "retain",
+                "reason": "Observed basis links to assigned subject export-handler.py. Suspected mechanism of join permitting reads outside allowed export root is supported by source note that containment enforcement is unobserved. Test steps separate baseline allowed file from controlled path variation and require resolved path comparison, providing discrimination between legitimate containment and unauthorized read."
+              }
+            ]
+          }
+        ],
+        "prerequisite_gaps": [],
+        "unresolved_criterion_ids": []
+      },
+      "attempts": 1,
+      "requests": 2,
+      "elapsed_seconds": 122.69457112508826,
+      "raw_record": "outputs/technique_review_trials/generation-version-20261120/conditional-file-0.json",
+      "raw_record_sha256": "c69c383dea46ec2c21b7f41158d8a3fd8f80429af287b033a4b6202ff5fc5e44"
+    },
+    {
+      "case": "conditional-file",
+      "expected": "done",
+      "status": "done",
+      "reason": "",
+      "correct": true,
+      "controller_valid": true,
+      "review": {
+        "status": "done",
+        "reason": "",
+        "instructions": "",
+        "repair": {
+          "kind": "none",
+          "evidence_gaps": [],
+          "execution_receipt_gaps": []
+        },
+        "publication_sha256": "2523dd3283196ac1bd65f45f516991d81b854e99ee33d8fa9760d2a44008d721",
+        "subject_reviews": [
+          {
+            "item_id": "subject",
+            "decision": "retain",
+            "reason": "Hypothesis is grounded in inspected source observation of filename join to export directory with containment unobserved. Mechanism, preconditions, and safe test steps are consistent with observed basis and propose a conditional path-traversal check using baseline and controlled variation with artifact-backed comparison.",
+            "hypotheses": [
+              {
+                "semantic_checks": {
+                  "grounding": {
+                    "verdict": "adequate",
+                    "reason": "Source inspection notes attacker-supplied filename joined to export directory with containment unobserved and owner-provided fixtures available. Mechanism of reads outside allowed root is tied to that observation."
+                  },
+                  "test_discrimination": {
+                    "verdict": "adequate",
+                    "reason": "Positive expectation of marker from harmless sibling outside allowed root vs negative expectation of denial/containment distinguishes unauthorized read from legitimate contained access via baseline and variation."
+                  },
+                  "identity_requirements": {
+                    "verdict": "adequate",
+                    "reason": "Comparison none with no roles declared matches unauthenticated file-read test design; no cross-identity comparison is proposed."
+                  }
+                },
+                "hypothesis_id": "0bda7d9b17d1dc7013b008b9",
+                "decision": "retain",
+                "reason": "Observed basis links to assigned export handler and filename join. Test steps separate baseline from controlled path variation and require resolved path comparison, providing discrimination between contained and outside-root behavior."
+              }
+            ]
+          }
+        ],
+        "prerequisite_gaps": [],
+        "unresolved_criterion_ids": []
+      },
+      "attempts": 1,
+      "requests": 2,
+      "elapsed_seconds": 140.65710004093125,
+      "raw_record": "outputs/technique_review_trials/generation-version-20261120/conditional-file-1.json",
+      "raw_record_sha256": "1f30c4cb62c79be94b71da37cb1fd96b649dce0b7d9bf8ec6ec69627a127a371"
+    },
+    {
+      "case": "conditional-file",
+      "expected": "done",
+      "status": "done",
+      "reason": "",
+      "correct": true,
+      "controller_valid": true,
+      "review": {
+        "status": "done",
+        "reason": "",
+        "instructions": "",
+        "repair": {
+          "kind": "none",
+          "evidence_gaps": [],
+          "execution_receipt_gaps": []
+        },
+        "publication_sha256": "2523dd3283196ac1bd65f45f516991d81b854e99ee33d8fa9760d2a44008d721",
+        "subject_reviews": [
+          {
+            "item_id": "subject",
+            "decision": "retain",
+            "reason": "Hypothesis is grounded in inspected source observation of filename join to export directory with unobserved containment. Test steps use baseline allowed fixture and controlled sibling variation with path comparison to distinguish traversal from legitimate containment.",
+            "hypotheses": [
+              {
+                "semantic_checks": {
+                  "grounding": {
+                    "verdict": "adequate",
+                    "reason": "Source inspection notes attacker-supplied filename join to export directory and unobserved containment, matching suspected mechanism and trust boundary."
+                  },
+                  "test_discrimination": {
+                    "verdict": "adequate",
+                    "reason": "Baseline allowed fixture vs controlled sibling variation with resolved path and marker comparison distinguishes unauthorized read outside allowed root from legitimate containment."
+                  },
+                  "identity_requirements": {
+                    "verdict": "adequate",
+                    "reason": "Unauthenticated comparison none aligns with declared authentication requirement and proposed steps."
+                  }
+                },
+                "hypothesis_id": "0bda7d9b17d1dc7013b008b9",
+                "decision": "retain",
+                "reason": "Observed basis links to assigned export-handler subject and suspected filename join mechanism. Preconditions and safe steps separate observed facts from assumed containment absence. Positive/negative expectations discriminate traversal from legitimate containment."
+              }
+            ]
+          }
+        ],
+        "prerequisite_gaps": [],
+        "unresolved_criterion_ids": []
+      },
+      "attempts": 1,
+      "requests": 2,
+      "elapsed_seconds": 120.10495529184118,
+      "raw_record": "outputs/technique_review_trials/generation-version-20261120/conditional-file-2.json",
+      "raw_record_sha256": "178e60b8ed80aea22dae917d22da79aa00df8fde9fbd725adb160a219f3ee84a"
+    }
+  ],
+  "rendering_comparison": [
+    {
+      "revision_id": "12f6c969-7dc8-5588-8e6e-94e8e85e4cb0",
+      "historical_snapshot": "outputs/bc/OP_20261020_110442/techniques/12f6c969-7dc8-5588-8e6e-94e8e85e4cb0.produced.md",
+      "historical_characters": 15400,
+      "guidance_characters": 11761,
+      "body_characters": 8904,
+      "body_preserved": true
+    },
+    {
+      "revision_id": "363d234e-9b1b-5b6c-af71-98102d8d30d3",
+      "historical_snapshot": "outputs/bc/OP_20261020_110442/techniques/363d234e-9b1b-5b6c-af71-98102d8d30d3.produced.md",
+      "historical_characters": 16311,
+      "guidance_characters": 12140,
+      "body_characters": 9130,
+      "body_preserved": true
+    }
+  ],
+  "source_sha256": {
+    "src/modules/agents/hypothesis_context.py": "4f91a1dd9d11c476f6b32534a3b405c1cff566712135c71fdd2fe78fb95f7cdd",
+    "src/modules/agents/multi_agent_workflow.py": "ae4ffe7ff44093f49c745a3178fa4136b0e2ed101730912363dc34def008d7be",
+    "src/modules/techniques/alignment.py": "35eeeaba357ce70bdc5ad0c8477f50ac3a3d16ebbb3e2847eaad809badb14597",
+    "src/modules/techniques/delivery.py": "a8d591e504dd9bf40c175d62f87bc308aea000a8d258fdeff174a44083b0555a",
+    "src/modules/techniques/documents.py": "f85a782e28bb9cf03fbd1e8576deb787ba1a68ee91d152daae59dca265a73fcd",
+    "src/modules/techniques/repository.py": "c60e825a17f657d59fe58af7b6f0341fe99a57db88d169183412fcea5d82d14e",
+    "src/modules/techniques/selection_cache.py": "69eea6e47d11161bc295e18933044db739edf437f3ceb947964ccb5d319dd4b7",
+    "src/modules/techniques/service.py": "07ae688b69b8f70daaa539d36bf22fe9e176c58d6ee140bd8544692979b49c74",
+    "src/modules/techniques/storage.py": "e623f7c2363566ff4d18dd3c40252d744148d11d8215393162dc4e8117ca1944",
+    "src/modules/techniques/versioning.py": "d9aa1fc84a2840027c5419947f723e467a67d4a8110543475825df21c257112e",
+    "src/modules/storage/migrations/0016_technique_generation_version.sql": "15ee0e173c17c5d30b4c66fbeebffb6757d57a5541bd4dc6d01f42f30261a1c9"
+  },
+  "harness_sha256": "f57dd6ec2e04d5a5d510b32bce7a4b9ae056630ae6554bfe092455cdac67bd3b",
+  "limitations": [
+    "Reconstructed frozen evidence and prior hypothesis content, not an exact replay of original traces.",
+    "Actual production evaluator and native finalization; no target I/O, new authoring, or end-to-end operation.",
+    "No baseline arm; this does not establish causal improvement or an adoption rate.",
+    "Some revision explanations still demand confirmation of future prerequisites; correct status is not proof of correct reasoning.",
+    "OIDC repetition 2 accepted ambiguous metadata disclosure expectations without adequate public/protected discrimination."
+  ],
+  "deployment": "Not deployed; active operation not restarted.",
+  "validation": {
+    "passed": 8339,
+    "skipped": 46,
+    "deselected": 89,
+    "warnings": 29,
+    "elapsed_seconds": 805.85,
+    "coverage_log": "/private/tmp/generation-version-verified-coverage.log",
+    "coverage_sha256": "54ff354aede68b4347fc7fda2fa6d57ccdb280a269df67aeb4634217f46566ce",
+    "coverage_floor": "All selected Python files meet 80% line and branch coverage",
+    "ruff": "passed",
+    "whitespace": "passed"
+  }
+}

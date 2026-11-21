@@ -23,7 +23,7 @@ def prepared(scripted_service, tmp_path, monkeypatch):
                                          "request": "Generic methodology", "score": 0.9}]
     receipt = {"generic_request": "Generic methodology", "applicability": "conditional",
                "unmet_prerequisites": ["Establish policy"], "phase_contexts": context.contexts}
-    select = Mock(return_value=(revision, service.store.render(revision), receipt))
+    select = Mock(return_value=(revision, service.store.render(revision, guidance=True), receipt))
     monkeypatch.setattr(service, "select_existing", select)
     monkeypatch.setattr(delivery, "get_agent_prompt_limits", lambda agent: (1000, 100))
     monkeypatch.setattr(delivery, "safe_estimate_tokens", lambda agent, extra_content=None: 300)
@@ -191,7 +191,7 @@ def test_pending_selection_uses_current_store_rendering(prepared, monkeypatch):
     monkeypatch.setattr(delivery, "get_agent_prompt_limits", lambda agent: (100, 100))
     delivery.AutomaticGuidanceHook(p.context).before_model(p.event)
     assert not delivery.task_uses(p.service, "op", "task")
-    monkeypatch.setattr(p.service.store, "render", lambda revision: "Current lifecycle rendering")
+    monkeypatch.setattr(p.service.store, "render", lambda revision, **kwargs: "Current lifecycle rendering")
     monkeypatch.setattr(delivery, "get_agent_prompt_limits", lambda agent: (1000, 100))
     delivery.AutomaticGuidanceHook(p.context).before_model(p.event)
     packet = json.loads(p.agent.messages[0]["content"][-1]["text"].removeprefix(delivery.PREAMBLE))
@@ -324,3 +324,17 @@ def test_sdk_delivers_after_fitting_and_persists_before_provider_dispatch(prepar
     agent("Use the assigned scope.")
     assert order == ["match", "fit", "supply", "provider"]
     assert len(model.calls) == 1
+
+
+def test_obsolete_generation_not_replayed_but_historical_delivery_retained(prepared):
+    p = prepared
+    delivery.AutomaticGuidanceHook(p.context).before_model(p.event)
+    runtime = SimpleNamespace(technique_service=p.service, operation_id="op")
+    task = SimpleNamespace(task_uid="task")
+    original = delivery.delivered_guidance(runtime, task)
+    assert original
+    with p.service.repository.transaction() as connection:
+        connection.execute("UPDATE technique_revisions SET origin = 'generated', generation_version = NULL "
+                           "WHERE revision_id = ?", (p.revision,))
+    assert delivery.delivered_guidance(runtime, task, execution=True) == ""
+    assert delivery.delivered_guidance(runtime, task) == original

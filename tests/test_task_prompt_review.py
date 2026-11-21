@@ -544,3 +544,13 @@ def test_executor_research_guidance_survives_continuation_and_repair(review_case
         assert "Treat conditional prerequisites as future checks" in assembled
         assert "A catalog miss triggers technique research and generation" in assembled
         assert "source review, network services, system mapping and emulation" in assembled
+
+
+def test_hypothesis_review_prompt_supplies_ids_without_prefilled_judgments(semantic_hypothesis_case):
+    _controller, prompt, _valid = semantic_hypothesis_case
+    assert "Complete shape example" not in prompt
+    assert "Illustrative review only" not in prompt
+    assert "Bound subject and hypothesis IDs" in prompt
+    catalog = prompt.split("Bound subject and hypothesis IDs", 1)[1].split("\n", 2)[1]
+    rows = json.loads(catalog)
+    assert rows and all(set(row) == {"item_id", "hypothesis_ids"} for row in rows)

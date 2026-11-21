@@ -42,7 +42,8 @@ def test_recorded_continuation_reviews(scripted_service, monkeypatch, tmp_path, 
     monkeypatch.setattr(service, "_candidates", lambda *args: [{"revision_id": revision}])
     monkeypatch.setattr(service.store, "document", lambda *args: SimpleNamespace(
         markdown=FIXTURE["selection"]["procedure"], sha256="fixture",
-        metadata=SimpleNamespace(model_dump=dict),
+        render_guidance=lambda revision: FIXTURE["selection"]["procedure"],
+        metadata=SimpleNamespace(model_dump=lambda **kwargs: {}),
     ))
     assert service._select(FIXTURE["selection"]["request"]) == revision
     for case in FIXTURE["recommendations"]:

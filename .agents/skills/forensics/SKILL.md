@@ -36,7 +36,7 @@ include their independent sentiment and reason. Lifecycle and use provenance are
 
 ```sql
 SELECT u.operation_id, u.task_uid, u.revision_id, u.score, u.reason, u.use_context,
-       r.lineage, r.origin, r.active, r.inactive_reason, r.score_count, r.score_total,
+       r.lineage, r.origin, r.generation_version, r.active, r.inactive_reason, r.score_count, r.score_total,
        r.pending_sync
 FROM technique_uses AS u
 JOIN technique_revisions AS r ON r.revision_id = u.revision_id

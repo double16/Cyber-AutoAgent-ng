@@ -10,6 +10,7 @@ from modules.storage.qdrant import QDRANT_WRITE_LOCK
 from modules.techniques.documents import NAMESPACE, TechniqueDocument
 from modules.techniques.repository import TechniqueRepository
 from modules.techniques.retrieval import RetrievalSettings, search_text
+from modules.techniques.versioning import TECHNIQUE_GENERATION_VERSION, generation_eligible
 
 DOCUMENTS = "cyber_autoagent_technique_documents"
 WRITE_LOCK = QDRANT_WRITE_LOCK
@@ -29,7 +30,8 @@ class TechniqueStore:
         self.embedding_model = str(config.get("embedding_model") or "unknown")
         self._embedded_revisions: set[str] = set()
         self.dimensions = int(config["embedding_dimensions"])
-        identity = f"phase-index-v3:{self.retrieval.representation}:{config.get('embedding_provider')}:{config.get('embedding_model')}:{self.dimensions}"
+        identity = (f"phase-index-v4:{TECHNIQUE_GENERATION_VERSION}:{self.retrieval.representation}:"
+                    f"{config.get('embedding_provider')}:{config.get('embedding_model')}:{self.dimensions}")
         self.index = f"cyber_autoagent_technique_index_{hashlib.sha256(identity.encode()).hexdigest()[:16]}"
         self._indexed: set[str] = set()
         with WRITE_LOCK:
@@ -53,6 +55,7 @@ class TechniqueStore:
             "revision_id": row["revision_id"],
             "lineage": row["lineage"],
             "origin": row["origin"],
+            "generation_version": row["generation_version"],
             "source_sha256": row["source_sha256"],
             "active": bool(row["active"]),
             "inactive_reason": row["inactive_reason"],
@@ -61,16 +64,19 @@ class TechniqueStore:
             "feedback_reasons": self.repository.feedback_reasons(row["revision_id"]),
         }
 
-    def render(self, revision: str, *, require_active: bool = True) -> str:
+    def render(self, revision: str, *, require_active: bool = True, guidance: bool = False) -> str:
         row = self.repository.get(revision)
-        if row is None or (require_active and not row["active"]):
+        if row is None or (require_active and not row["active"]) or (guidance and not generation_eligible(row)):
             raise ValueError("Technique is unavailable or inactive")
-        return self.document(revision).render(self.lifecycle(row))
+        document = self.document(revision)
+        return document.render_guidance(revision) if guidance else document.render(self.lifecycle(row))
 
     def publish(self, document: TechniqueDocument, lineage: str, origin: str) -> str:
         from modules.techniques.documents import revision_id
 
-        revision = revision_id(lineage, document.sha256)
+        identity = (f"{document.sha256}:generation:{TECHNIQUE_GENERATION_VERSION}"
+                    if origin == "generated" else document.sha256)
+        revision = revision_id(lineage, identity)
         with WRITE_LOCK:
             if self.repository.get(revision):
                 return revision
@@ -105,12 +111,13 @@ class TechniqueStore:
         return vector
 
     def _index(self, revision: str, document: TechniqueDocument, active: bool, current: bool) -> None:
+        eligible = generation_eligible(self.repository.get(revision) or {"origin": "generated"})
         points = [
             models.PointStruct(
                 id=revision,
                 vector=self._vector(search_text(document, self.retrieval.representation)),
                 payload={"kind": "document", "revision_id": revision, "active": active,
-                         "current": current, "phases": document.metadata.phases},
+                         "current": current, "generation_eligible": eligible, "phases": document.metadata.phases},
             )
         ]
         for number, trigger in enumerate(document.metadata.triggers):
@@ -123,6 +130,7 @@ class TechniqueStore:
                         "revision_id": revision,
                         "active": active,
                         "current": current,
+                        "generation_eligible": eligible,
                         **trigger.model_dump(),
                     },
                 )
@@ -172,6 +180,7 @@ class TechniqueStore:
                 query_filter=models.Filter(
                     must=[
                         models.FieldCondition(key="kind", match=models.MatchValue(value="document")),
+                        models.FieldCondition(key="generation_eligible", match=models.MatchValue(value=True)),
                         models.FieldCondition(key="active", match=models.MatchValue(value=active)),
                         *([models.FieldCondition(key="current", match=models.MatchValue(value=True))] if active else []),
                         *([models.FieldCondition(key="phases", match=models.MatchAny(any=contexts))] if contexts else []),
@@ -184,9 +193,9 @@ class TechniqueStore:
             for point in result.points:
                 revision = point.payload["revision_id"]
                 row = self.repository.get(revision)
-                if row is not None and bool(row["active"]) == active:
+                if row is not None and bool(row["active"]) == active and generation_eligible(row):
                     rows.append({"revision_id": revision, "score": point.score,
-                                 "document": self.render(revision, require_active=False)})
+                                 "document": self.render(revision, require_active=False, guidance=True)})
             return rows
 
     def search_triggers(self, request: str, contexts: list[str], limit: int | None = None) -> list[dict]:
@@ -199,6 +208,7 @@ class TechniqueStore:
                 self.index, query=self._vector(request),
                 query_filter=models.Filter(must=[
                     models.FieldCondition(key="kind", match=models.MatchValue(value="trigger")),
+                    models.FieldCondition(key="generation_eligible", match=models.MatchValue(value=True)),
                     models.FieldCondition(key="current", match=models.MatchValue(value=True)),
                     models.FieldCondition(key="phases", match=models.MatchAny(any=contexts)),
                 ]),
@@ -207,7 +217,8 @@ class TechniqueStore:
             return [
                 {"trigger_id": str(point.id), **point.payload, "score": point.score}
                 for point in result.points
-                if (row := self.repository.get(point.payload["revision_id"])) and row["current_revision"]
+                if (row := self.repository.get(point.payload["revision_id"]))
+                and generation_eligible(row) and row["current_revision"]
             ]
 
     def triggers(self, contexts: list[str]) -> list[dict]:
@@ -219,6 +230,7 @@ class TechniqueStore:
             query_filter = models.Filter(
                 must=[
                     models.FieldCondition(key="kind", match=models.MatchValue(value="trigger")),
+                    models.FieldCondition(key="generation_eligible", match=models.MatchValue(value=True)),
                     models.FieldCondition(key="current", match=models.MatchValue(value=True)),
                     models.FieldCondition(key="phases", match=models.MatchAny(any=contexts)),
                 ]
@@ -240,5 +252,6 @@ class TechniqueStore:
         return [
             {"trigger_id": str(point.id), **point.payload}
             for point in result
-            if (row := self.repository.get(point.payload["revision_id"])) and row["current_revision"]
+            if (row := self.repository.get(point.payload["revision_id"]))
+                and generation_eligible(row) and row["current_revision"]
         ]

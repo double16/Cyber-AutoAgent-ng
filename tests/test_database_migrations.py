@@ -51,6 +51,7 @@ def test_packaged_migrations_create_schema_once(tmp_path):
         (13, "0013_authentication_worker_authorizations.sql"),
         (14, "0014_techniques.sql"),
         (15, "0015_technique_use_context.sql"),
+        (16, "0016_technique_generation_version.sql"),
     ]
     assert {
         "operations", "plans", "tasks", "operation_model_metrics", "finding_evidence_receipts",
@@ -91,7 +92,7 @@ def test_concurrent_startup_applies_each_migration_once(tmp_path):
 
     assert results == [None, None]
     with closing(sqlite3.connect(db_path)) as conn, conn:
-        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 15
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 16
 
 
 def test_technique_use_context_migration_preserves_existing_feedback(tmp_path, monkeypatch):

@@ -4,6 +4,7 @@ import hashlib
 import json
 
 from modules.techniques.selection_review import SelectionReview
+from modules.techniques.versioning import TECHNIQUE_GENERATION_VERSION
 
 
 def cache_key(service, fingerprint):
@@ -11,7 +12,8 @@ def cache_key(service, fingerprint):
     if not scope.get("operation_id") or not scope.get("task_uid"):
         return None
     return hashlib.sha256(json.dumps([
-        scope["operation_id"], scope["task_uid"], fingerprint, service.module_technique_policy,
+        TECHNIQUE_GENERATION_VERSION, scope["operation_id"], scope["task_uid"],
+        fingerprint, service.module_technique_policy,
     ], sort_keys=True).encode()).hexdigest()
 
 
