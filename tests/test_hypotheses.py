@@ -773,3 +773,12 @@ def test_hypothesis_schema_explains_distinguishing_outcomes():
     assert "legitimate behavior" in properties["positive_expectations"]["description"]
     assert "control outcomes" in properties["negative_expectations"]["description"]
     assert "prerequisites" in properties["required_evidence"]["description"]
+
+
+def test_hypothesis_identity_schema_describes_future_single_session_needs():
+    description = hypotheses.Hypothesis.model_json_schema()["properties"]["authentication_requirement"]["description"]
+    assert "proposed future test" in description
+    assert "one role even with comparison=none" in description
+    assert "sessions are not available" in description
+    assert "Account comparisons declare one shared role" in description
+    assert "two distinct roles" in description

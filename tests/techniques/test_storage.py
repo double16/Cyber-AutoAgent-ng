@@ -13,7 +13,8 @@ def test_publish_retrieve_replace_and_skip_unchanged(store, markdown):
     assert first != second
     assert store.repository.get(first)["inactive_reason"] == "superseded"
     assert [item["revision_id"] for item in store.search("JWT", active=True)] == [second]
-    assert [item["revision_id"] for item in store.search("JWT", active=False)] == [first]
+    assert store.search("JWT", active=False) == []
+    assert store.document(first).metadata.title == "JWT handling"
     assert "Updated JWT" in store.render(second)
     with pytest.raises(ValueError, match="inactive"):
         store.render(first)

@@ -99,3 +99,13 @@ def test_unused_roles_and_targets_are_not_checked_for_session_validity():
     result = select(records, roles=["member"], is_valid=lambda record: checked.append(record["credential_id"]))
     assert checked == ["member"]
     assert result[0]["credential_id"] == "member"
+
+
+def test_identity_schema_describes_single_session_without_changing_wire_defaults():
+    schema = AuthenticationRequirement.model_json_schema()["properties"]
+    assert "does not mean unauthenticated" in schema["comparison"]["description"]
+    assert "no explicit role restriction" in schema["roles"]["description"]
+    assert AuthenticationRequirement().model_dump() == {"comparison": "none", "roles": []}
+    assert AuthenticationRequirement(comparison="single", roles=["member"]).comparison == "none"
+    with pytest.raises(ValidationError):
+        AuthenticationRequirement(comparison="unsupported")

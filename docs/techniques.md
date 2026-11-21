@@ -714,8 +714,11 @@ JSON mass assignment, and CVE applicability can produce four methods. Each recei
 shared deliverables such as prerequisites, safe checks, expected outcomes, and evidence requirements.
 A CVE workflow stays together when extraction, prerequisite mapping, and validation are supporting steps.
 
-Independent plan review permits one correction before research. Diagnostics record the complete plan
-in `technique_plan_accepted` or the rejected plan and feedback in `technique_plan_rejected`.
+Independent plan review provides advisory improvements before research. An empty issue list accepts
+the draft; otherwise the planner revises once, with no second semantic review. Python validates the
+revised structure and provenance before delivery. Diagnostics record advice in `technique_plan_advice`,
+accepted plans in `technique_plan_accepted`, and malformed planner outputs in
+`technique_plan_rejected`. The reviewer cannot refuse a structurally valid plan.
 Each component retains its own research allowance; empty batches preserve the prior assessment.
 Supported components can be delivered while unsupported siblings remain explicitly unresolved.
 
@@ -1385,8 +1388,8 @@ contract propagation and reference handling; they do not establish live model ca
 
 Bundle planning reviews share a decomposition policy with the planner. Supporting steps remain
 requirements; umbrella components must not duplicate their constituent methods. Review corrections
-retain the previous proposal and structured issues. Reviewers must explain changed recommendations;
-Python validates issue references and approval consistency before component execution.
+retain the previous proposal and structured issues. The independent reviewer supplies advice once;
+Python validates issue references before the optional planner revision and component execution.
 
 Planner and reviewer share decomposition examples. Missing prerequisite confirmation leaves
 applicability unknown; refutation requires contradictory evidence. New positive and negative
@@ -1394,10 +1397,11 @@ usefulness decisions must leave `neutral_basis` null. Historical records remain 
 
 Correction uses component-local remove, merge or replace edits in the production structured
 runner. Python applies edits atomically and keeps unchanged content and provenance. IDs refer
-to the proposal supplied with that correction; the resulting proposal is numbered again for
-review. Exact duplicate method/requirement values collapse while retaining their input references.
+to the proposal supplied with that correction; Python numbers and validates the resulting
+proposal without another semantic review. Exact duplicate method/requirement values collapse while retaining their input references.
 Legacy injected text runners still return complete plans. Unknown references, conflicting edits,
-or an empty resulting plan fail before delivery. The existing correction bound is unchanged.
+or an empty resulting plan fail before delivery. A malformed initial draft may receive one
+structural repair before independent advice; advice permits at most one subsequent revision.
 
 Usefulness review presents the frozen guidance and observed results once in an evidence inventory.
 The independent reviewer investigates that inventory before receiving the evaluator decision for
@@ -1506,3 +1510,35 @@ version. Only versions matching `TECHNIQUE_GENERATION_VERSION` are eligible for 
 replay. Unversioned revisions remain stored for historical review. Module-authored guidance follows
 its existing lifecycle. Increment the constant for material authoring changes; replacements are
 generated on demand rather than through a bulk rebuild.
+
+### Module source retirement
+
+Successful synchronization reconciles each loaded module against its current Markdown sources.
+Removed module revisions become inactive and cease advertising triggers or serving as lookup examples.
+Historical documents, exact delivery snapshots and feedback remain available for review. A missing
+module directory is skipped; a failed scan does not retire that module's documents. Reintroducing a
+source restores its selected revision, while preserving feedback-based deactivation and declared
+inactive status. Synchronization reports a retired count separately from source additions and updates.
+
+Module eligibility changes use a new embedding-index identity so older payloads cannot consume
+retrieval limits. This may rebuild embeddings even when current module files are unchanged. It does
+not change generated-document compatibility version 1.
+
+### Identity requirements in structured outputs
+
+The existing identity fields are unchanged. `comparison: none` means no cross-identity comparison,
+not necessarily unauthenticated work. At the general credential-selection boundary, an empty role
+list leaves the role unrestricted. In a proposed hypothesis, declare the future test's identity needs:
+one role for an authenticated single-session test, one shared role for an account comparison, two
+distinct roles for a role comparison, and the required roles for a tenant comparison. Missing future
+sessions do not change those needs.
+
+The schemas describe these meanings directly, including the distinction between generation-task
+access and future-test access. Existing runtime validators still check cross-field consistency.
+Native structured output alone does not encode every Python after-validator relationship.
+
+
+Unchanged module sources preserve an eligible current generated successor, including its feedback
+state. When restoring a source with no eligible current owner, synchronization supersedes any
+incompatible owner in the same SQLite transaction before promoting the module revision. This keeps
+the single-current-revision lineage constraint intact without deleting or editing historical uses.

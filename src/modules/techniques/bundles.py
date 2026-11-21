@@ -189,14 +189,21 @@ class PlanIssue(BaseModel):
     correction: str = Field(min_length=1)
 
 
-class BundlePlanReview(PlanReview):
+class BundlePlanReview(BaseModel):
+    """Independent advice; recommendations never constitute a semantic veto."""
+
+    model_config = ConfigDict(extra="forbid")
+    reason: str = Field(min_length=1, max_length=2000)
     issues: list[PlanIssue] = Field(default_factory=list)
 
-    @model_validator(mode="after")
-    def consistent_decision(self):
-        if self.approved == bool(self.issues):
-            raise ValueError("Approval requires no issues; rejection requires structured issues")
-        return self
+    @model_validator(mode="before")
+    @classmethod
+    def legacy_approval(cls, value):
+        """Accept historical scripted responses without advertising approval to models."""
+        if isinstance(value, dict) and "approved" in value:
+            value = dict(value)
+            value.pop("approved")
+        return value
 
 
 DECOMPOSITION_POLICY = (
@@ -313,7 +320,7 @@ def resolve_bundle(service, request, context=None, operation="", task="") -> Tec
         "Reference IDs are controller bookkeeping, never research or authoring requirements. "
         "When correcting a supplied proposal, apply local edits using component-N IDs in its current order. "
         "Preserve unchanged components. Replace can split a component when requested coverage is missing. "
-        "Python applies edits atomically, then reviews the complete resulting plan.\n"
+        "Python applies edits atomically, then validates the complete resulting plan.\n"
     )
     planning_inputs = (
         json_payload("authoritative_inputs", [
@@ -323,7 +330,7 @@ def resolve_bundle(service, request, context=None, operation="", task="") -> Tec
     correction = ""
     review_history = []
     previous_output = None
-    for attempt in range(2):
+    for attempt in range(3):
         with service.events.stage("planning"):
             try:
                 # Legacy injected text runners retain their full-plan response contract.
@@ -357,6 +364,10 @@ def resolve_bundle(service, request, context=None, operation="", task="") -> Tec
                 correction = service._repair_prompt("", error) + json_payload("validation_findings", findings)
                 continue
         plan, findings = materialize_plan(output, records)
+        if previous_output is not None:
+            if findings:
+                raise ValueError("Revised technique plan violates controller validation: " + str(findings))
+            break
         with service.events.stage("plan_review"):
             review = service._json(
                 "technique_plan_reviewer",
@@ -374,22 +385,21 @@ def resolve_bundle(service, request, context=None, operation="", task="") -> Tec
                     "and evidence; this is not method splitting. Not automatically required does not mean "
                     "prohibited. Check coverage of independent methods, omitted obligations and requirements "
                     "derived from "
-                    "planner instructions. Reject invented prohibitions or omitted useful deliverables. "
+                    "planner instructions. Recommend corrections to invented prohibitions or omitted useful deliverables. "
                     "Judge each requirement's relevance, not its source category alone. A central phase-objective "
                     "record is authoritative methodology input, distinct from planner instructions. Relevant "
                     "phase framing must not promote optional payloads, checklists or presentation preferences "
                     "into component requests or mandatory requirements without an explicit request. "
-                    "Reject unrelated mandatory artifacts and prohibitions. "
+                    "Identify unrelated mandatory artifacts and prohibitions. "
                     "Check every requirement origin semantically "
-                    "justifies the obligation, not merely that the excerpt exists. Rejection must name the "
+                    "justifies the obligation, not merely that the excerpt exists. Advice must name the "
                     "affected method or requirement and the requested "
-                    "correction. Reject phase-only requests. Reject splitting one workflow into supporting steps or "
+                    "correction. Identify phase-only requests and splitting one workflow into supporting steps or "
                     "invented deliverables. "
                     + DECOMPOSITION_POLICY
-                    + "Review the proposal; do not generate a replacement plan. Identify structured issues "
-                    "using component-N IDs and supplied input references. Previous feedback is advisory. "
-                    "Assess whether each previous issue was resolved. Explain any changed recommendation "
-                    "in reason, identifying new information or the previous mistaken interpretation. ",
+                    + "Provide advisory improvements only; return an empty issues list when no changes help. "
+                    "Review the proposal; do not generate a replacement plan. Identify structured issues "
+                    "using component-N IDs and supplied input references. ",
                     json_payload("authoritative_inputs", [
                         {"id": identifier, **origin.model_dump()} for identifier, origin in records.items()
                     ])
@@ -406,25 +416,23 @@ def resolve_bundle(service, request, context=None, operation="", task="") -> Tec
             if any(identifier not in {item.id for item in plan.components} for identifier in issue.component_ids):
                 raise ValueError("Review issue contains unknown component")
         review_history.append({"proposal": output.model_dump(), "review": review.model_dump()})
-        if not review.approved:
-            findings.append({"field": "semantic_review", "problem": review.reason})
+        if review.issues:
+            findings.append({"field": "advisory_review", "problem": review.reason})
         if not findings:
             break
         reason = "; ".join(row["field"] + ": " + row["problem"] for row in findings)
-        service.events.emit("technique_plan_rejected", correction_attempt=attempt,
-                            rejection_kind="semantic" if not review.approved else "validation",
+        service.events.emit("technique_plan_advice", correction_attempt=attempt,
+                            review_mode="advisory",
                             reason=service._safe_feedback(reason),
                             validation_findings=[{**row, "problem": service._safe_feedback(row["problem"], limit=None)}
                                                  for row in findings],
                             issues=[issue.model_dump() for issue in review.issues],
                             components=[item.model_dump() for item in plan.components])
-        if attempt:
-            raise ValueError("Technique planning left unresolved request coverage: " + service._safe_feedback(reason))
         previous_output = output
         correction = (
-            "Rejected plan (untrusted): "
+            "Draft plan (untrusted): "
             + output.model_dump_json()
-            + "\nRepair planning: "
+            + "\nApply independent advice once, preserving requested methods and obligations: "
             + json_payload("validation_findings", findings)
             + json_payload("review_issues", [issue.model_dump() for issue in review.issues])
         )

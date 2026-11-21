@@ -11,8 +11,16 @@ class AuthenticationRequirement(BaseModel):
     """Requested identities, separate from established authentication contexts."""
 
     model_config = ConfigDict(extra="forbid")
-    comparison: Literal["none", "account", "role", "tenant"] = "none"
-    roles: list[str] = Field(default_factory=list)
+    comparison: Literal["none", "account", "role", "tenant"] = Field(
+        default="none",
+        description="Identity comparison required by this work. none means no cross-identity comparison; "
+                    "it does not mean unauthenticated. A single authenticated identity can use none.",
+    )
+    roles: list[str] = Field(
+        default_factory=list,
+        description="Requested role restrictions, including any required role for single-session work with "
+                    "comparison=none. Empty means no explicit role restriction. Credential readiness is separate.",
+    )
 
     @field_validator("comparison", mode="before")
     @classmethod

@@ -24,7 +24,13 @@ class Hypothesis(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     hypothesis_id: str = ""
-    authentication_requirement: AuthenticationRequirement
+    authentication_requirement: AuthenticationRequirement = Field(
+        description="Identity needs of this proposed future test, not of the generation task. An authenticated "
+                    "single-session test declares one role even with comparison=none; unauthenticated tests "
+                    "use no roles. Account comparisons declare one shared role; role comparisons declare two "
+                    "distinct roles; tenant comparisons declare their required roles. Declare future needs "
+                    "even when sessions are not available.",
+    )
     observed_basis: Text
     preconditions: list[Text] = Field(min_length=1)
     suspected_mechanism: Text

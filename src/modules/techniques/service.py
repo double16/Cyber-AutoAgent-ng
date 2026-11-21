@@ -855,12 +855,13 @@ class TechniqueService:
         if hasattr(self.research, "preferred_sites"):
             self.research.preferred_sites = sites
         self.events.emit("technique_source_preferences", module=module, sites=sites, contributing_modules=contributors)
-        counts = {"added": 0, "updated": 0, "unchanged": 0}
+        counts = {"added": 0, "updated": 0, "unchanged": 0, "retired": 0}
         for name in loader._inheritance_chain(module):
             root = loader._find_module_dir(name)
             if root is None:
                 continue
             technique_root = root / "techniques"
+            expected = {}
             for path in sorted(technique_root.rglob("*.md")):
                 if not path.resolve().is_relative_to(technique_root.resolve()):
                     raise ValueError("Technique document escapes its module directory")
@@ -876,8 +877,11 @@ class TechniqueService:
                         "updated" if any(row["lineage"] == lineage for row in self.repository.revisions()) else "added"
                     )
                 )
-                self.store.publish(document, lineage, f"module:{name}")
+                revision = self.store.publish(document, lineage, f"module:{name}")
+                expected[revision] = document.metadata.active
                 counts[category] += 1
+            counts["retired"] += self.repository.synchronize_module(f"module:{name}", expected)
+            self.store.reconcile()
         self.events.emit("technique_sync_complete", module=module, **counts, **self.store.embedding_status())
 
     def tool(self, operation: str = "", task: str = "", context: MethodologyContext | None = None):

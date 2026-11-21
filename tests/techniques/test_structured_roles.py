@@ -699,11 +699,11 @@ def test_planning_review_correction_assembled_transport(
     monkeypatch.setattr(state.service, "get", lambda *a, **kw: ("revision", "Validated method"))
     bundle = state.service.resolve_bundle(request)
     assert len(bundle.delivered) == 2 and not bundle.unresolved
-    assert len(model.calls) == 4
+    assert len(model.calls) == 3
     assembled = str(model.calls)
     assert subject in assembled and "must not become document requirements" in assembled
     assert "Separate independently reusable methods" in str(model.calls[2])
-    assert "Rejected plan" in str(model.calls[2])
+    assert "Draft plan" in str(model.calls[2])
     assert "Check coverage of independent methods" in str(model.calls[1])
     assert "planner_output" in str(model.calls[1])
     assert "Component IDs are" in str(model.calls[1])

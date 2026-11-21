@@ -94,7 +94,7 @@ def test_structured_correction_path(scripted_service, monkeypatch):
     monkeypatch.setattr(service, "get", lambda *args, **kwargs: ("revision", "Guidance"))
     bundle = service.resolve_bundle("HTTP, network and filesystem methods")
     assert [row.component.request for row in bundle.delivered] == ["HTTP comparison", "Filesystem ownership"]
-    assert len(reviews) == 2
+    assert len(reviews) == 1
 
 
 def test_exact_duplicates_merge_provenance_without_touching_distinct_requirements():

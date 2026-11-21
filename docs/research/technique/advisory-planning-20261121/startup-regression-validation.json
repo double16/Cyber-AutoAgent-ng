@@ -1,0 +1,31 @@
+{
+  "tests": {
+    "passed": 1605,
+    "skipped": 1,
+    "deselected": 6878,
+    "seconds": 57.69
+  },
+  "scope": "Technique components, selected with PYTEST_ADDOPTS=-k techniques using repository coverage entry point",
+  "changed_source": "src/modules/techniques/repository.py",
+  "coverage": {
+    "covered_lines": 102,
+    "num_statements": 103,
+    "percent_covered": 98.4251968503937,
+    "percent_covered_display": "98",
+    "missing_lines": 1,
+    "excluded_lines": 0,
+    "percent_statements_covered": 99.02912621359224,
+    "percent_statements_covered_display": "99",
+    "num_branches": 24,
+    "num_partial_branches": 1,
+    "covered_branches": 23,
+    "missing_branches": 1,
+    "percent_branches_covered": 95.83333333333333,
+    "percent_branches_covered_display": "96"
+  },
+  "coverage_floor_passed": true,
+  "source_sha256": "fb7ea9e32a0bc2a15e44caac890f05f62b2433f6c76af39975fe92cd2278da15",
+  "coverage_log": "/private/tmp/module-lineage-final-component-coverage.log",
+  "production_database_edited": false,
+  "continuation_restarted": false
+}

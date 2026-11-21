@@ -91,20 +91,21 @@ def test_duplicate_methods_are_collapsed_before_resolution(scripted_service):
     assert len(bundle.delivered) == 1
 
 
-def test_plan_review_rejects_lost_or_invented_requirements(scripted_service):
+def test_plan_advice_does_not_refuse_valid_revision(scripted_service, monkeypatch):
     state = scripted_service
     original = state.service.runner
+    reviews = []
 
     def runner(role, prompt, tools):
         if role == "technique_plan_reviewer":
-            assert "adds no unrelated requirements" in prompt
+            reviews.append(prompt)
             return review_json({"approved": False, "reason": "Missing requested CVE validation component"})
         return original(role, prompt, tools)
 
     state.service.runner = runner
-    with pytest.raises(ValueError, match="planning.*Missing requested CVE"):
-        state.service.resolve_bundle("Token handling and CVE validation")
-    assert not state.research_calls
+    monkeypatch.setattr(state.service, "get", lambda *a, **kw: ("revision", "Guidance"))
+    assert state.service.resolve_bundle("Token handling and CVE validation").delivered
+    assert len(reviews) == 1
 
 
 def test_distinct_delivered_revisions_are_each_evaluated_once(scripted_service, monkeypatch, markdown):
@@ -162,11 +163,10 @@ def test_cohesive_methodology_repairs_step_split(scripted_service, method_reques
     monkeypatch.setattr(state.service, "get", lambda *_a, **_k: ("revision", "Validated procedure"))
     bundle = state.service.resolve_bundle(method_request)
     assert len(bundle.delivered) == 1
-    assert len(planners) == len(reviews) == 2
+    assert len(planners) == 2 and len(reviews) == 1
     assert "One workflow split into steps" in planners[1]
     assert "input_references" in planners[0] and "requirements within a method" in reviews[0]
-    assert "Original request: " + method_request in reviews[1]
-    assert "One workflow split into steps" in reviews[1]
+    assert "Original request: " + method_request in reviews[0]
     assert "Every component and requirement must include" not in reviews[0]
     assert '"review_history": []' in reviews[0]
 
@@ -255,16 +255,14 @@ def test_method_review_correction_is_bounded_and_precedes_execution(scripted_ser
         assert executed == methods
         assert len([e for e in events if e["type"] == "technique_plan_accepted"]) == 1
     else:
-        with pytest.raises(ValueError, match="unresolved request coverage"):
-            state.service.resolve_bundle(request)
-        assert not executed and not state.research_calls
-        assert not any(e["type"] == "technique_plan_accepted" for e in events)
-    assert len(requests) == len(reviews) == 2
-    assert defect in requests[1] and "Rejected plan" in requests[1]
-    assert "requirements derived from planner instructions" in reviews[1]
-    rejected = [e for e in events if e["type"] == "technique_plan_rejected"]
-    assert len(rejected) == (1 if recover else 2)
-    assert rejected[0]["correction_attempt"] == 0 and defect in rejected[0]["reason"]
+        bundle = state.service.resolve_bundle(request)
+        assert len(bundle.delivered) == 1
+        assert executed == [request]
+    assert len(requests) == 2 and len(reviews) == 1
+    assert defect in requests[1] and "Draft plan" in requests[1]
+    advice = [e for e in events if e["type"] == "technique_plan_advice"]
+    assert len(advice) == 1
+    assert advice[0]["review_mode"] == "advisory" and defect in advice[0]["reason"]
 
 
 def test_split_component_context_keeps_shared_inputs_without_widening_purpose(scripted_service, monkeypatch):
@@ -438,9 +436,9 @@ def test_correction_contains_complete_findings_and_actual_rejected_output(script
 
     state.service.runner = run
     monkeypatch.setattr(state.service, "get", Mock())
-    with pytest.raises(ValueError, match="unresolved request coverage"):
+    with pytest.raises(ValueError, match="controller validation"):
         state.service.resolve_bundle("JWT handling")
-    rejected = next(e for e in events if e["type"] == "technique_plan_rejected")
+    rejected = next(e for e in events if e["type"] == "technique_plan_advice")
     assert len(rejected["validation_findings"]) == 3
     assert diagnostic in prompts[1]
     assert '"bad:2"' in prompts[1]
@@ -453,6 +451,7 @@ def test_schema_correction_reports_individual_defects_and_preserves_inputs(scrip
     original = state.service.runner
     prompts = []
     events = []
+    reviews = []
     state.service.events.callback = events.append
 
     def run(role, prompt, tools):
@@ -463,11 +462,16 @@ def test_schema_correction_reports_individual_defects_and_preserves_inputs(scrip
                     {"description": "Controls", "kind": "invented"},
                 ]}]})
             return review_json(plan_payload({"components": [component(request="HTTP controls")]}))
+        if role == "technique_plan_reviewer":
+            reviews.append(prompt)
+            return review_json({"approved": False, "reason": "Keep the controlled baseline explicit"})
         return original(role, prompt, tools)
 
     state.service.runner = run
     monkeypatch.setattr(state.service, "get", Mock(return_value=("revision", "Validated method")))
     assert state.service.resolve_bundle("HTTP controls").delivered
+    assert len(reviews) == 1 and len(prompts) == 3
+    assert "Keep the controlled baseline explicit" in prompts[2]
     rejected = next(e for e in events if e["type"] == "technique_plan_rejected")
     assert len(rejected["validation_findings"]) == 3
     assert {r["field"] for r in rejected["validation_findings"]} == {

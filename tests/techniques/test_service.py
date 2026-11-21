@@ -724,3 +724,174 @@ def test_get_keeps_selection_request_unenriched(scripted_service, monkeypatch, i
     revision, _ = service.get(method_request, context)
     assert revision == "revision"
     assert requests == [method_request]
+
+
+def test_module_sync_retires_removed_sources_and_restores_without_losing_history(
+    scripted_service, markdown, tmp_path,
+):
+    root = tmp_path / "module"
+    directory = root / "techniques"
+    directory.mkdir(parents=True)
+    path = directory / "one.md"
+    path.write_text(markdown())
+    loader = SimpleNamespace(
+        _get_extend_list=lambda root: [], _read_module_yaml=lambda root: {},
+        _inheritance_chain=lambda name: [name], _find_module_dir=lambda name: root,
+    )
+    service = scripted_service.service
+    service.synchronize_module(loader, "module")
+    revision = service.repository.revisions()[0]["revision_id"]
+    other = service.store.publish(TechniqueDocument(markdown()), "other", "module:other")
+    service.repository.use("historical", "task", revision, {"delivered_documents": ["Frozen guidance"]})
+    path.unlink()
+    service.synchronize_module(loader, "module")
+    retired = service.repository.get(revision)
+    assert not retired["active"] and not retired["current_revision"]
+    assert retired["inactive_reason"] == "module_removed" and not retired["pending_sync"]
+    assert service.repository.get(other)["active"]
+    assert revision not in {row["revision_id"] for row in service.store.search("JWT", active=False)}
+    assert revision not in {row["revision_id"] for row in service.store.triggers(["hypothesis_generation"])}
+    with pytest.raises(ValueError, match="inactive"):
+        service.repository.use("new", "task", revision)
+    service.repository.feedback("historical", "task", revision, 1, "Prior contribution")
+    assert service.repository.get(revision)["inactive_reason"] == "module_removed"
+    assert service.repository.scored_uses("historical", "task")[0]["score"] == 1
+    path.write_text(markdown())
+    service.synchronize_module(loader, "module")
+    assert service.repository.get(revision)["active"]
+    assert service.repository.get(revision)["score_count"] == 1
+
+
+def test_module_sync_scope_and_unknown_revisions_fail_before_changes(scripted_service):
+    repository = scripted_service.service.repository
+    with pytest.raises(ValueError, match="module origin"):
+        repository.synchronize_module("generated", {})
+    with pytest.raises(ValueError, match="unknown revisions"):
+        repository.synchronize_module("module:test", {"missing": True})
+
+
+@pytest.mark.parametrize("active,negative", [(False, False), (True, True)])
+def test_module_restoration_preserves_source_and_feedback_inactivity(
+    scripted_service, markdown, active, negative,
+):
+    service = scripted_service.service
+    document = TechniqueDocument(markdown(active=active))
+    revision = service.store.publish(document, "module:test:one", "module:test")
+    if negative:
+        for task in ("one", "two", "three", "pending"):
+            service.repository.use("op", task, revision)
+        for task in ("one", "two", "three"):
+            service.repository.feedback("op", task, revision, -1, "Not useful")
+    assert service.repository.synchronize_module("module:test", {}) == 1
+    assert service.repository.synchronize_module("module:test", {}) == 0
+    if negative:
+        service.repository.feedback("op", "pending", revision, -1, "Prior unused feedback")
+        assert service.repository.get(revision)["inactive_reason"] == "negative_feedback"
+    service.repository.synchronize_module("module:test", {revision: active})
+    row = service.repository.get(revision)
+    assert row["current_revision"] and not row["active"]
+    assert row["inactive_reason"] == ("negative_feedback" if negative else "module_inactive")
+
+
+def test_module_source_can_revert_to_a_historical_revision(scripted_service, markdown):
+    service = scripted_service.service
+    first = service.store.publish(TechniqueDocument(markdown()), "module:test:one", "module:test")
+    second = service.store.publish(
+        TechniqueDocument(markdown(title="Updated")), "module:test:one", "module:test",
+    )
+    assert service.repository.get(first)["inactive_reason"] == "superseded"
+    service.repository.synchronize_module("module:test", {second: True})
+    assert service.repository.get(first)["inactive_reason"] == "superseded"
+    service.repository.synchronize_module("module:test", {first: True})
+    service.store.reconcile()
+    assert service.repository.get(first)["active"] and service.repository.get(first)["current_revision"]
+    assert not service.repository.get(second)["current_revision"]
+    assert [row["revision_id"] for row in service.store.search("JWT", active=True)] == [first]
+
+
+def test_withdrawn_negative_revision_does_not_reactivate_after_late_positive_feedback(
+    scripted_service, markdown,
+):
+    service = scripted_service.service
+    revision = service.store.publish(TechniqueDocument(markdown()), "module:test:one", "module:test")
+    for task in ("n1", "n2", "n3", "p1", "p2", "p3"):
+        service.repository.use("op", task, revision)
+    for task in ("n1", "n2", "n3"):
+        service.repository.feedback("op", task, revision, -1, "Negative contribution")
+    service.repository.synchronize_module("module:test", {})
+    for task in ("p1", "p2", "p3"):
+        service.repository.feedback("op", task, revision, 1, "Prior positive contribution")
+    assert service.repository.get(revision)["score_total"] == 0
+    service.repository.synchronize_module("module:test", {revision: True})
+    assert not service.repository.get(revision)["active"]
+    assert service.repository.get(revision)["inactive_reason"] == "negative_feedback"
+
+
+def test_negative_feedback_received_after_withdrawal_applies_on_restoration(scripted_service, markdown):
+    service = scripted_service.service
+    revision = service.store.publish(TechniqueDocument(markdown()), "module:test:one", "module:test")
+    for task in ("one", "two", "three"):
+        service.repository.use("op", task, revision)
+    service.repository.synchronize_module("module:test", {})
+    for task in ("one", "two", "three"):
+        service.repository.feedback("op", task, revision, -1, "Late contribution assessment")
+    assert service.repository.get(revision)["inactive_reason"] == "module_removed"
+    service.repository.synchronize_module("module:test", {revision: True})
+    assert not service.repository.get(revision)["active"]
+    assert service.repository.get(revision)["inactive_reason"] == "negative_feedback"
+
+
+@pytest.mark.parametrize("negative", [False, True])
+def test_module_sync_preserves_compatible_generated_successor(scripted_service, markdown, negative, tmp_path):
+    service = scripted_service.service
+    root = tmp_path / "module"
+    (root / "techniques").mkdir(parents=True)
+    (root / "techniques/one.md").write_text(markdown())
+    loader = SimpleNamespace(
+        _get_extend_list=lambda root: [], _read_module_yaml=lambda root: {},
+        _inheritance_chain=lambda name: [name], _find_module_dir=lambda name: root,
+    )
+    lineage = "module:test:techniques/one.md"
+    module_revision = service.store.publish(TechniqueDocument(markdown()), lineage, "module:test")
+    generated = service.store.publish(
+        TechniqueDocument(markdown(title="Generated replacement")), lineage, "generated",
+    )
+    service.repository.use("op", "prior", generated)
+    if negative:
+        for task in ("two", "three"):
+            service.repository.use("op", task, generated)
+        for task in ("prior", "two", "three"):
+            service.repository.feedback("op", task, generated, -1, "Prior contribution")
+    service.synchronize_module(loader, "test")
+    service.store.reconcile()
+    current = [row for row in service.repository.revisions() if row["current_revision"]]
+    assert [row["revision_id"] for row in current] == [generated]
+    assert bool(current[0]["active"]) == (not negative)
+    assert not service.repository.get(module_revision)["current_revision"]
+    prior = service.repository.get(generated)
+    assert prior["inactive_reason"] == ("negative_feedback" if negative else "")
+    assert service.repository.get(generated)["source_sha256"]
+    assert service.repository.pending_uses("op", "prior") or service.repository.scored_uses("op", "prior")
+    assert service.repository.synchronize_module("module:test", {module_revision: True}) == 0
+
+
+def test_module_restore_supersedes_incompatible_generated_owner_without_unique_failure(
+    scripted_service, markdown,
+):
+    service = scripted_service.service
+    lineage = "module:test:one"
+    original = service.store.publish(TechniqueDocument(markdown()), lineage, "module:test")
+    generated = service.store.publish(
+        TechniqueDocument(markdown(title="Legacy generated")), lineage, "generated",
+    )
+    with service.repository.transaction() as connection:
+        connection.execute(
+            "UPDATE technique_revisions SET generation_version = NULL WHERE revision_id = ?", (generated,),
+        )
+    service.repository.synchronize_module("module:test", {original: True})
+    service.store.reconcile()
+    current = [row for row in service.repository.revisions() if row["current_revision"]]
+    assert [row["revision_id"] for row in current] == [original]
+    assert current[0]["active"]
+    assert service.repository.get(generated)["inactive_reason"] == "superseded"
+    assert [row["revision_id"] for row in service.store.search("JWT", active=True)] == [original]

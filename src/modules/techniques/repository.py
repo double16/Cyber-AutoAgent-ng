@@ -61,6 +61,54 @@ class TechniqueRepository:
                 ),
             )
 
+    def synchronize_module(self, origin: str, expected: dict[str, bool]) -> int:
+        """Retire removed module sources and restore source-selected revisions without deleting history."""
+        if not origin.startswith("module:"):
+            raise ValueError("Module synchronization requires a module origin")
+        retired = 0
+        with self.transaction() as conn:
+            rows = conn.execute("SELECT * FROM technique_revisions WHERE origin = ?", (origin,)).fetchall()
+            if set(expected) - {row["revision_id"] for row in rows}:
+                raise ValueError("Module synchronization contains unknown revisions")
+            for row in rows:
+                revision = row["revision_id"]
+                if revision not in expected:
+                    if not row["current_revision"] and not row["active"]:
+                        continue
+                    conn.execute(
+                        "UPDATE technique_revisions SET active = 0, current_revision = 0, "
+                        "inactive_reason = CASE WHEN inactive_reason = 'negative_feedback' THEN inactive_reason "
+                        "ELSE 'module_removed' END, pending_sync = 1 WHERE revision_id = ?", (revision,),
+                    )
+                    retired += 1
+            for row in rows:
+                revision = row["revision_id"]
+                if revision not in expected or row["current_revision"]:
+                    continue
+                current = conn.execute(
+                    "SELECT * FROM technique_revisions WHERE lineage = ? AND current_revision = 1",
+                    (row["lineage"],),
+                ).fetchone()
+                if current is not None and generation_eligible(dict(current)):
+                    continue
+                negative = row["inactive_reason"] == "negative_feedback" or (
+                    row["score_count"] >= 3 and row["score_total"] / row["score_count"] <= -0.5
+                )
+                active = expected[revision] and not negative
+                reason = "negative_feedback" if negative else "" if active else "module_inactive"
+                conn.execute(
+                    "UPDATE technique_revisions SET active = 0, current_revision = 0, "
+                    "inactive_reason = CASE WHEN inactive_reason = 'negative_feedback' THEN inactive_reason "
+                    "ELSE 'superseded' END, pending_sync = 1 "
+                    "WHERE lineage = ? AND current_revision = 1 AND revision_id != ?",
+                    (row["lineage"], revision),
+                )
+                conn.execute(
+                    "UPDATE technique_revisions SET active = ?, current_revision = 1, inactive_reason = ?, "
+                    "pending_sync = 1 WHERE revision_id = ?", (int(active), reason, revision),
+                )
+        return retired
+
     def synced(self, revision: str, collection: str) -> None:
         with self.transaction() as conn:
             conn.execute(
@@ -110,7 +158,8 @@ class TechniqueRepository:
             )
             conn.execute(
                 "UPDATE technique_revisions SET active = 0, inactive_reason = 'negative_feedback' "
-                "WHERE revision_id = ? AND score_count >= 3 AND score_total * 1.0 / score_count <= -0.5",
+                "WHERE revision_id = ? AND current_revision = 1 AND score_count >= 3 "
+                "AND score_total * 1.0 / score_count <= -0.5",
                 (revision,),
             )
 

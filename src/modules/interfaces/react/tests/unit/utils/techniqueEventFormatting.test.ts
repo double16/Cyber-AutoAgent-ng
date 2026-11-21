@@ -131,3 +131,10 @@ it('reports reuse when startup does not embed any documents', () => {
     embedding_model: 'example-model', embedding_representation: 'summary',
   } as any)).toContain('existing vectors reused');
 });
+
+it('reports removed module guidance separately from unchanged sources', () => {
+  expect(formatTechniqueEvent({type: 'technique_sync_complete', unchanged: 64, retired: 2} as any))
+    .toContain('64 unchanged, 2 retired');
+  expect(formatTechniqueEvent({type: 'technique_sync_complete', retired: 0} as any))
+    .not.toContain('retired');
+});

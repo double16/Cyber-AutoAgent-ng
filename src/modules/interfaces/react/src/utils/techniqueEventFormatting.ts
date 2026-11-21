@@ -45,6 +45,7 @@ export const formatTechniqueEvent = (input: { type?: unknown }): string | null =
   switch (event.type) {
     case 'technique_sync_complete':
       message = `Technique library: ${event.added ?? 0} added, ${event.updated ?? 0} updated, ${event.unchanged ?? 0} unchanged`;
+      if (typeof event.retired === 'number' && event.retired > 0) message += `, ${event.retired} retired`;
       if (typeof event.embedding_documents === 'number') {
         const status = event.embedding_documents > 0
           ? `${event.embedding_documents} documents embedded this session` : 'existing vectors reused';

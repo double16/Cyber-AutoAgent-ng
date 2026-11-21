@@ -30,7 +30,7 @@ class TechniqueStore:
         self.embedding_model = str(config.get("embedding_model") or "unknown")
         self._embedded_revisions: set[str] = set()
         self.dimensions = int(config["embedding_dimensions"])
-        identity = (f"phase-index-v4:{TECHNIQUE_GENERATION_VERSION}:{self.retrieval.representation}:"
+        identity = (f"phase-index-v5:{TECHNIQUE_GENERATION_VERSION}:{self.retrieval.representation}:"
                     f"{config.get('embedding_provider')}:{config.get('embedding_model')}:{self.dimensions}")
         self.index = f"cyber_autoagent_technique_index_{hashlib.sha256(identity.encode()).hexdigest()[:16]}"
         self._indexed: set[str] = set()

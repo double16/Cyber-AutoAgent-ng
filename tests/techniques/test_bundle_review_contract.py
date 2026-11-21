@@ -4,21 +4,16 @@ from pydantic import ValidationError
 from modules.techniques.bundles import DECOMPOSITION_POLICY, BundlePlanReview
 
 
-@pytest.mark.parametrize("approved,issues,valid", [
-    (True, [], True),
-    (False, [], False),
-    (True, [{"rule": "overlap", "component_ids": ["component-1"],
-             "input_references": ["original_request:1"], "correction": "Remove overlap"}], False),
-    (False, [{"rule": "overlap", "component_ids": ["component-1"],
-              "input_references": ["original_request:1"], "correction": "Remove overlap"}], True),
-])
-def test_bundle_review_requires_actionable_rejection(approved, issues, valid):
-    payload = {"approved": approved, "reason": "Coverage review", "issues": issues}
-    if valid:
-        assert BundlePlanReview.model_validate(payload).approved == approved
-    else:
-        with pytest.raises(ValidationError):
-            BundlePlanReview.model_validate(payload)
+def test_advice_schema_has_no_approval():
+    schema = BundlePlanReview.model_json_schema()
+    assert "approved" not in schema["properties"]
+    assert BundlePlanReview(reason="No improvements").issues == []
+    assert BundlePlanReview.model_validate({"approved": False, "reason": "Legacy"}).issues == []
+
+
+def test_unknown_advice_fields_rejected():
+    with pytest.raises(ValidationError):
+        BundlePlanReview(reason="Advice", refusal=True)
 
 
 def test_policy_distinguishes_requirements_and_overlapping_methods():
