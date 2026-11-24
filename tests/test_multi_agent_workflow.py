@@ -23720,6 +23720,7 @@ def test_hypothesis_evaluator_reviews_current_records_and_preserves_semantic_rep
             if status == "partial_failure" else {"kind": "none"}}
 
     monkeypatch.setattr(controller, "_run_json_text_agent", evaluate)
+    monkeypatch.setattr("modules.techniques.delivery.delivered_guidance", lambda *_args: "DISTRACTING_GUIDANCE")
     # This test isolates routing; contract validation is covered by real-runner tests.
     monkeypatch.setattr(workflow_mod, "validate_review", lambda *_args: None)
     guard = Mock(return_value=True)
@@ -23729,6 +23730,10 @@ def test_hypothesis_evaluator_reviews_current_records_and_preserves_semantic_rep
     guard.assert_not_called()
     if status == "partial_failure":
         assert decision.repair_kind == "acceptance"
+    assert "DISTRACTING_GUIDANCE" not in capture[0]
+    assert "Task worker final context" not in capture[0]
+    assert "Frozen inventory lookup examples" not in capture[0]
+    assert "credential_ids" not in capture[0]
     assert "Authoritative current hypothesis publication" in capture[0]
     assert "no_testable_hypotheses" in capture[0]
     assert "not every inventory item" in capture[0]
@@ -24403,9 +24408,10 @@ def test_complete_hypothesis_prompts_agree_on_publication_and_repair(worker_flow
         assert "do not invent hypotheses or require a minimum count" in prompt
         assert "inspection limits do not themselves justify" in prompt
         assert "follow its supplied implementation/source references" in prompt
-        assert "not individual hypotheses" in prompt
+        if prompt is not prompts[-2]:
+            assert "not individual hypotheses" in prompt
+            assert "use retained evidence rather than live target acquisition" in prompt
         assert "no_testable_hypotheses" in prompt
-        assert "use retained evidence rather than live target acquisition" in prompt
         assert "Do not fetch the live target or execute proposed tests" in prompt
         assert 'get_inventory_item(view="investigation")' in prompt
         assert "Server implementation is not required" in prompt
@@ -25362,3 +25368,30 @@ def test_invalid_hypothesis_evaluator_fallback_does_not_poison_publication(
         task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
         assert "hypothesis_review" not in task.recovery_context
         assert "evaluator_output_failure" in task.recovery_context
+
+
+@pytest.mark.parametrize("pending", [False, True])
+@pytest.mark.parametrize("kind", ["HTTP response", "TCP service output", "Filesystem source"])
+def test_hypothesis_review_packet_retains_content_without_actor_instructions(
+    worker_flow_case, monkeypatch, pending, kind,
+):
+    controller, *_rest = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    task.recovery_context["hypothesis_corrections"] = {"pending": pending}
+    monkeypatch.setattr(controller, "_hypothesis_identity_context", lambda _task: "Declared role catalog\n")
+    monkeypatch.setattr(workflow_mod, "frozen_input_context", lambda *_args: "Assigned and linked inputs\n")
+    monkeypatch.setattr(workflow_mod, "inspection_context", lambda *_args: "Retained inspection references\n")
+    journal = Mock()
+    journal.replay_context.return_value = f"Exact {kind} content; omitted results: 1\n"
+    monkeypatch.setattr(workflow_mod, "hypothesis_inspection_journal", lambda *_args: journal)
+    result = controller._hypothesis_review_input_context(task)
+    assert "Assigned and linked inputs" in result
+    assert "Declared role catalog" in result
+    assert f"Exact {kind} content" in result
+    assert "omitted results: 1" in result
+    assert "Publication requirement" not in result
+    assert "lookup examples" not in result
+    assert "credential_ids" not in result
+    budget, estimate = journal.replay_context.call_args.args
+    assert 0 <= budget <= 4000
+    assert isinstance(estimate("evidence"), int)

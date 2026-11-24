@@ -56,6 +56,27 @@ def bind_task_techniques(runtime, plan, task, tools):
     return [item for item in tools if get_tool_name(item) != "get_technique"] + [selected]
 
 
+def current_publication_context(task, operation_id):
+    """Resolve the controller-bound deliverable without falling back to historical output."""
+    from modules.tools.hypotheses import hypothesis_binding, load_hypothesis_set
+
+    if not hasattr(task, "recovery_context"):
+        return {"status": "not_bound"}
+    try:
+        binding = hypothesis_binding(task)
+        if not binding:
+            return {"status": "not_bound"}
+        publication = load_hypothesis_set(binding["artifact_ref"], task, operation_id, require_complete=False)
+        return {
+            "status": "available", "artifact_ref": binding["artifact_ref"],
+            "sha256": binding["sha256"], "value": publication.model_dump(mode="json"),
+            "publication_ordinal": len(task.recovery_context["hypothesis_publications"]),
+            "history_policy": "Earlier publications are superseded history, not the current result.",
+        }
+    except (OSError, ValueError) as error:
+        return {"status": "unavailable", "reason": type(error).__name__}
+
+
 def evaluate_task_techniques(runtime, task, reason, outcomes, *, plan=None) -> None:
     service = getattr(runtime, "technique_service", None)
     if service is None:
@@ -95,6 +116,7 @@ def evaluate_task_techniques(runtime, task, reason, outcomes, *, plan=None) -> N
         task_contract = dump_contract() if callable(dump_contract) else None
         context = json.dumps(
             {
+                "current_publication": current_publication_context(task, runtime.operation_id),
                 "available_evidence_refs": available,
                 "unavailable_evidence_refs": unavailable,
                 "objective": task.objective,
@@ -112,7 +134,7 @@ def evaluate_task_techniques(runtime, task, reason, outcomes, *, plan=None) -> N
                      "recovery_role": getattr(outcome, "recovery_role", "unknown")}
                     for index, outcome in enumerate(outcomes or [], 1)
                 ],
-            }
+            }, indent=2,
         )
         from modules.techniques.feedback_activity import select_feedback_activity
 

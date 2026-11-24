@@ -512,7 +512,8 @@ class TechniqueService:
             thread.join(timeout=1)
             self.repository.release(key, owner)
 
-    def select_existing(self, request: str, context: MethodologyContext) -> tuple[str, str, dict] | None:
+    def select_existing(self, request: str, context: MethodologyContext, *,
+                        reviews: dict | None = None) -> tuple[str, str, dict] | None:
         """Normal compatibility and complete-document selection, with no research or authorship."""
         context = methodology_context(context) or MethodologyContext()
         self.events.private_values = self.private_values
@@ -521,7 +522,8 @@ class TechniqueService:
             request = request.strip()
             self._validate_request(request)
             decision = self._prepare(request, context)
-            revision = self._select(decision.generic_request, context)
+            revision = (self._select(decision.generic_request, context) if reviews is None else
+                        self._select(decision.generic_request, context, reviews=reviews))
             if revision is None:
                 return None
             lifecycle = self.repository.get(revision)

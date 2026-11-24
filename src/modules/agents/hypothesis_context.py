@@ -55,7 +55,7 @@ inspection without expanding testing scope. Names are investigation leads, not p
 The generation task's authentication requirement governs generation only, not proposed future tests.
 Declare each hypothesis's own authentication_requirement: no roles for unauthenticated tests, one
 declared role for single-session tests, or account/role/tenant comparisons when the proposed steps
-compare identities. Declare future identity needs even when sessions are not yet available.
+compare authenticated identities. Declare future identity needs even when sessions are not yet available.
 Consider unauthenticated versus each relevant role and same-role accounts where an access boundary
 supports them; different-role tests require distinct declared roles. One role is not a cross-role gap.
 Declared roles alone do not justify tests. Preserve ownership and trust-boundary observations and their
@@ -409,13 +409,13 @@ def publication_review(task: Any, operation_id: str) -> str:
             + _rows("comparison", ("field", "value"), [
                 {"field": key, "value": record[key]} for key in (
                     "observed_basis", "suspected_mechanism", "preconditions", "attacker_controlled_input",
-                    "safe_test_steps", "positive_expectations", "negative_expectations", "required_evidence",
-                    "supporting_refs", "authentication_requirement",
+                    "authentication_requirement", "safe_test_steps", "positive_expectations",
+                    "negative_expectations", "required_evidence", "supporting_refs",
                 )
             ])
             for record in records
         )
-    )
+    ) + "\n"
 
 
 def review_input_candidates(task: Any) -> dict[str, list[dict]]:

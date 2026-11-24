@@ -338,3 +338,46 @@ def test_obsolete_generation_not_replayed_but_historical_delivery_retained(prepa
                            "WHERE revision_id = ?", (p.revision,))
     assert delivery.delivered_guidance(runtime, task, execution=True) == ""
     assert delivery.delivered_guidance(runtime, task) == original
+
+
+@pytest.mark.parametrize("purpose", ["HTTP redirect trust", "TCP service identity", "Filesystem ownership"])
+def test_automatic_selection_uses_ranked_lead_and_tries_next(prepared, purpose):
+    p = prepared
+    p.context.lookup.purpose = purpose
+    p.context.state["recommendations"] = [
+        {"trigger_id": f"t{index}", "request": f"Method {index}"} for index in range(5)
+    ]
+    chosen = p.select.return_value
+    p.select.side_effect = [None, chosen]
+    delivery.AutomaticGuidanceHook(p.context).before_model(p.event)
+    assert p.select.call_count == 2
+    assert "task_context" not in p.select.call_args.kwargs
+    assert p.select.call_args.args[0] == "Method 1"
+    assert len(delivery.task_uses(p.service, "op", "task")) == 1
+
+
+def test_automatic_selection_bounds_misses_and_invalidates_task_cache(prepared):
+    p = prepared
+    p.context.state["recommendations"] = [
+        {"trigger_id": f"t{index}", "request": f"Method {index}"} for index in range(5)
+    ]
+    p.select.return_value = None
+    delivery.AutomaticGuidanceHook(p.context).before_model(p.event)
+    assert p.select.call_count == 3
+    assert not delivery.task_uses(p.service, "op", "task")
+    p.context.lookup.purpose = "Changed purpose"
+    assert not delivery.AutomaticGuidanceHook(p.context).state["attempted"]
+
+
+
+
+def test_pending_selection_from_previous_contract_is_recomputed(prepared):
+    p = prepared
+    hook = delivery.AutomaticGuidanceHook(p.context)
+    hook.state["binding"]["selection_contract"] = 1
+    hook.state["attempted"] = True
+    hook._save()
+    resumed = delivery.AutomaticGuidanceHook(p.context)
+    assert not resumed.state["attempted"]
+    resumed.before_model(p.event)
+    assert p.select.call_count == 1

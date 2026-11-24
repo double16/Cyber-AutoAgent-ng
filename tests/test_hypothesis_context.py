@@ -228,6 +228,10 @@ def test_review_contains_latest_records_and_no_hypothesis_dispositions(producer,
     assert rendered.count("### Hypothesis ") == 2 and "Second path" in rendered
     assert "Comparison views" in rendered and "comparison[10]" in rendered
     assert "negative_expectations" in rendered and "Older snapshots" in rendered
+    assert rendered.index("authentication_requirement") < rendered.index("safe_test_steps")
+    assert rendered.endswith("\n")
+    assembled = rendered + "Keep observed facts distinct from conclusions.\n## Semantic rubric"
+    assert assembled.splitlines()[-2] == "Keep observed facts distinct from conclusions."
     writer(subjects=[no_test(reason="This item has no supported security implication")], mode="replace")
     rendered = context.publication_review(producer, "OP_TEST")
     assert "no_testable_hypotheses" in rendered and "### Hypothesis " not in rendered
@@ -435,3 +439,25 @@ def test_comparison_view_preserves_ambiguous_outcomes_for_semantic_review(produc
     assert "Protected effect without authority" in rendered and "Control comparison and causal effect" in rendered
     assert "add no evidence or judgments" in rendered
     assert "sha256=" in rendered and "### Hypothesis " in rendered
+
+
+def test_assembled_generation_and_review_share_authenticated_comparison_meaning(producer, tmp_path):
+    from types import SimpleNamespace
+
+    from modules.agents.hypothesis_review import HYPOTHESIS_SEMANTIC_GUIDANCE
+    from modules.agents.multi_agent_workflow import MultiAgentWorkflowController
+    from modules.authentication_requirements import AuthenticationRequirement
+
+    publish(producer, tmp_path)
+    current = context.publication_review(producer, "OP_TEST")
+    meaning = AuthenticationRequirement.model_fields["comparison"].description
+    controller = SimpleNamespace(runtime=SimpleNamespace(config=SimpleNamespace(module="")))
+    phase = SimpleNamespace(produces_hypotheses=True)
+    generation = MultiAgentWorkflowController._hypothesis_phase_guidance(controller, phase)
+    review = current + HYPOTHESIS_SEMANTIC_GUIDANCE
+    assert generation.count(meaning) == 1
+    assert review.count(meaning) == 1
+    assert "comparison=none with roles=[]" in generation
+    assert "unauthenticated execution" in generation
+    assert "authenticated identities" in generation
+    assert "\nKeep observed facts" in review

@@ -107,6 +107,8 @@ class AutomaticGuidanceHook(HookProvider):
         self.service = context.service
         self.path = context.path.with_suffix(".delivery.json")
         self.binding = methodology_context(context.lookup).model_dump()
+        self.binding["recommendation_context"] = context.lookup.model_dump()
+        self.binding["selection_contract"] = 3
         self.binding["module_technique_policy"] = list(
             self.service.module_technique_policy or self.binding["module_technique_policy"],
         )
@@ -138,7 +140,15 @@ class AutomaticGuidanceHook(HookProvider):
             self.state["attempted"] = True
             self._save()
             with self.service.events.scope(**self.context.event_context, delivery_mode=MODE):
-                selected = self.service.select_existing(leads[0]["request"], methodology_context(self.context.lookup))
+                selected = None
+                reviews = {}
+                for lead in leads[:3]:
+                    selected = self.service.select_existing(
+                        lead["request"], methodology_context(self.context.lookup),
+                        reviews=reviews,
+                    )
+                    if selected is not None:
+                        break
             if selected is not None:
                 revision, _document, receipt = selected
                 self.state["selection"] = {"revision_id": revision, "receipt": receipt}

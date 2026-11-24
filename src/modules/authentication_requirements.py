@@ -13,8 +13,9 @@ class AuthenticationRequirement(BaseModel):
     model_config = ConfigDict(extra="forbid")
     comparison: Literal["none", "account", "role", "tenant"] = Field(
         default="none",
-        description="Identity comparison required by this work. none means no cross-identity comparison; "
-                    "it does not mean unauthenticated. A single authenticated identity can use none.",
+        description="Authenticated identity comparison required by this work. none requests no comparison "
+                    "between authenticated accounts, roles, or tenants; it can still require authenticated "
+                    "sessions. Anonymous controls are separate from this mode.",
     )
     roles: list[str] = Field(
         default_factory=list,

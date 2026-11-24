@@ -13606,9 +13606,10 @@ evidence. Consider unauthenticated attack paths alongside applicable authenticat
 scenarios; authentication requirements describe execution, not a restriction to authenticated tests.
 Declare authentication_requirement for every hypothesis: comparison=none with roles=[] means
 unauthenticated execution; use a declared role for one session, and account/role/tenant comparison
-when multiple identities are needed. Publish with record_hypotheses; new hypotheses accumulate. Provide
-one disposition for every assigned subject ID, including parameters discussed in endpoint hypotheses. Use
-mode=replace with each affected subject's full corrected hypothesis list to revise or remove hypotheses;
+when multiple authenticated identities are needed. Publish with record_hypotheses; new hypotheses
+accumulate. Provide one disposition for every assigned subject ID, including parameters discussed in
+endpoint hypotheses. Use mode=replace with each affected subject's full corrected hypothesis list
+to revise or remove hypotheses;
 omit unaffected subjects, which Python preserves. A reasoned
 no_testable_hypotheses disposition is successful coverage when no supported security-relevant test exists;
 do not invent a security implication for every inventory item. Absent optional metadata alone is not a gap.
@@ -13640,6 +13641,25 @@ applicability or a finding, and published proof of concepts must not be executed
             'view="investigation")'
             for reference in task.acceptance.basis.source_refs for item_id in task.acceptance.basis.item_ids
         ) + "\n"
+        def estimate(text: str) -> int:
+            return estimate_prompt_tokens(str(getattr(self.runtime.config, "model_id", "") or ""), extra_content=text)
+
+        budget = max(0, min(4000, self._artifact_context_window_tokens() // 10,
+                            self._artifact_context_window_tokens() - estimate(context + self.runtime.system_prompt) - 8192))
+        return context + hypothesis_inspection_journal(
+            task, self.runtime.operation_id, _operation_output_root(),
+        ).replay_context(budget, estimate)
+
+    def _hypothesis_review_input_context(self, task: Task) -> str:
+        """Supply frozen sources and retained observations without actor instructions."""
+        context = (
+            HYPOTHESIS_GROUNDING_GUIDANCE
+            + HYPOTHESIS_AUTHORIZATION_GUIDANCE
+            + self._hypothesis_identity_context(task)
+            + frozen_input_context(task, _operation_output_root())
+            + inspection_context(task, _operation_output_root())
+        )
+
         def estimate(text: str) -> int:
             return estimate_prompt_tokens(str(getattr(self.runtime.config, "model_id", "") or ""), extra_content=text)
 
@@ -13856,7 +13876,8 @@ applicability or a finding, and published proof of concepts must not be executed
             )
             from modules.techniques.delivery import delivered_guidance
 
-            evaluator_prompt += delivered_guidance(self.runtime, task)
+            if not self._is_hypothesis_producer(task):
+                evaluator_prompt += delivered_guidance(self.runtime, task)
         except WorkflowInvariantError as error:
             return WorkflowDecision(
                 status="partial_failure", reason=f"Task evaluation input invalid: {self._short(str(error), 300)}",
@@ -19465,8 +19486,13 @@ Do not use partial_failure when every review is retain and no criterion or prere
                 "the publication, including semantic revisions; execution repair means inspecting a required "
                 "missing frozen input. Do not require confirmed findings or execution of identity comparisons "
                 "during proposal review; proposed future tests may require identity comparisons.\n"
-                + task_payload + self._hypothesis_input_context(task)
-                + artifact_limit_section + tool_outcome_section + hypothesis_review
+                + json.dumps({
+                    "objective": task.objective,
+                    "target_scope": task.target_scope,
+                    "acceptance": task.acceptance.to_dict(),
+                })
+                + self._hypothesis_review_input_context(task)
+                + artifact_limit_section + hypothesis_review
                 + "\nPlan constraints:\n" + plan.constraints_to_toon()
             )
         endpoint_binding = ""

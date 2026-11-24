@@ -1,0 +1,17 @@
+{
+  "study": "corrected-review-v2",
+  "input_file": "review-inputs-v2.json",
+  "cases": 16,
+  "arms": ["baseline", "candidate"],
+  "repetitions": 2,
+  "planned_decisions": 64,
+  "request_cap_including_repairs": 80,
+  "authorization": "User authorized as many requests as needed; this is a separate bounded correction study.",
+  "order": "repetition, frozen input order",
+  "rerun_policy": "Existing result files are never rerun; no prompt tuning after first model request.",
+  "scoring": "Designated semantic verdict with predeclared admissible equivalents; subject review must satisfy controller consistency validation. Record and inspect all other checks and disposition separately before any promotion claim.",
+  "anonymous_identity_equivalence": ["adequate", "not_applicable"],
+  "promotion": "Both repetitions must detect reproduced defects without rejecting valid controls. Selection's separately failed promotion gate remains failed regardless of this study. End-to-end testing remains gated.",
+  "limits": "Synthetic source-policy fixtures, no live tools, not an end-to-end or production-context effectiveness estimate.",
+  "preflight": "Six tests passed before model requests; first v2 preflight inputs were archived before any model request after role catalog and remaining controls were strengthened."
+}

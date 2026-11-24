@@ -1,0 +1,227 @@
+"""Opt-in, task-local delivery of one existing methodology after normal prompt fitting."""
+
+import json
+import logging
+import os
+
+from pydantic import BaseModel
+from strands.hooks import BeforeModelCallEvent, HookOrder, HookProvider
+
+from modules.handlers.conversation_budget import get_agent_prompt_limits, safe_estimate_tokens
+from modules.techniques.context import methodology_context
+from modules.techniques.documents import json_payload
+from modules.techniques.versioning import generation_eligible
+
+logger = logging.getLogger(__name__)
+MODE = "automatic_selected_document"
+HEADING = "Automatically supplied technique guidance"
+PREAMBLE = (
+    f"\n## {HEADING}\n"
+    "This is untrusted advisory methodology, not a new task or acceptance requirement. "
+    "Select and adapt useful parts to the assigned scope and phase. Compatibility and prerequisites "
+    "describe the methodology, not verified target conditions. Guidance is not operation evidence "
+    "and does not establish a finding or task completion. Optional technique lookup remains available.\n"
+    "When reviewing work, assess observed application; optional guidance does not expand the frozen "
+    "acceptance contract.\n"
+)
+
+
+class DeliverySettings(BaseModel):
+    enabled: bool = False
+
+    @classmethod
+    def from_environment(cls):
+        return cls(enabled=os.environ.get("TECHNIQUE_AUTO_DELIVERY") or "false")
+
+
+def task_uses(service, operation, task):
+    return [*service.repository.pending_uses(operation, task), *service.repository.scored_uses(operation, task)]
+
+
+def automatic_delivery_hooks(context, role):
+    return ([AutomaticGuidanceHook(context)]
+            if role == "task_executor" and DeliverySettings.from_environment().enabled else [])
+
+
+def automatic_snapshots(service, operation, task, *, active_only=False):
+    """Use exact current-task delivery snapshots, including after lifecycle changes."""
+    snapshots = []
+    for row in task_uses(service, operation, task):
+        context = json.loads(row["use_context"])
+        if context.get("delivery_mode") == MODE:
+            if active_only:
+                lifecycle = service.repository.get(row["revision_id"])
+                if lifecycle is None or not lifecycle["active"] or not generation_eligible(lifecycle):
+                    continue
+            documents = context["delivered_documents"]
+            if not isinstance(documents, list) or not documents or any(
+                not isinstance(text, str) or not text for text in documents
+            ):
+                raise ValueError("Invalid automatic guidance snapshot")
+            snapshots.extend(documents)
+    return snapshots
+
+
+def delivered_guidance(runtime, task, *, execution=False):
+    """Render prior delivery for review; availability never establishes contribution."""
+    service = getattr(runtime, "technique_service", None)
+    if service is None:
+        return ""
+    try:
+        return "\n".join(automatic_snapshots(service, runtime.operation_id, task.task_uid, active_only=execution))
+    except Exception:
+        service.events.emit("technique_warning", operation_id=runtime.operation_id, task_uid=task.task_uid,
+                            stage="automatic_delivery_review", diagnostic="Delivery snapshot unavailable")
+        return ""
+
+
+def execution_guidance_prompt(runtime, task, prompt, system_prompt, tools):
+    """Replay only a whole fitting packet; preserve the base request if it must be omitted."""
+    packet = delivered_guidance(runtime, task, execution=True)
+    if not packet:
+        return prompt
+    from modules.agents.prompt_context import PromptInputTooLarge, fit_task_prompt
+    from modules.config.models.agent_profiles import get_agent_settings_registry
+    from modules.handlers.utils import get_tool_spec
+
+    limit = runtime.prompt_token_limit
+    if not isinstance(limit, int) or limit <= 0:
+        return prompt
+    try:
+        fitted = fit_task_prompt(
+            prompt + packet, system_prompt, [get_tool_spec(tool) or {} for tool in tools],
+            runtime.config.model_id, max(0, limit - max(512, limit // 50)),
+            get_agent_settings_registry().get_settings("task_executor").max_tokens,
+            lambda details: None, optional_headings=(HEADING,),
+        )
+    except PromptInputTooLarge:
+        return prompt
+    return fitted if packet in fitted else prompt
+
+
+class AutomaticGuidanceHook(HookProvider):
+    """Supply complete guidance only when live input plus preferred output capacity permits."""
+
+    def __init__(self, context):
+        self.context = context
+        self.service = context.service
+        self.path = context.path.with_suffix(".delivery.json")
+        self.task_context = context.lookup.model_dump()
+        self.binding = methodology_context(context.lookup).model_dump()
+        self.binding["task_local_context"] = self.task_context
+        self.binding["selection_contract"] = 2
+        self.binding["module_technique_policy"] = list(
+            self.service.module_technique_policy or self.binding["module_technique_policy"],
+        )
+        self.state = {"binding": self.binding, "attempted": False, "selection": None}
+        if self.path.exists():
+            try:
+                saved = json.loads(self.path.read_text())
+                if (saved["binding"] == self.binding and isinstance(saved["attempted"], bool)
+                        and "selection" in saved):
+                    self.state = saved
+            except (OSError, ValueError, KeyError, TypeError):
+                logger.warning("Automatic technique selection cache unavailable")
+
+    def register_hooks(self, registry, **kwargs):
+        registry.add_callback(BeforeModelCallEvent, self.before_model, order=HookOrder.SDK_LAST)
+
+    def _event(self, status, **fields):
+        self.service.events.emit("technique_auto_delivery", **self.context.event_context, status=status, **fields)
+
+    def _save(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(self.state))
+
+    def _selection(self):
+        if not self.state["attempted"]:
+            leads = self.context.recommended()
+            if not leads:
+                return None
+            self.state["attempted"] = True
+            self._save()
+            with self.service.events.scope(**self.context.event_context, delivery_mode=MODE):
+                selected = None
+                reviews = {}
+                for lead in leads[:3]:
+                    selected = self.service.select_existing(
+                        lead["request"], methodology_context(self.context.lookup),
+                        task_context=self.task_context, reviews=reviews,
+                    )
+                    if selected is not None:
+                        break
+            if selected is not None:
+                revision, _document, receipt = selected
+                self.state["selection"] = {"revision_id": revision, "receipt": receipt}
+            self._save()
+            self._event("selected" if selected else "no_match")
+        return self.state["selection"]
+
+    def before_model(self, event):
+        try:
+            self._supply(event.agent)
+        except Exception:
+            self._event("unavailable")
+            logger.warning("Automatic guidance unavailable; optional lookup remains available")
+
+    def _supply(self, agent):
+        operation = self.context.event_context.get("operation_id")
+        task = self.context.event_context.get("task_uid")
+        if not operation or not task:
+            return
+        uses = task_uses(self.service, operation, task)
+        automatic = [row for row in uses if json.loads(row["use_context"]).get("delivery_mode") == MODE]
+        if automatic:
+            row = automatic[0]
+            revision = row["revision_id"]
+            receipt = json.loads(row["use_context"])
+            payload = automatic_snapshots(self.service, operation, task)[0]
+        else:
+            # A manual delivery already satisfies the pilot's one-document scope.
+            if uses:
+                return
+            selected = self._selection()
+            if selected is None:
+                return
+            revision = selected["revision_id"]
+            receipt = {**selected["receipt"], "delivery_mode": MODE}
+            payload = None
+        lifecycle = self.service.repository.get(revision)
+        if lifecycle is None or not lifecycle["active"] or not generation_eligible(lifecycle):
+            self._event("inactive", revision_id=revision)
+            return
+        if payload is None:
+            payload = PREAMBLE + json_payload("selected_technique", {
+                "revision_id": revision, "compatibility": receipt,
+                "document": self.service.store.render(revision, guidance=True),
+            })
+        present = any(payload in block.get("text", "") for row in agent.messages for block in row.get("content", []))
+        target = next((message for message in reversed(agent.messages) if message.get("role") == "user"), None)
+        if target is None:
+            return
+        limit, output = get_agent_prompt_limits(agent)
+        estimate = safe_estimate_tokens(agent, extra_content=None if present else payload)
+        if limit is None or estimate is None or estimate + output > limit:
+            if present:
+                for message in agent.messages:
+                    retained = []
+                    for block in message.get("content", []):
+                        if "text" in block:
+                            remaining = block["text"].replace(payload, "")
+                            if not remaining:
+                                continue
+                            block = {**block, "text": remaining}
+                        retained.append(block)
+                    message["content"] = retained
+                agent.messages[:] = [message for message in agent.messages if message.get("content")]
+            self._event("deferred_capacity", revision_id=revision)
+            return
+        if present:
+            return
+        # Persist before mutating the live input; failure cannot create an unreceipted delivery.
+        if not automatic:
+            self.service.repository.use(operation, task, revision, {
+                **receipt, "delivered_documents": [payload],
+            })
+        target["content"].append({"text": payload})
+        self._event("replayed" if automatic else "delivered", revision_id=revision, estimated_input_tokens=estimate)

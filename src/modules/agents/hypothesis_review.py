@@ -22,13 +22,14 @@ from modules.agents.structured_outputs import (
     NoHypothesisBasis,
     TaskReviewDecisionOutput,
 )
+from modules.authentication_requirements import AuthenticationRequirement
 from modules.prompts.security_interpretation import SECURITY_INTERPRETATION
 from modules.tools import memory
 from modules.tools.artifact_journal import ReturnedArtifactJournal
 from modules.tools.hypotheses import HypothesisSet, hypothesis_binding, load_hypothesis_set
 from modules.tools.inventory_inputs import inspection_covers_input
 
-HYPOTHESIS_SEMANTIC_GUIDANCE = SECURITY_INTERPRETATION + "\n" + """## Hypothesis semantic rubric
+HYPOTHESIS_SEMANTIC_GUIDANCE = SECURITY_INTERPRETATION + "\n" + f"""## Hypothesis semantic rubric
 Use frozen inventory and retained source artifacts; inspect explicitly linked retained resources when
 needed. Public research may inform future tests. Do not fetch the live target or execute proposed tests.
 Name concrete necessary missing evidence as a prerequisite gap, not as a negative observation.
@@ -50,6 +51,7 @@ property, with structured binding established as a future prerequisite if unknow
 cannot establish unauthorized access; distinguish access to protected data or actions. For network
 and filesystem checks, compare access against the applicable connection policy or file entitlement.
 Identity requirements: declared identities and comparisons must match the proposed future tests.
+{AuthenticationRequirement.model_fields["comparison"].description}
 Missing execution credentials alone do not invalidate a future test plan.
 Retain grounded conditional hypotheses when proposed controls can resolve uncertainty;
 completed exploitation is not required. Request revise for repairable tests and withdraw for an

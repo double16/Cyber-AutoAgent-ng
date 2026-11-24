@@ -46,3 +46,38 @@ def test_independent_review_withholds_evaluator_decision(scripted_service, monke
         "A recorded control comparison after delivery", [])
     assert result.score == 1
     assert len(captured) == 1
+
+
+@pytest.mark.parametrize("kind", ["http", "network", "filesystem"])
+def test_both_feedback_roles_receive_current_result_before_history(scripted_service, monkeypatch, kind):
+    import json
+
+    from modules.techniques.feedback import evaluate_feedback
+    from modules.techniques.roles import structured_system_prompt
+
+    service = scripted_service.service
+    original = service._json
+    calls = []
+    context = json.dumps({
+        "current_publication": {"status": "available", "sha256": "current-digest", "value": {
+            "kind": kind, "declared_identity": "authorized comparator",
+            "future_steps": "Compare permitted access with the same denied action",
+        }},
+        "outcomes": [{"version": "superseded", "output": "Earlier assumption was corrected"}],
+    }, indent=2)
+
+    def inspect(role, prompt, schema, tools=None):
+        assembled = structured_system_prompt(schema) + "\n" + str(prompt)
+        calls.append((role, assembled))
+        assert assembled.index("current-digest") < assembled.index("Earlier assumption")
+        assert schema.model_json_schema()["required"]
+        return original(role, prompt, schema, tools)
+
+    monkeypatch.setattr(service, "_json", inspect)
+    result = evaluate_feedback(service, {"revision_id": "frozen", "use_context": json.dumps({
+        "delivered_documents": ["Compare an allowed action with the same policy-denied action"],
+    })}, context, [])
+    assert result.score == 1
+    assert {role for role, _ in calls} == {"technique_evaluator", "technique_feedback_reviewer"}
+    for _, assembled in calls:
+        assert "current-digest" in assembled and kind in assembled

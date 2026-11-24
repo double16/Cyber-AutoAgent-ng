@@ -1328,3 +1328,35 @@ def test_bound_selection_uses_real_structured_transport(runner_factory, provider
     result.validate_references([{"id": "assigned"}], {1: "Compare expiry states"})
     assert result.reusable == (verdict != "unmet")
     assert model.calls[0][0] == ("native" if provider == "ollama" else "tool")
+
+
+@pytest.mark.parametrize("role", ["technique_evaluator", "technique_feedback_reviewer"])
+def test_current_feedback_publication_cannot_be_silently_fitted_away(monkeypatch, runner_factory, role):
+    from modules.techniques.feedback import USEFULNESS_RUBRIC, ContributionFeedback, IndependentFeedbackReview
+
+    runner, model = runner_factory([])
+    context = json.dumps({
+        "current_publication": {"status": "available", "sha256": "final-digest", "value": {
+            "subjects": [{"item_id": "assigned", "hypotheses": [{
+                "authentication_requirement": {"comparison": "role", "roles": ["reader", "admin"]},
+                "safe_test_steps": ["Compare the same protected action as reader and admin"],
+                "positive_expectations": ["Reader obtains the protected admin-only result"],
+            }]}],
+        }},
+        "outcomes": [{"version": "superseded", "summary": "Earlier incomplete comparison"}],
+    })
+    prompt = USEFULNESS_RUBRIC + "\n" + context
+    measured = []
+
+    def estimate(*args, **kwargs):
+        measured.append(kwargs)
+        return 40_001
+
+    monkeypatch.setattr(roles, "estimate_prompt_tokens", estimate)
+    schema = ContributionFeedback if role == "technique_evaluator" else IndependentFeedbackReview
+    with pytest.raises(ValueError, match="input exceeds configured prompt limit"):
+        runner.structured(role, prompt, schema, [])
+    assert not model.calls
+    assert measured[0]["extra_content"] == prompt
+    assert json.loads(measured[0]["extra_content"].split("\n", 1)[1]) == json.loads(context)
+    assert json.loads(measured[0]["system_prompt"].splitlines()[-1]) == schema.model_json_schema()

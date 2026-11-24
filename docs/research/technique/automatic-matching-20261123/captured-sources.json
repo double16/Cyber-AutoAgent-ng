@@ -1,0 +1,22 @@
+[
+  {
+    "snapshot": "captured-authentication.md",
+    "source": "outputs/bc/OP_20261020_110442/techniques/245bc5de-7301-5fc7-a4d3-8be954ce87b0.evaluated-7a41d247ff4265b5.md",
+    "source_export_sha256": "2c77bd14f9eaeefacc88656b242820bce56d15adc2b21722e998c9aecddac433",
+    "normalized_sha256": "2ee1336a341e8e80fc56e30809880692babf8c5e6809b781396f859730a055b2",
+    "historical_revision": "245bc5de-7301-5fc7-a4d3-8be954ce87b0",
+    "historical_generation_version": 1,
+    "historical_source_sha256": "8fc9998550060abbc2aeb8d308d279a40b14e0fbcb2f8ffdfffb0ce27dc89221",
+    "note": "Author fields and body only; historical lifecycle, scores and use feedback excluded. Imported only into isolated diagnostic catalog."
+  },
+  {
+    "snapshot": "captured-ssrf.md",
+    "source": "outputs/bc/OP_20261020_110442/techniques/52846f89-cb2f-5f95-a25c-3db330b93306.evaluated-7a41d247ff4265b5.md",
+    "source_export_sha256": "4ce3947c05b6aa135d0eb6d5089f6d113f1e1dbbee858ca859dc1f82eb79550f",
+    "normalized_sha256": "0c9bda5692c662806d74f88706d29336c221d7b2b67532a36ce097bd3309d5cc",
+    "historical_revision": "52846f89-cb2f-5f95-a25c-3db330b93306",
+    "historical_generation_version": null,
+    "historical_source_sha256": "7d6d6b824e014455a0527f50adab82f061915028ea39a6dae79700d7b93e6b7a",
+    "note": "Author fields and body only; historical lifecycle, scores and use feedback excluded. Imported only into isolated diagnostic catalog."
+  }
+]

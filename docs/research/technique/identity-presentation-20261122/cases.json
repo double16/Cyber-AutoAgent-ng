@@ -1,0 +1,487 @@
+[
+  {
+    "name": "http_missing_admin_baseline",
+    "kind": "http",
+    "publication": {
+      "schema_version": "hypothesis_set_v1",
+      "operation_id": "OP_FIXTURE",
+      "producer_task_uid": "66ba6744-d519-430d-b962-f005499502da",
+      "snapshot_hash": "5acf01af532bf695126f22cbe4cceffab95225e4779164e06e74bbd06c903656",
+      "source_refs": [
+        "artifact:artifacts/task_evidence/1b187a1a333a329a/dcc5e520-00fc-4483-9e9a-ffb6847388e3-inventory_manifest-731a2040ecdfc49c.json"
+      ],
+      "subjects": [
+        {
+          "item_id": "endpoint-d6f1e517c403a8d5",
+          "disposition": "hypotheses_supplied",
+          "reason": "",
+          "hypotheses": [
+            {
+              "hypothesis_id": "57cb73a77b3d350d9fe9cff2",
+              "authentication_requirement": {
+                "comparison": "none",
+                "roles": []
+              },
+              "observed_basis": "Client bundle declares route e.Adminpage = \"/adminpage\" in assets_index.webcrack.js line 13109 and bundles/index-quWo6y2l.webcrack.js line 13109. Client route mapping includes \"/adminpage\" in client_routes.json spa_routes. Route rendering uses conditional element={e ? <_Component16 /> : <_Component8 to={{pathname: ge.Home}} state={{from: \"/adminpage\"}}...}} indicating client-side guard based on variable e derived from sessionStorage/localStorage email. _Component16 on mount reads e = sessionStorage.getItem(\"email\") || localStorage.getItem(\"email\") and if e, calls kh(e) to check isAdmin and Kk(n) to load data. Server behavior for GET /adminpage and for the admin data endpoints referenced by kh/Kk is unobserved in retained evidence.",
+              "preconditions": [
+                "SPA serves the same shell HTML/JS for all client routes including /adminpage",
+                "Client route /adminpage is declared in the SPA bundle and listed in client_routes.json spa_routes",
+                "Route guard is implemented client-side via variable e derived from browser storage, with no observed server-side authorization check in retained artifacts",
+                "Server enforcement for the page shell and for admin data endpoints called by _Component16 is unknown / unobserved",
+                "Admin data fetch functions kh and Kk are present in the bundle and executed on component mount when e is truthy"
+              ],
+              "suspected_mechanism": "Client-side route guard only; direct navigation to /adminpage delivers the SPA shell. If browser storage contains an email value or the guard can be bypassed, _Component16 mounts and attempts to fetch admin data via kh/Kk. The security consequence depends on whether the server enforces authorization on those data endpoints; server enforcement is not evidenced in retained artifacts.",
+              "attacker_controlled_input": "URL path /adminpage requested via GET to http://target.example/adminpage; optional manipulation of browser storage email value before navigation to influence client-side guard evaluation",
+              "safe_test_steps": [
+                "Issue GET http://target.example/adminpage with no credentials and capture status, headers, body and response size",
+                "Inspect response body for SPA shell markers and for inclusion of admin component code",
+                "In a controlled browser context with empty sessionStorage/localStorage, navigate to /adminpage and record whether _Component16 mounts or redirects, and capture any network requests initiated by the page",
+                "Repeat navigation with a fabricated email value in sessionStorage/localStorage to observe client guard evaluation and subsequent calls to kh/Kk",
+                "Compare the same navigation and API calls under an authenticated admin session to establish baseline legitimate behavior",
+                "Record negative control with a known public route to confirm baseline SPA delivery"
+              ],
+              "positive_expectations": [
+                "Unauthenticated GET to /adminpage returns 200 with SPA shell, as expected for SPA architecture",
+                "Client guard evaluation allows _Component16 to mount and issues requests to admin data endpoints kh/Kk without valid server session",
+                "Server responds to those admin data requests with 200 and admin data payload to an unauthenticated or non-admin context, indicating missing server enforcement",
+                "Authenticated admin session shows same UI but receives authorized admin data, providing differential evidence"
+              ],
+              "negative_expectations": [
+                "Unauthenticated GET to /adminpage returns redirect to login or 401/403 for the page shell",
+                "Client guard prevents _Component16 mount and redirects to home for unauthenticated context",
+                "Admin data endpoints return 401/403 or empty/non-admin payload for unauthenticated requests, showing server enforcement",
+                "Response body contains only generic SPA shell without admin-specific component identifiers or network requests"
+              ],
+              "required_evidence": [
+                "HTTP GET response status and headers for http://target.example/adminpage unauthenticated",
+                "Response body contains SPA shell and references to _Component16 / admin route",
+                "Captured network requests triggered by page load in unauthenticated context, including URLs, methods, request headers and response status/body for kh/Kk calls",
+                "Comparison of admin data endpoint responses between unauthenticated and authenticated admin session with same request parameters",
+                "Evidence of client-side guard evaluation: presence/absence of sessionStorage email check and redirect behavior"
+              ],
+              "supporting_refs": [
+                "artifact:artifacts/assets_index.webcrack.js",
+                "artifact:artifacts/bundles/index-quWo6y2l.webcrack.js",
+                "artifact:artifacts/client_routes.json",
+                "artifact:artifacts/task_evidence/eb8e780f5c3517a6/client_routes-d6bfacfcdf2c4450.json"
+              ],
+              "research_refs": []
+            }
+          ]
+        }
+      ]
+    },
+    "expected_identity": "revise",
+    "rationale": "Required authenticated admin baseline is not represented; do not invent an undeclared role."
+  },
+  {
+    "name": "http_valid_single_admin",
+    "kind": "http",
+    "publication": {
+      "schema_version": "hypothesis_set_v1",
+      "operation_id": "OP_FIXTURE",
+      "producer_task_uid": "66ba6744-d519-430d-b962-f005499502da",
+      "snapshot_hash": "5acf01af532bf695126f22cbe4cceffab95225e4779164e06e74bbd06c903656",
+      "source_refs": [
+        "artifact:artifacts/task_evidence/1b187a1a333a329a/dcc5e520-00fc-4483-9e9a-ffb6847388e3-inventory_manifest-731a2040ecdfc49c.json"
+      ],
+      "subjects": [
+        {
+          "item_id": "endpoint-d6f1e517c403a8d5",
+          "disposition": "hypotheses_supplied",
+          "reason": "",
+          "hypotheses": [
+            {
+              "hypothesis_id": "57cb73a77b3d350d9fe9cff2",
+              "authentication_requirement": {
+                "comparison": "none",
+                "roles": [
+                  "admin"
+                ]
+              },
+              "observed_basis": "Client bundle declares route e.Adminpage = \"/adminpage\" in assets_index.webcrack.js line 13109 and bundles/index-quWo6y2l.webcrack.js line 13109. Client route mapping includes \"/adminpage\" in client_routes.json spa_routes. Route rendering uses conditional element={e ? <_Component16 /> : <_Component8 to={{pathname: ge.Home}} state={{from: \"/adminpage\"}}...}} indicating client-side guard based on variable e derived from sessionStorage/localStorage email. _Component16 on mount reads e = sessionStorage.getItem(\"email\") || localStorage.getItem(\"email\") and if e, calls kh(e) to check isAdmin and Kk(n) to load data. Server behavior for GET /adminpage and for the admin data endpoints referenced by kh/Kk is unobserved in retained evidence.",
+              "preconditions": [
+                "SPA serves the same shell HTML/JS for all client routes including /adminpage",
+                "Client route /adminpage is declared in the SPA bundle and listed in client_routes.json spa_routes",
+                "Route guard is implemented client-side via variable e derived from browser storage, with no observed server-side authorization check in retained artifacts",
+                "Server enforcement for the page shell and for admin data endpoints called by _Component16 is unknown / unobserved",
+                "Admin data fetch functions kh and Kk are present in the bundle and executed on component mount when e is truthy"
+              ],
+              "suspected_mechanism": "Client-side route guard only; direct navigation to /adminpage delivers the SPA shell. If browser storage contains an email value or the guard can be bypassed, _Component16 mounts and attempts to fetch admin data via kh/Kk. The security consequence depends on whether the server enforces authorization on those data endpoints; server enforcement is not evidenced in retained artifacts.",
+              "attacker_controlled_input": "URL path /adminpage requested via GET to http://target.example/adminpage; optional manipulation of browser storage email value before navigation to influence client-side guard evaluation",
+              "safe_test_steps": [
+                "Issue GET http://target.example/adminpage with no credentials and capture status, headers, body and response size",
+                "Inspect response body for SPA shell markers and for inclusion of admin component code",
+                "In a controlled browser context with empty sessionStorage/localStorage, navigate to /adminpage and record whether _Component16 mounts or redirects, and capture any network requests initiated by the page",
+                "Repeat navigation with a fabricated email value in sessionStorage/localStorage to observe client guard evaluation and subsequent calls to kh/Kk",
+                "Compare the same navigation and API calls under an authenticated admin session to establish baseline legitimate behavior",
+                "Record negative control with a known public route to confirm baseline SPA delivery"
+              ],
+              "positive_expectations": [
+                "Unauthenticated GET to /adminpage returns 200 with SPA shell, as expected for SPA architecture",
+                "Client guard evaluation allows _Component16 to mount and issues requests to admin data endpoints kh/Kk without valid server session",
+                "Server responds to those admin data requests with 200 and admin data payload to an unauthenticated or non-admin context, indicating missing server enforcement",
+                "Authenticated admin session shows same UI but receives authorized admin data, providing differential evidence"
+              ],
+              "negative_expectations": [
+                "Unauthenticated GET to /adminpage returns redirect to login or 401/403 for the page shell",
+                "Client guard prevents _Component16 mount and redirects to home for unauthenticated context",
+                "Admin data endpoints return 401/403 or empty/non-admin payload for unauthenticated requests, showing server enforcement",
+                "Response body contains only generic SPA shell without admin-specific component identifiers or network requests"
+              ],
+              "required_evidence": [
+                "HTTP GET response status and headers for http://target.example/adminpage unauthenticated",
+                "Response body contains SPA shell and references to _Component16 / admin route",
+                "Captured network requests triggered by page load in unauthenticated context, including URLs, methods, request headers and response status/body for kh/Kk calls",
+                "Comparison of admin data endpoint responses between unauthenticated and authenticated admin session with same request parameters",
+                "Evidence of client-side guard evaluation: presence/absence of sessionStorage email check and redirect behavior"
+              ],
+              "supporting_refs": [
+                "artifact:artifacts/assets_index.webcrack.js",
+                "artifact:artifacts/bundles/index-quWo6y2l.webcrack.js",
+                "artifact:artifacts/client_routes.json",
+                "artifact:artifacts/task_evidence/eb8e780f5c3517a6/client_routes-d6bfacfcdf2c4450.json"
+              ],
+              "research_refs": []
+            }
+          ]
+        }
+      ]
+    },
+    "expected_identity": "adequate",
+    "rationale": "The fixture declares an admin role; one authenticated baseline plus anonymous checks does not require two authenticated credentials."
+  },
+  {
+    "name": "http_valid_anonymous",
+    "kind": "http",
+    "publication": {
+      "schema_version": "hypothesis_set_v1",
+      "operation_id": "OP_FIXTURE",
+      "producer_task_uid": "66ba6744-d519-430d-b962-f005499502da",
+      "snapshot_hash": "5acf01af532bf695126f22cbe4cceffab95225e4779164e06e74bbd06c903656",
+      "source_refs": [
+        "artifact:artifacts/task_evidence/1b187a1a333a329a/dcc5e520-00fc-4483-9e9a-ffb6847388e3-inventory_manifest-731a2040ecdfc49c.json"
+      ],
+      "subjects": [
+        {
+          "item_id": "http-anonymous",
+          "disposition": "hypotheses_supplied",
+          "reason": "",
+          "hypotheses": [
+            {
+              "hypothesis_id": "http-anonymous",
+              "authentication_requirement": {
+                "comparison": "none",
+                "roles": []
+              },
+              "observed_basis": "Public echo endpoint reflects a query input.",
+              "preconditions": [
+                "The recorded policy applies; identity readiness is a future prerequisite."
+              ],
+              "suspected_mechanism": "Input may cross the documented response header boundary.",
+              "attacker_controlled_input": "A controlled request to the assigned resource",
+              "safe_test_steps": [
+                "Use an anonymous baseline request and an inert controlled query variation. Compare response header boundaries."
+              ],
+              "positive_expectations": [
+                "A policy-denied effect is observed under the controlled variation."
+              ],
+              "negative_expectations": [
+                "The permitted baseline succeeds and the denied variation is rejected."
+              ],
+              "required_evidence": [
+                "Baseline and variation response headers; no authenticated session is used."
+              ],
+              "supporting_refs": [
+                "artifact:frozen-policy.txt"
+              ],
+              "research_refs": []
+            }
+          ]
+        }
+      ]
+    },
+    "expected_identity": "irrelevant",
+    "rationale": "No authenticated identity is proposed."
+  },
+  {
+    "name": "network_wrong_single_role",
+    "kind": "network",
+    "publication": {
+      "schema_version": "hypothesis_set_v1",
+      "operation_id": "OP_FIXTURE",
+      "producer_task_uid": "66ba6744-d519-430d-b962-f005499502da",
+      "snapshot_hash": "5acf01af532bf695126f22cbe4cceffab95225e4779164e06e74bbd06c903656",
+      "source_refs": [
+        "artifact:artifacts/task_evidence/1b187a1a333a329a/dcc5e520-00fc-4483-9e9a-ffb6847388e3-inventory_manifest-731a2040ecdfc49c.json"
+      ],
+      "subjects": [
+        {
+          "item_id": "network-operator",
+          "disposition": "hypotheses_supplied",
+          "reason": "",
+          "hypotheses": [
+            {
+              "hypothesis_id": "network-operator",
+              "authentication_requirement": {
+                "comparison": "none",
+                "roles": [
+                  "observer"
+                ]
+              },
+              "observed_basis": "A recorded network-service policy declares operator and observer roles; the diagnostic command requires operator.",
+              "preconditions": [
+                "The recorded policy applies; identity readiness is a future prerequisite."
+              ],
+              "suspected_mechanism": "Diagnostic input may affect a resource beyond its permitted scope.",
+              "attacker_controlled_input": "A controlled request to the assigned resource",
+              "safe_test_steps": [
+                "Establish one future operator-authenticated connection. Run a permitted diagnostic baseline.",
+                "In the same operator connection, vary the diagnostic destination across the documented allowed boundary."
+              ],
+              "positive_expectations": [
+                "A policy-denied effect is observed under the controlled variation."
+              ],
+              "negative_expectations": [
+                "The permitted baseline succeeds and the denied variation is rejected."
+              ],
+              "required_evidence": [
+                "Evidence that the connection has the operator role, plus allowed and policy-denied diagnostic results."
+              ],
+              "supporting_refs": [
+                "artifact:frozen-policy.txt"
+              ],
+              "research_refs": []
+            }
+          ]
+        }
+      ]
+    },
+    "expected_identity": "revise",
+    "rationale": "Procedure requires operator; declaration restricts selection to observer."
+  },
+  {
+    "name": "network_valid_single_operator",
+    "kind": "network",
+    "publication": {
+      "schema_version": "hypothesis_set_v1",
+      "operation_id": "OP_FIXTURE",
+      "producer_task_uid": "66ba6744-d519-430d-b962-f005499502da",
+      "snapshot_hash": "5acf01af532bf695126f22cbe4cceffab95225e4779164e06e74bbd06c903656",
+      "source_refs": [
+        "artifact:artifacts/task_evidence/1b187a1a333a329a/dcc5e520-00fc-4483-9e9a-ffb6847388e3-inventory_manifest-731a2040ecdfc49c.json"
+      ],
+      "subjects": [
+        {
+          "item_id": "network-operator",
+          "disposition": "hypotheses_supplied",
+          "reason": "",
+          "hypotheses": [
+            {
+              "hypothesis_id": "network-operator",
+              "authentication_requirement": {
+                "comparison": "none",
+                "roles": [
+                  "operator"
+                ]
+              },
+              "observed_basis": "A recorded network-service policy declares operator and observer roles; the diagnostic command requires operator.",
+              "preconditions": [
+                "The recorded policy applies; identity readiness is a future prerequisite."
+              ],
+              "suspected_mechanism": "Diagnostic input may affect a resource beyond its permitted scope.",
+              "attacker_controlled_input": "A controlled request to the assigned resource",
+              "safe_test_steps": [
+                "Establish one future operator-authenticated connection. Run a permitted diagnostic baseline.",
+                "In the same operator connection, vary the diagnostic destination across the documented allowed boundary."
+              ],
+              "positive_expectations": [
+                "A policy-denied effect is observed under the controlled variation."
+              ],
+              "negative_expectations": [
+                "The permitted baseline succeeds and the denied variation is rejected."
+              ],
+              "required_evidence": [
+                "Evidence that the connection has the operator role, plus allowed and policy-denied diagnostic results."
+              ],
+              "supporting_refs": [
+                "artifact:frozen-policy.txt"
+              ],
+              "research_refs": []
+            }
+          ]
+        }
+      ]
+    },
+    "expected_identity": "adequate",
+    "rationale": "One operator connection with no cross-identity comparison is valid."
+  },
+  {
+    "name": "filesystem_wrong_comparison",
+    "kind": "filesystem",
+    "publication": {
+      "schema_version": "hypothesis_set_v1",
+      "operation_id": "OP_FIXTURE",
+      "producer_task_uid": "66ba6744-d519-430d-b962-f005499502da",
+      "snapshot_hash": "5acf01af532bf695126f22cbe4cceffab95225e4779164e06e74bbd06c903656",
+      "source_refs": [
+        "artifact:artifacts/task_evidence/1b187a1a333a329a/dcc5e520-00fc-4483-9e9a-ffb6847388e3-inventory_manifest-731a2040ecdfc49c.json"
+      ],
+      "subjects": [
+        {
+          "item_id": "filesystem-roles",
+          "disposition": "hypotheses_supplied",
+          "reason": "",
+          "hypotheses": [
+            {
+              "hypothesis_id": "filesystem-roles",
+              "authentication_requirement": {
+                "comparison": "account",
+                "roles": [
+                  "maintainer"
+                ]
+              },
+              "observed_basis": "Source policy declares reader and maintainer roles; only maintainer may read a protected export.",
+              "preconditions": [
+                "The recorded policy applies; identity readiness is a future prerequisite."
+              ],
+              "suspected_mechanism": "A path input may bypass the export role boundary.",
+              "attacker_controlled_input": "A controlled request to the assigned resource",
+              "safe_test_steps": [
+                "Use one reader identity and one maintainer identity to request the same protected export path.",
+                "Compare denied reader access with permitted maintainer access and repeat with a controlled path variation."
+              ],
+              "positive_expectations": [
+                "A policy-denied effect is observed under the controlled variation."
+              ],
+              "negative_expectations": [
+                "The permitted baseline succeeds and the denied variation is rejected."
+              ],
+              "required_evidence": [
+                "The two declared role contexts and the same-path results for reader and maintainer."
+              ],
+              "supporting_refs": [
+                "artifact:frozen-policy.txt"
+              ],
+              "research_refs": []
+            }
+          ]
+        }
+      ]
+    },
+    "expected_identity": "revise",
+    "rationale": "The procedure compares two roles, not two same-role accounts."
+  },
+  {
+    "name": "filesystem_valid_role_comparison",
+    "kind": "filesystem",
+    "publication": {
+      "schema_version": "hypothesis_set_v1",
+      "operation_id": "OP_FIXTURE",
+      "producer_task_uid": "66ba6744-d519-430d-b962-f005499502da",
+      "snapshot_hash": "5acf01af532bf695126f22cbe4cceffab95225e4779164e06e74bbd06c903656",
+      "source_refs": [
+        "artifact:artifacts/task_evidence/1b187a1a333a329a/dcc5e520-00fc-4483-9e9a-ffb6847388e3-inventory_manifest-731a2040ecdfc49c.json"
+      ],
+      "subjects": [
+        {
+          "item_id": "filesystem-roles",
+          "disposition": "hypotheses_supplied",
+          "reason": "",
+          "hypotheses": [
+            {
+              "hypothesis_id": "filesystem-roles",
+              "authentication_requirement": {
+                "comparison": "role",
+                "roles": [
+                  "reader",
+                  "maintainer"
+                ]
+              },
+              "observed_basis": "Source policy declares reader and maintainer roles; only maintainer may read a protected export.",
+              "preconditions": [
+                "The recorded policy applies; identity readiness is a future prerequisite."
+              ],
+              "suspected_mechanism": "A path input may bypass the export role boundary.",
+              "attacker_controlled_input": "A controlled request to the assigned resource",
+              "safe_test_steps": [
+                "Use one reader identity and one maintainer identity to request the same protected export path.",
+                "Compare denied reader access with permitted maintainer access and repeat with a controlled path variation."
+              ],
+              "positive_expectations": [
+                "A policy-denied effect is observed under the controlled variation."
+              ],
+              "negative_expectations": [
+                "The permitted baseline succeeds and the denied variation is rejected."
+              ],
+              "required_evidence": [
+                "The two declared role contexts and the same-path results for reader and maintainer."
+              ],
+              "supporting_refs": [
+                "artifact:frozen-policy.txt"
+              ],
+              "research_refs": []
+            }
+          ]
+        }
+      ]
+    },
+    "expected_identity": "adequate",
+    "rationale": "Both required roles and the cross-role comparison are declared."
+  },
+  {
+    "name": "filesystem_valid_single_reader",
+    "kind": "filesystem",
+    "publication": {
+      "schema_version": "hypothesis_set_v1",
+      "operation_id": "OP_FIXTURE",
+      "producer_task_uid": "66ba6744-d519-430d-b962-f005499502da",
+      "snapshot_hash": "5acf01af532bf695126f22cbe4cceffab95225e4779164e06e74bbd06c903656",
+      "source_refs": [
+        "artifact:artifacts/task_evidence/1b187a1a333a329a/dcc5e520-00fc-4483-9e9a-ffb6847388e3-inventory_manifest-731a2040ecdfc49c.json"
+      ],
+      "subjects": [
+        {
+          "item_id": "filesystem-reader",
+          "disposition": "hypotheses_supplied",
+          "reason": "",
+          "hypotheses": [
+            {
+              "hypothesis_id": "filesystem-reader",
+              "authentication_requirement": {
+                "comparison": "none",
+                "roles": [
+                  "reader"
+                ]
+              },
+              "observed_basis": "Source shows a filename joined to an export root. Policy permits reader access only inside that root.",
+              "preconditions": [
+                "The recorded policy applies; identity readiness is a future prerequisite."
+              ],
+              "suspected_mechanism": "A path input may escape the permitted root.",
+              "attacker_controlled_input": "A controlled request to the assigned resource",
+              "safe_test_steps": [
+                "Use one future reader identity. Compare a readable in-root marker with an out-of-root marker under that same identity."
+              ],
+              "positive_expectations": [
+                "A policy-denied effect is observed under the controlled variation."
+              ],
+              "negative_expectations": [
+                "The permitted baseline succeeds and the denied variation is rejected."
+              ],
+              "required_evidence": [
+                "Reader identity context, root policy, and both path-comparison results."
+              ],
+              "supporting_refs": [
+                "artifact:frozen-policy.txt"
+              ],
+              "research_refs": []
+            }
+          ]
+        }
+      ]
+    },
+    "expected_identity": "adequate",
+    "rationale": "Path comparisons under one identity do not require account/role/tenant comparison."
+  }
+]

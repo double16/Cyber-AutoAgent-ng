@@ -443,3 +443,83 @@ def test_feedback_context_includes_task_baseline_and_observed_order(recorded):
     assert context["outcomes"][0]["sequence"] == (7 if recorded else 1)
     assert context["outcomes"][0]["sequence_provenance"] == ("recorded" if recorded else "list_order")
     assert context["outcomes"][0]["recovery_role"] == ("diagnostic" if recorded else "unknown")
+
+
+@pytest.mark.parametrize("failure", [None, ValueError("digest mismatch"), OSError("missing")])
+def test_current_feedback_publication_uses_bound_version(monkeypatch, failure):
+    from modules.techniques.integration import current_publication_context
+
+    binding = {"artifact_ref": "artifact:current.json", "sha256": "current"}
+    monkeypatch.setattr("modules.tools.hypotheses.hypothesis_binding", lambda task: binding)
+    loader = Mock(return_value=SimpleNamespace(model_dump=lambda **kwargs: {"subjects": []}))
+    if failure:
+        loader.side_effect = failure
+    monkeypatch.setattr("modules.tools.hypotheses.load_hypothesis_set", loader)
+    result = current_publication_context(
+        SimpleNamespace(recovery_context={"hypothesis_publications": [binding]}), "operation",
+    )
+    loader.assert_called_once_with(
+        "artifact:current.json", loader.call_args.args[1], "operation", require_complete=False,
+    )
+    assert result["status"] == ("unavailable" if failure else "available")
+    assert ("value" in result) is (failure is None)
+
+
+def test_current_feedback_publication_absent(monkeypatch):
+    from modules.techniques.integration import current_publication_context
+
+    monkeypatch.setattr("modules.tools.hypotheses.hypothesis_binding", lambda task: {})
+    assert current_publication_context(SimpleNamespace(recovery_context={}), "operation") == {"status": "not_bound"}
+
+
+def test_current_publication_missing_task_context():
+    from modules.techniques.integration import current_publication_context
+
+    assert current_publication_context(object(), "op") == {"status": "not_bound"}
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_feedback_uses_real_current_publication_on_continuation(tmp_path, monkeypatch, corrupt):
+    from modules.techniques.integration import current_publication_context
+    from tests.test_hypotheses import hypothesis, producer, publish
+
+    task = producer.__wrapped__(tmp_path, monkeypatch)
+    first, writer = publish(task, tmp_path)
+    second = json.loads(writer(subjects=[{
+        "item_id": "subject", "disposition": "hypotheses_supplied",
+        "hypotheses": [hypothesis("Corrected input")],
+    }], mode="replace"))
+    if corrupt:
+        from modules.tools.artifact import resolve_operation_artifact_path
+
+        Path(resolve_operation_artifact_path(second["artifact_ref"])).write_text("corrupt")
+    result = current_publication_context(task, "OP_TEST")
+    assert result["status"] == ("unavailable" if corrupt else "available")
+    assert first["artifact_ref"] not in json.dumps(result)
+    if not corrupt:
+        assert result["publication_ordinal"] == 2
+        assert result["sha256"] == second["sha256"]
+        assert "Corrected input" in json.dumps(result["value"])
+
+
+def test_feedback_rejects_malformed_publication_history():
+    from modules.techniques.integration import current_publication_context
+
+    task = SimpleNamespace(recovery_context={"hypothesis_publications": "invalid"})
+    assert current_publication_context(task, "op") == {"status": "unavailable", "reason": "ValueError"}
+
+
+def test_feedback_preserves_valid_partial_publication(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from modules.techniques.integration import current_publication_context
+    from tests.test_hypotheses import producer, publish
+
+    task = producer.__wrapped__(tmp_path, monkeypatch)
+    task = replace(task, acceptance=replace(task.acceptance, manifest_hash="", basis=replace(
+        task.acceptance.basis, item_ids=("subject", "unpublished"),
+    )))
+    publish(task, tmp_path)
+    result = current_publication_context(task, "OP_TEST")
+    assert result["status"] == "available"
+    assert [row["item_id"] for row in result["value"]["subjects"]] == ["subject"]

@@ -1,0 +1,171 @@
+{
+  "status": "completed",
+  "requests": 142,
+  "request_cap": 360,
+  "pairs": 6,
+  "arms": {
+    "baseline": {
+      "attempts": 6,
+      "completed": 6,
+      "supported_correct": 6,
+      "guidance_delivered": 6,
+      "inert_controls_executed": 6,
+      "requests": 75,
+      "requests_by_stage": {
+        "selection": 12,
+        "proposal": 6,
+        "review": 6,
+        "execution": 51
+      },
+      "review_repairs": 0
+    },
+    "candidate": {
+      "attempts": 6,
+      "completed": 6,
+      "supported_correct": 6,
+      "guidance_delivered": 6,
+      "inert_controls_executed": 6,
+      "requests": 67,
+      "requests_by_stage": {
+        "selection": 12,
+        "proposal": 6,
+        "review": 6,
+        "execution": 43
+      },
+      "review_repairs": 0
+    }
+  },
+  "native_structured_finalizations": 60,
+  "tool_investigation_requests": 82,
+  "pairs_detail": [
+    {
+      "index": 0,
+      "kind": "http",
+      "expected": "violation",
+      "same_selected_revision": true,
+      "arms": {
+        "baseline": {
+          "requests": 12,
+          "supported_correct": true,
+          "selected_revision": "3a9cf63a-4ea7-5ecd-987c-51273d84a7ca",
+          "inert_control_executed": true
+        },
+        "candidate": {
+          "requests": 12,
+          "supported_correct": true,
+          "selected_revision": "3a9cf63a-4ea7-5ecd-987c-51273d84a7ca",
+          "inert_control_executed": true
+        }
+      }
+    },
+    {
+      "index": 1,
+      "kind": "http",
+      "expected": "no_violation_observed",
+      "same_selected_revision": true,
+      "arms": {
+        "baseline": {
+          "requests": 12,
+          "supported_correct": true,
+          "selected_revision": "3a9cf63a-4ea7-5ecd-987c-51273d84a7ca",
+          "inert_control_executed": true
+        },
+        "candidate": {
+          "requests": 12,
+          "supported_correct": true,
+          "selected_revision": "3a9cf63a-4ea7-5ecd-987c-51273d84a7ca",
+          "inert_control_executed": true
+        }
+      }
+    },
+    {
+      "index": 2,
+      "kind": "network",
+      "expected": "violation",
+      "same_selected_revision": true,
+      "arms": {
+        "baseline": {
+          "requests": 13,
+          "supported_correct": true,
+          "selected_revision": "ed5c169b-33f6-5872-8f25-59de45e5df8e",
+          "inert_control_executed": true
+        },
+        "candidate": {
+          "requests": 13,
+          "supported_correct": true,
+          "selected_revision": "ed5c169b-33f6-5872-8f25-59de45e5df8e",
+          "inert_control_executed": true
+        }
+      }
+    },
+    {
+      "index": 3,
+      "kind": "network",
+      "expected": "no_violation_observed",
+      "same_selected_revision": true,
+      "arms": {
+        "baseline": {
+          "requests": 14,
+          "supported_correct": true,
+          "selected_revision": "ed5c169b-33f6-5872-8f25-59de45e5df8e",
+          "inert_control_executed": true
+        },
+        "candidate": {
+          "requests": 14,
+          "supported_correct": true,
+          "selected_revision": "ed5c169b-33f6-5872-8f25-59de45e5df8e",
+          "inert_control_executed": true
+        }
+      }
+    },
+    {
+      "index": 4,
+      "kind": "filesystem",
+      "expected": "violation",
+      "same_selected_revision": true,
+      "arms": {
+        "baseline": {
+          "requests": 12,
+          "supported_correct": true,
+          "selected_revision": "00272b18-b9e9-50bd-a242-2aaa98551b25",
+          "inert_control_executed": true
+        },
+        "candidate": {
+          "requests": 8,
+          "supported_correct": true,
+          "selected_revision": "00272b18-b9e9-50bd-a242-2aaa98551b25",
+          "inert_control_executed": true
+        }
+      }
+    },
+    {
+      "index": 5,
+      "kind": "filesystem",
+      "expected": "no_violation_observed",
+      "same_selected_revision": true,
+      "arms": {
+        "baseline": {
+          "requests": 12,
+          "supported_correct": true,
+          "selected_revision": "00272b18-b9e9-50bd-a242-2aaa98551b25",
+          "inert_control_executed": true
+        },
+        "candidate": {
+          "requests": 8,
+          "supported_correct": true,
+          "selected_revision": "00272b18-b9e9-50bd-a242-2aaa98551b25",
+          "inert_control_executed": true
+        }
+      }
+    }
+  ],
+  "conclusions": {
+    "pipeline_feasibility": "Both arms completed and correctly discriminated all six owned fixtures.",
+    "incremental_effectiveness": "No observed correctness or delivery gain; both arms selected identical documents in every pair.",
+    "cost": "Candidate used eight fewer generation requests; difference occurred only in filesystem tool investigation. One run does not establish causality or expected savings.",
+    "adoption": "Guide-consistent controls were executed, but both arms received guidance and there was no no-guidance arm. Incremental useful adoption is unproven.",
+    "review_quality": "Manual review found an accepted candidate TCP proposal with ambiguous/incorrect positive expectations despite correct final execution.",
+    "authorship": "Fresh technique-document authorship was not exercised.",
+    "deployment": "No deployment or promotion authorized by these diagnostics."
+  }
+}

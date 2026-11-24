@@ -144,3 +144,41 @@ def test_cached_review_cannot_resurrect_obsolete_generation(cached):
             connection.execute("UPDATE technique_revisions SET origin = 'generated', generation_version = NULL, "
                                "pending_sync = 1 WHERE revision_id = ?", (cached.selection,))
         assert cached.service.select_existing("JWT handling", context) is None
+
+
+def test_existing_selection_accepts_conditional_method_without_task_evidence_veto(cached, monkeypatch):
+    from tests.techniques.conftest import review_response
+
+    p = cached
+    original = p.service._json
+    captured = []
+
+    def evaluate(role, prompt, schema):
+        if "COMPLETE technique" not in prompt:
+            return original(role, prompt, schema)
+        captured.append((prompt, schema.model_json_schema()))
+        review = review_response(prompt, True)
+        for judgment in review.judgments:
+            judgment.verdict = "conditional"
+            judgment.explanation = "Future target prerequisites remain unknown; the requested method is covered"
+        return schema.model_validate(review.model_dump())
+
+    monkeypatch.setattr(p.service, "_json", evaluate)
+    result = p.service.select_existing("JWT handling", MethodologyContext(phase_contexts=["hypothesis_generation"]))
+    assert result is not None
+    prompt, schema = captured[0]
+    assert "task_local_context" not in prompt
+    assert "task_relevance" not in schema["properties"]
+    assert result[2]["applicability"] == "conditional"
+
+
+def test_existing_selection_shares_methodology_reviews_across_fallback_attempts(cached):
+    p = cached
+    context = MethodologyContext(phase_contexts=["hypothesis_generation"])
+    reviews = {}
+    first = p.service.select_existing("JWT handling", context, reviews=reviews)
+    count = sum("COMPLETE technique" in prompt for _, prompt, _ in p.calls)
+    second = p.service.select_existing("JWT handling", context, reviews=reviews)
+    assert first is not None and second[0] == first[0]
+    assert reviews
+    assert sum("COMPLETE technique" in prompt for _, prompt, _ in p.calls) == count

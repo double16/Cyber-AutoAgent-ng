@@ -1542,3 +1542,29 @@ Unchanged module sources preserve an eligible current generated successor, inclu
 state. When restoring a source with no eligible current owner, synchronization supersedes any
 incompatible owner in the same SQLite transaction before promoting the module revision. This keeps
 the single-current-revision lineage constraint intact without deleting or editing historical uses.
+
+Feedback receives the controller-bound current hypothesis publication and digest when available.
+Earlier tool outputs remain historical context; they must not replace a missing current publication.
+Usefulness concerns substantive methodological adaptation, not reproduction of tables or checklists.
+
+Hypothesis identity declarations describe future test needs rather than the generation task's session.
+`comparison=none` does not require a pair of authenticated identities; a single authenticated baseline
+can use one declared role and separately scoped anonymous controls. In a hypothesis, an empty role
+list requests no authenticated identity. Generic credential selection uses empty roles as unrestricted
+selection only after authentication is requested. Missing credential readiness remains a future
+prerequisite, and reviewers must not invent role labels absent from the declared role catalog.
+
+### Task-aware automatic delivery
+
+The batched lead matcher assesses task relevance using the assigned objective, subjects and recorded
+observations. Existing-document selection then assesses the requested methodological capabilities;
+it does not repeat whole-task applicability or require observed target prerequisites for guidance.
+Unknown prerequisites remain conditional, and a guide may serve one part of a larger task. Automatic
+delivery considers up to three ranked leads without starting research or authorship; explicit lookup
+remains available when none fits. Recommendation context changes invalidate pending selections,
+while delivered snapshots remain historical receipts. Task-specific context stays outside reusable-
+document authoring and methodology selection.
+
+Hypothesis semantic review receives the current publication, frozen inputs, saved inspections and
+available identity roles separately from generation-task authentication settings and historical tool
+summaries. Controller provenance checks and existing correction limits remain authoritative.

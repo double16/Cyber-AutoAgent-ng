@@ -1,0 +1,22 @@
+{
+  "requests": 64,
+  "usable_for_promotion": false,
+  "reason": "Fixture source_refs pointed at form.html instead of a valid inventory manifest; models judged unavailable frozen inputs.",
+  "arms": {
+    "baseline": {
+      "decisions": 32,
+      "schema_valid": 32,
+      "raw_designated_check_matches": 24
+    },
+    "candidate": {
+      "decisions": 32,
+      "schema_valid": 32,
+      "raw_designated_check_matches": 22
+    }
+  },
+  "limitations": [
+    "Raw counts are not a semantic-effectiveness estimate.",
+    "Anonymous identity adequate and not_applicable can both be valid; exact label scoring overcounts errors.",
+    "Several synthetic positive controls need stronger policy/identity specification before another model study."
+  ]
+}

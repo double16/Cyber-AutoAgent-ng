@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StrictBool, model_validator
 
+from modules.prompts.security_interpretation import SECURITY_INTERPRETATION
+
 
 class FeedbackEvidenceGap(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -81,7 +83,7 @@ class ContributionFeedback(BaseModel):
         return 1 if self.helpful_contribution else 0
 
 
-USEFULNESS_RUBRIC = (
+USEFULNESS_RUBRIC = SECURITY_INTERPRETATION + (
     "Evaluate demonstrated contribution of delivered guidance to observed task behavior, "
     "using the controller-selected activity guidance below. The recorded original and phase-aligned request "
     "explains authoring purpose and does not require the consuming task to repeat its authoring deliverable. "
@@ -89,6 +91,10 @@ USEFULNESS_RUBRIC = (
     "for neutrality. Authentication controls are not limited to login or token-issuance routes; an "
     "authentication hypothesis does not by itself demonstrate use of injection guidance. "
     "Identify the delivered method, then compare its application in actual task deliverables. "
+    "Controller-bound current publications supersede earlier outputs; attribute corrected mistakes to "
+    "their original version. Unavailable current content must not be replaced by an earlier version. "
+    "Tables, confidence labels and checklists are optional presentation choices; judge substantive "
+    "adaptation rather than reproduction of the guidance format. "
     "A specific hypothesis, control, comparison, evidence requirement, justified exclusion or next step "
     "can demonstrate helpful contribution. Target names, titles and illustrative examples do not limit "
     "method scope. Unknown prerequisites are conditions to investigate, not automatic disqualifiers. "

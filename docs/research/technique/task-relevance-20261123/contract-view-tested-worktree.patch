@@ -1,0 +1,221 @@
+diff --git a/src/modules/agents/hypothesis_context.py b/src/modules/agents/hypothesis_context.py
+index bda71d54..8ec2419a 100644
+--- a/src/modules/agents/hypothesis_context.py
++++ b/src/modules/agents/hypothesis_context.py
+@@ -5,6 +5,7 @@ import json
+ from pathlib import Path
+ from typing import Any
+ 
++from modules.authentication_requirements import AuthenticationRequirement
+ from modules.handlers.utils import sanitize_toon_value
+ from modules.tools.artifact import resolve_operation_artifact_path
+ from modules.tools.artifact_journal import ReturnedArtifactJournal
+@@ -55,7 +56,7 @@ inspection without expanding testing scope. Names are investigation leads, not p
+ The generation task's authentication requirement governs generation only, not proposed future tests.
+ Declare each hypothesis's own authentication_requirement: no roles for unauthenticated tests, one
+ declared role for single-session tests, or account/role/tenant comparisons when the proposed steps
+-compare identities. Declare future identity needs even when sessions are not yet available.
++compare authenticated identities. Declare future identity needs even when sessions are not yet available.
+ Consider unauthenticated versus each relevant role and same-role accounts where an access boundary
+ supports them; different-role tests require distinct declared roles. One role is not a cross-role gap.
+ Declared roles alone do not justify tests. Preserve ownership and trust-boundary observations and their
+@@ -407,15 +408,18 @@ def publication_review(task: Any, operation_id: str) -> str:
+         + "".join(
+             f"\n### Hypothesis {record['hypothesis_id']} (subject {record['item_id']})\n"
+             + _rows("comparison", ("field", "value"), [
+-                {"field": key, "value": record[key]} for key in (
++                {"field": key, "value": (
++                    AuthenticationRequirement.model_validate(record[key]).review_view()
++                    if key == "authentication_requirement" else record[key]
++                )} for key in (
+                     "observed_basis", "suspected_mechanism", "preconditions", "attacker_controlled_input",
+-                    "safe_test_steps", "positive_expectations", "negative_expectations", "required_evidence",
+-                    "supporting_refs", "authentication_requirement",
++                    "authentication_requirement", "safe_test_steps", "positive_expectations",
++                    "negative_expectations", "required_evidence", "supporting_refs",
+                 )
+             ])
+             for record in records
+         )
+-    )
++    ) + "\n"
+ 
+ 
+ def review_input_candidates(task: Any) -> dict[str, list[dict]]:
+diff --git a/src/modules/authentication_requirements.py b/src/modules/authentication_requirements.py
+index f40f3b59..5fcde36f 100644
+--- a/src/modules/authentication_requirements.py
++++ b/src/modules/authentication_requirements.py
+@@ -13,8 +13,9 @@ class AuthenticationRequirement(BaseModel):
+     model_config = ConfigDict(extra="forbid")
+     comparison: Literal["none", "account", "role", "tenant"] = Field(
+         default="none",
+-        description="Identity comparison required by this work. none means no cross-identity comparison; "
+-                    "it does not mean unauthenticated. A single authenticated identity can use none.",
++        description="Authenticated identity comparison required by this work. none requests no comparison "
++                    "between authenticated accounts, roles, or tenants; it can still require authenticated "
++                    "sessions. Anonymous controls are separate from this mode.",
+     )
+     roles: list[str] = Field(
+         default_factory=list,
+@@ -22,6 +23,16 @@ class AuthenticationRequirement(BaseModel):
+                     "comparison=none. Empty means no explicit role restriction. Credential readiness is separate.",
+     )
+ 
++    def review_view(self) -> dict[str, Any]:
++        """Decode canonical identity metadata without inferring controls or credential readiness."""
++        return {
++            "declared_authenticated_roles": list(self.roles),
++            "comparison_between_authenticated_identities": {
++                "none": "not_requested", "account": "different_accounts_in_one_role",
++                "role": "different_roles", "tenant": "different_tenants",
++            }[self.comparison],
++        }
++
+     @field_validator("comparison", mode="before")
+     @classmethod
+     def normalize_comparison(cls, value: Any) -> Any:
+diff --git a/src/modules/techniques/alignment.py b/src/modules/techniques/alignment.py
+index e25232f8..40bbfbf2 100644
+--- a/src/modules/techniques/alignment.py
++++ b/src/modules/techniques/alignment.py
+@@ -5,7 +5,7 @@ from typing import Literal
+ from pydantic import BaseModel, ConfigDict, Field, StrictBool, computed_field, model_validator
+ 
+ from modules.prompts.security_interpretation import SECURITY_INTERPRETATION
+-from modules.techniques.context import MethodologyContext, methodology_context
++from modules.techniques.context import METHODOLOGY_DELIVERABLE, MethodologyContext, methodology_context
+ from modules.techniques.documents import CONTEXTS, json_payload
+ 
+ AUTHORING_ADDITIONS = (
+@@ -175,7 +175,7 @@ def phase_guidance(context: MethodologyContext | None) -> str:
+     return (
+         policy + "\n" + REVIEW_GUIDANCE + "\n" +
+         "Apply supplied module technique policy and user methodology restrictions to reusable guidance. "
+-        "Guidance purpose: produce reusable methodology, never completed target execution or findings. "
++        f"Guidance purpose: produce {METHODOLOGY_DELIVERABLE}, never completed target execution or findings. "
+         "Source-backed facts may support original procedural synthesis. Missing target observations are "
+         "future validation needs, not missing factual support for guidance. Preserve explicit deliverables. "
+         "Multiple contexts have separate objectives, no inferred ordering or automatic splitting.\n"
+diff --git a/src/modules/techniques/context.py b/src/modules/techniques/context.py
+index 7e5e0c9d..362b930a 100644
+--- a/src/modules/techniques/context.py
++++ b/src/modules/techniques/context.py
+@@ -10,6 +10,8 @@ from modules.techniques.documents import json_payload, optional_records_payload
+ if TYPE_CHECKING:
+     from modules.techniques.alignment import RequestAlignment
+ 
++METHODOLOGY_DELIVERABLE = "reusable methodology"
++
+ ObservationOrigin = Literal["source", "analysis", "guidance", "unknown"]
+ Applicability = Literal["supported", "conditional", "incompatible", "uncertain"]
+ 
+diff --git a/src/modules/techniques/delivery.py b/src/modules/techniques/delivery.py
+index 6515dbfb..87567afb 100644
+--- a/src/modules/techniques/delivery.py
++++ b/src/modules/techniques/delivery.py
+@@ -106,7 +106,10 @@ class AutomaticGuidanceHook(HookProvider):
+         self.context = context
+         self.service = context.service
+         self.path = context.path.with_suffix(".delivery.json")
++        self.task_context = context.lookup.model_dump()
+         self.binding = methodology_context(context.lookup).model_dump()
++        self.binding["task_local_context"] = self.task_context
++        self.binding["selection_contract"] = 3
+         self.binding["module_technique_policy"] = list(
+             self.service.module_technique_policy or self.binding["module_technique_policy"],
+         )
+@@ -138,7 +141,15 @@ class AutomaticGuidanceHook(HookProvider):
+             self.state["attempted"] = True
+             self._save()
+             with self.service.events.scope(**self.context.event_context, delivery_mode=MODE):
+-                selected = self.service.select_existing(leads[0]["request"], methodology_context(self.context.lookup))
++                selected = None
++                reviews = {}
++                for lead in leads[:3]:
++                    selected = self.service.select_existing(
++                        lead["request"], methodology_context(self.context.lookup),
++                        task_context=self.task_context, reviews=reviews,
++                    )
++                    if selected is not None:
++                        break
+             if selected is not None:
+                 revision, _document, receipt = selected
+                 self.state["selection"] = {"revision_id": revision, "receipt": receipt}
+diff --git a/src/modules/techniques/service.py b/src/modules/techniques/service.py
+index f03ccfc2..feea78ee 100644
+--- a/src/modules/techniques/service.py
++++ b/src/modules/techniques/service.py
+@@ -24,7 +24,7 @@ from pydantic import (
+ from strands import tool
+ 
+ from modules.techniques.alignment import AUTHORING_ADDITIONS, align_request, phase_guidance
+-from modules.techniques.context import LookupDecision, MethodologyContext, methodology_context
++from modules.techniques.context import METHODOLOGY_DELIVERABLE, LookupDecision, MethodologyContext, methodology_context
+ from modules.techniques.coverage import Requirement, review_coverage, select_sources
+ from modules.techniques.critique import Critique as Critique
+ from modules.techniques.documents import (
+@@ -392,7 +392,7 @@ class TechniqueService:
+         return decision
+ 
+     def _select(self, request: str, context: MethodologyContext | None = None, requirements=None,
+-                *, reviews: dict | None = None) -> str | None:
++                *, reviews: dict | None = None, task_context: dict | None = None) -> str | None:
+         candidates = []
+         reviews = {} if reviews is None else reviews
+         reviewed = []
+@@ -425,6 +425,7 @@ class TechniqueService:
+                     + (context.render(include_phase_guidance=False) if context else "")
+                     + json_payload("module_technique_policy", context.module_technique_policy if context else [])
+                     + "\n"
++                    + json_payload("requested_deliverable", METHODOLOGY_DELIVERABLE) + "\n"
+                     + f"Request: {request}\n"
+                     + "Required methodological capabilities:\n"
+                     + json_payload("requirements", requested)
+@@ -440,7 +441,16 @@ class TechniqueService:
+                     })
+                     + "\n" + json_payload("candidate", candidate)
+                 )
+-                output_model = selection_output_model(requested)
++                if task_context is not None:
++                    prompt += (
++                        "\nTask-local delivery decision: does this adaptable procedure serve the assigned "
++                        "task purpose? Return task_relevance with serves_task and a concise reason. "
++                        "Unknown prerequisites remain conditional; a different security mechanism or "
++                        "purpose is unrelated. This context does not redefine reusable methodology.\n"
++                        + json_payload("task_local_context", task_context)
++                    )
++                output_model = (selection_output_model(requested) if task_context is None else
++                                selection_output_model(requested, task_local=True))
+                 fingerprint = hashlib.sha256(
+                     (prompt + json.dumps(output_model.model_json_schema(), sort_keys=True)).encode(),
+                 ).hexdigest()
+@@ -451,6 +461,8 @@ class TechniqueService:
+                 if cached is not None:
+                     try:
+                         cached.validate_references(requested, passages)
++                        if task_context is not None and cached.task_relevance is None:
++                            raise ValueError("Task relevance missing from cached review")
+                     except ValueError:
+                         self.events.emit("technique_retrieval", stage="selection", status="cache_invalid")
+                     else:
+@@ -512,7 +524,8 @@ class TechniqueService:
+             thread.join(timeout=1)
+             self.repository.release(key, owner)
+ 
+-    def select_existing(self, request: str, context: MethodologyContext) -> tuple[str, str, dict] | None:
++    def select_existing(self, request: str, context: MethodologyContext, *,
++                        task_context: dict | None = None, reviews: dict | None = None) -> tuple[str, str, dict] | None:
+         """Normal compatibility and complete-document selection, with no research or authorship."""
+         context = methodology_context(context) or MethodologyContext()
+         self.events.private_values = self.private_values
+@@ -521,7 +534,8 @@ class TechniqueService:
+             request = request.strip()
+             self._validate_request(request)
+             decision = self._prepare(request, context)
+-            revision = self._select(decision.generic_request, context)
++            revision = (self._select(decision.generic_request, context) if task_context is None else
++                        self._select(decision.generic_request, context, task_context=task_context, reviews=reviews))
+             if revision is None:
+                 return None
+             lifecycle = self.repository.get(revision)

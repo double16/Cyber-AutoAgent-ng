@@ -1,0 +1,32 @@
+{
+  "method": "Manual review of every evaluator/reviewer output against frozen fixture content; score direction is not an accuracy criterion.",
+  "findings": {
+    "admin_chronology": {
+      "baseline": "All three summaries combine earlier unqualified client-only guard claims with later unknown-server-enforcement language; one calls old/new snapshots two hypotheses.",
+      "revised": "All three summaries describe one final hypothesis, preserving explicit unknown server enforcement.",
+      "limitation": "A three-repetition reconstructed-context replay cannot establish broad production causality."
+    },
+    "dom_discrimination": {
+      "baseline_flagged": 0,
+      "baseline_trials": 3,
+      "revised_flagged": 0,
+      "revised_trials": 3,
+      "observation": "Both arms describe source-versus-rendered comparisons as meaningful contribution without identifying that ordinary title rendering/HTML parsing does not prove the claimed script execution. No harmful effect was reported."
+    },
+    "admin_identity": {
+      "baseline_flagged": 0,
+      "baseline_trials": 3,
+      "revised_flagged": 0,
+      "revised_trials": 3,
+      "observation": "Neither feedback arm identifies the authenticated-admin baseline versus comparison=none, roles=[] mismatch. This is not a direct trial of the task acceptance evaluator."
+    },
+    "empty_exclusion": {
+      "baseline_resolved": 2,
+      "revised_resolved": 3,
+      "trials_per_arm": 3,
+      "observation": "One baseline trial remains pending after semantic disagreement. Another baseline and one revised trial initially treated missing presentation forms as grounds for neutrality before correction. Revised helpful reasons sometimes overstate explicit prerequisite categorization present in the prose.",
+      "limitation": "Resolution and positive scores do not independently prove actual adoption or source inspection."
+    }
+  },
+  "conclusion": "Improved current-version descriptions and modest resolution consistency; no demonstrated improvement in detecting the sampled identity or consequence-discrimination defects. End-to-end authorship/adoption remains unmeasured."
+}
