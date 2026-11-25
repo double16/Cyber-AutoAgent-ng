@@ -1568,3 +1568,12 @@ document authoring and methodology selection.
 Hypothesis semantic review receives the current publication, frozen inputs, saved inspections and
 available identity roles separately from generation-task authentication settings and historical tool
 summaries. Controller provenance checks and existing correction limits remain authoritative.
+
+### Existing guidance before manual planning
+
+Manual lookup first aligns the complete methodology request and checks existing eligible documents.
+If one document covers its requested mechanisms and explicit deliverables, it returns a one-component
+bundle without component planning or authorship. Unknown target prerequisites remain conditional.
+A multi-procedure document can cover the request as a whole. Coverage misses use the normal planning
+path; selection failures remain explicit errors. Both paths preserve exact delivery snapshots and
+per-revision receipts. Automatic delivery and hypothesis review are unchanged.

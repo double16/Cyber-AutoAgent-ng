@@ -343,7 +343,7 @@ def test_invalid_assessment_repairs_without_mislabeling_catalog_miss(scripted_se
     state.service.runner = runner
     result = state.service.tool("op", "task", LookupContext())(request="Source analysis")
     assert "Assessment: conditional" in result
-    assert len(attempts) == 2 and len(state.research_calls) == 1
+    assert len(attempts) == 3 and len(state.research_calls) == 1
 
 
 def test_non_incompatible_assessment_rejects_conflict(scripted_service):

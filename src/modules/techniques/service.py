@@ -514,10 +514,21 @@ class TechniqueService:
 
     def select_existing(self, request: str, context: MethodologyContext, *,
                         reviews: dict | None = None) -> tuple[str, str, dict] | None:
+        """Select existing guidance while preserving the public compatibility receipt contract."""
+        context = methodology_context(context) or MethodologyContext()
+        selected = self._select_existing(request, context, reviews=reviews)
+        if selected is None:
+            return None
+        revision, markdown, decision = selected
+        return revision, markdown, decision.receipt(context)
+
+    def _select_existing(self, request: str, context: MethodologyContext, *,
+                        reviews: dict | None = None) -> tuple[str, str, LookupDecision] | None:
         """Normal compatibility and complete-document selection, with no research or authorship."""
         context = methodology_context(context) or MethodologyContext()
         self.events.private_values = self.private_values
-        with self.events.scope(activity_id=self.events.activity_id()):
+        activity_id = self.events.current_context().get("activity_id") or self.events.activity_id()
+        with self.events.scope(activity_id=activity_id):
             context.module_technique_policy = list(self.module_technique_policy or context.module_technique_policy)
             request = request.strip()
             self._validate_request(request)
@@ -532,7 +543,7 @@ class TechniqueService:
                     or (context.phase_contexts
                         and not set(context.phase_contexts).intersection(document.metadata.phases))):
                 return None
-            return revision, self.store.render(revision, guidance=True), decision.receipt(context)
+            return revision, self.store.render(revision, guidance=True), decision
 
     def get(
         self, request: str, context: MethodologyContext | None = None, *, on_decision: Callable | None = None,

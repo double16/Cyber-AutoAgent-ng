@@ -61,10 +61,11 @@ def test_mixed_bundle_delivers_complete_document_applicability_and_explicit_gaps
     assert receipt["component_purpose"] == "JWT handling" and receipt["requirements"][0]["id"] == "requirement-1"
 
 
-def test_delivered_revisions_are_deduplicated_across_distinct_methods(scripted_service):
+def test_delivered_revisions_are_deduplicated_across_distinct_methods(scripted_service, monkeypatch):
     state = scripted_service
     revision = state.publish()
     state.selection = revision
+    monkeypatch.setattr(state.service, "_select_existing", Mock(return_value=None))
     plan_runner(state, [component(), component("other", "Token validation")])
     bundle = state.service.resolve_bundle("Token methods", operation="op", task="task")
     assert len(bundle.delivered) == 2
@@ -502,3 +503,41 @@ def test_controller_bounds_persisted_metadata_without_shortening_authoritative_i
     assert component.request == component.request_excerpt == request
     assert component.purpose == request[:1000]
     assert component.requirements[0].origins[0].excerpt == restriction[:2000]
+
+
+@pytest.mark.parametrize("method", ["HTTP file selection", "TCP ownership comparison", "Filesystem containment",
+                                   "JWT algorithm and claim verification"])
+def test_whole_request_reuse_skips_component_planning(scripted_service, monkeypatch, method):
+    from modules.techniques.context import LookupDecision, MethodologyContext
+
+    p = scripted_service
+    revision = p.publish()
+    markdown = p.service.store.render(revision, guidance=True)
+    decision = LookupDecision(generic_request=method, applicability="conditional",
+                              unmet_prerequisites=["Establish future target prerequisites"], reason="Method covered")
+    monkeypatch.setattr(p.service, "_select_existing", Mock(return_value=(revision, markdown, decision)))
+    original = p.service._json
+
+    def no_planner(role, *args, **kwargs):
+        assert role not in {"technique_planner", "technique_plan_reviewer", "technique_author", "technique_critic"}
+        return original(role, *args, **kwargs)
+
+    monkeypatch.setattr(p.service, "_json", no_planner)
+    bundle = p.service.resolve_bundle(method, MethodologyContext(), operation="op", task="whole")
+    assert len(bundle.delivered) == 1 and not bundle.unresolved
+    assert bundle.delivered[0].applicability == decision
+    assert bundle.delivered[0].component.request == method
+    assert "Validated components: 1" in bundle.render()
+    uses = p.service.repository.pending_uses("op", "whole")
+    assert len(uses) == 1
+    assert json.loads(uses[0]["use_context"])["delivered_documents"] == [markdown]
+    assert not p.research_calls
+
+
+def test_reuse_probe_failure_is_not_a_catalog_miss(scripted_service, monkeypatch):
+    p = scripted_service
+    monkeypatch.setattr(p.service, "_select_existing", Mock(side_effect=ValueError("Review unavailable")))
+    with pytest.raises(ValueError, match="Review unavailable"):
+        p.service.resolve_bundle("JWT handling")
+    assert not p.research_calls
+    assert not any(role == "technique_planner" for role, *_rest in p.calls)

@@ -284,12 +284,53 @@ def requirement_origin_error(plan, request, context):
     return "; ".join(errors)
 
 
+def record_deliveries(service, bundle, context, operation, task):
+    """Freeze the same per-revision receipt for direct reuse and planned components."""
+    if not operation or not task:
+        return
+    receipts = {}
+    for item in bundle.delivered:
+        decision, component = item.applicability, item.component
+        receipt = decision.receipt(context) if decision else {}
+        purpose = {"component_id": component.id, "component_purpose": component.purpose,
+                   "requirements": [row.model_dump() for row in component.requirements]}
+        if item.revision_id not in receipts:
+            receipts[item.revision_id] = {**receipt, **purpose, "components": [], "delivered_documents": []}
+        receipts[item.revision_id]["components"].append({**receipt, **purpose})
+        if item.markdown not in receipts[item.revision_id]["delivered_documents"]:
+            receipts[item.revision_id]["delivered_documents"].append(item.markdown)
+    for revision, receipt in receipts.items():
+        service.repository.use(operation, task, revision, receipt)
+
+
 def resolve_bundle(service, request, context=None, operation="", task="") -> TechniqueBundle:
     from modules.techniques.roles import RolePrompt
 
     request = request.strip()
     service._validate_request(request)
     alignment, context = align_request(service, request, context)
+    with service.events.scope(component_id="component-1"):
+        selected = service._select_existing(alignment.adjusted_request, context)
+        if selected is not None:
+            revision, markdown, decision = selected
+            component = Component(
+                id="component-1", request=alignment.adjusted_request,
+                purpose=alignment.adjusted_request[:1000], request_excerpt=request[:2000],
+                requirements=[Requirement(
+                    id="request", kind="authored_deliverable", grounding=decision.grounding,
+                    description="Provide the complete component request, including its mechanisms and explicit deliverables.",
+                    origins=[RequirementOrigin(source="original_request", excerpt=request[:2000])],
+                )],
+            )
+            markdown = service._resolved(
+                revision, markdown, "reused", applicability=decision.applicability,
+                unmet_prerequisite_count=len(decision.unmet_prerequisites),
+            )[1]
+            bundle = TechniqueBundle(alignment=alignment, delivered=[Delivered(
+                component=component, revision_id=revision, markdown=markdown, applicability=decision,
+            )])
+            record_deliveries(service, bundle, context, operation, task)
+            return bundle
     planning_rules = DECOMPOSITION_POLICY + (
         "Preserve requested mechanisms and deliverables. "
         "Carry shared requested deliverables into each applicable component. Keep assessable obligations "
@@ -438,7 +479,6 @@ def resolve_bundle(service, request, context=None, operation="", task="") -> Tec
         )
     service.events.emit("technique_plan_accepted", components=[item.model_dump() for item in plan.components])
     bundle = TechniqueBundle(alignment=alignment)
-    receipts = {}
     for component in plan.components:
         service._validate_request(component.request)
         for requirement in component.requirements:
@@ -464,20 +504,7 @@ def resolve_bundle(service, request, context=None, operation="", task="") -> Tec
         bundle.delivered.append(
             Delivered(component=component, revision_id=revision, markdown=markdown, applicability=decision)
         )
-        if operation and task:
-            receipt = decision.receipt(context) if decision else {}
-            purpose = {
-                "component_id": component.id,
-                "component_purpose": component.purpose,
-                "requirements": [row.model_dump() for row in component.requirements],
-            }
-            if revision not in receipts:
-                receipts[revision] = {**receipt, **purpose, "components": [], "delivered_documents": []}
-            receipts[revision]["components"].append({**receipt, **purpose})
-            if markdown not in receipts[revision]["delivered_documents"]:
-                receipts[revision]["delivered_documents"].append(markdown)
-    for revision, receipt in receipts.items():
-        service.repository.use(operation, task, revision, receipt)
+    record_deliveries(service, bundle, context, operation, task)
     if not bundle.delivered:
         raise ValueError(
             "No technique components resolved. "
