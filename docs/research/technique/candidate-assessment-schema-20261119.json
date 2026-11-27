@@ -1,0 +1,137 @@
+{
+  "model": "muse-glimmer:30b-mlx",
+  "trials": [
+    {
+      "case": "whole-query",
+      "repetition": 0,
+      "status": "partial_failure",
+      "repair_kind": "acceptance",
+      "candidate_ids": [
+        "8904edba5ffb19c8c55a6298"
+      ],
+      "controller_valid": true,
+      "continuation_contract_valid": true,
+      "attempts": 2,
+      "requests": 4,
+      "elapsed_seconds": 692.3298532080371,
+      "attempt_errors": [
+        "Native structured generation reached its output limit"
+      ]
+    },
+    {
+      "case": "whole-query",
+      "repetition": 1,
+      "status": "partial_failure",
+      "repair_kind": "acceptance",
+      "candidate_ids": [
+        "8904edba5ffb19c8c55a6298"
+      ],
+      "controller_valid": true,
+      "continuation_contract_valid": true,
+      "attempts": 1,
+      "requests": 2,
+      "elapsed_seconds": 149.70884762494825,
+      "attempt_errors": []
+    },
+    {
+      "case": "whole-query",
+      "repetition": 2,
+      "status": "partial_failure",
+      "repair_kind": "acceptance",
+      "candidate_ids": [
+        "8904edba5ffb19c8c55a6298"
+      ],
+      "controller_valid": true,
+      "continuation_contract_valid": true,
+      "attempts": 1,
+      "requests": 2,
+      "elapsed_seconds": 124.99982479191385,
+      "attempt_errors": []
+    },
+    {
+      "case": "unlinked-parameter",
+      "repetition": 0,
+      "status": "done",
+      "repair_kind": "none",
+      "candidate_ids": [
+        "8904edba5ffb19c8c55a6298"
+      ],
+      "controller_valid": true,
+      "continuation_contract_valid": true,
+      "attempts": 1,
+      "requests": 2,
+      "elapsed_seconds": 145.15313229197636,
+      "attempt_errors": []
+    },
+    {
+      "case": "unlinked-parameter",
+      "repetition": 1,
+      "status": "done",
+      "repair_kind": "none",
+      "candidate_ids": [
+        "8904edba5ffb19c8c55a6298"
+      ],
+      "controller_valid": true,
+      "continuation_contract_valid": true,
+      "attempts": 1,
+      "requests": 2,
+      "elapsed_seconds": 138.68960516597144,
+      "attempt_errors": []
+    },
+    {
+      "case": "unlinked-parameter",
+      "repetition": 2,
+      "status": "done",
+      "repair_kind": "none",
+      "candidate_ids": [
+        "8904edba5ffb19c8c55a6298"
+      ],
+      "controller_valid": true,
+      "continuation_contract_valid": true,
+      "attempts": 1,
+      "requests": 2,
+      "elapsed_seconds": 140.015334042022,
+      "attempt_errors": []
+    }
+  ],
+  "correct": 6,
+  "total": 6,
+  "connected_model_requests": 14,
+  "evaluator_attempts": 7,
+  "candidate_link_failures": 0,
+  "recovered_output_limit_errors": 1,
+  "verification": {
+    "full_suite_passed": 8264,
+    "skipped": 46,
+    "deselected": 89,
+    "ruff": "passed",
+    "diff_check": "passed",
+    "coverage_floor": "all selected files >=80% lines and branches",
+    "hypothesis_review_coverage": {
+      "covered_lines": 308,
+      "num_statements": 311,
+      "percent_covered": 98.78296146044624,
+      "percent_covered_display": "99",
+      "missing_lines": 3,
+      "excluded_lines": 0,
+      "percent_statements_covered": 99.03536977491962,
+      "percent_statements_covered_display": "99",
+      "num_branches": 182,
+      "num_partial_branches": 3,
+      "covered_branches": 179,
+      "missing_branches": 3,
+      "percent_branches_covered": 98.35164835164835,
+      "percent_branches_covered_display": "98"
+    }
+  },
+  "sha256": {
+    "src/modules/agents/hypothesis_review.py": "70a9a0d9eeb84ba2fb54cdc5f0bea4aca79b294bc4128eb798f7897d57fc42c8",
+    "tests/test_hypothesis_review.py": "96ae55db2a6d0255bf964682022a6ea1bedc7678a43ae387be43c0d560a4af8c",
+    "tests/test_multi_agent_workflow.py": "06564263a65f998ce0d2be4a648d50b212aca47e098b89650e4488c587c3ff82"
+  },
+  "limitations": [
+    "Synthetic retained observations and fixture state; no target acquisition or full operation.",
+    "Fresh-binding continuation checks reload the stored contract without a second semantic model call.",
+    "Earlier single-attempt results did not measure the production correction loop; no full-path baseline comparison."
+  ]
+}

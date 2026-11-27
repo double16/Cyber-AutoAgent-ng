@@ -27,14 +27,21 @@ module_interface:
   finding_categories: ["web-vulnerabilities", "authentication-flaws", "business-logic", "injection-vulnerabilities", "xss-bypasses", "idor-discoveries", "auth-bypasses", "injection-points", "file-traversal", "ssrf"]
 planning:
   phase_metadata_contracts:
+    - phase_id: 1
+      task_creation_mode: standard
+      technique_contexts: [reconnaissance]
     - phase_id: 2
       task_creation_mode: snapshot_dependent
+      technique_contexts: [vulnerability_verification]
     - phase_id: 3
       task_creation_mode: snapshot_dependent
+      technique_contexts: [reconnaissance]
     - phase_id: 4
       task_creation_mode: snapshot_dependent
+      technique_contexts: [vulnerability_verification]
     - phase_id: 5
       task_creation_mode: snapshot_dependent
+      technique_contexts: [analysis]
   phase_task_contracts:
     - phase_id: 1
       mode: fanout_with_synthesis

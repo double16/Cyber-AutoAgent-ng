@@ -1,0 +1,127 @@
+{
+  "status": "passed",
+  "live_provider_requests": 0,
+  "semantic_acceptance": "not_evaluated",
+  "receipt": {
+    "status": "passed",
+    "code_identities": {
+      "baseline": "6bb093ec50ff6a9b0188f72322dc3fe9172917829414a9c9d78c1726b16dc6f7",
+      "candidate": "b5bb8dbc4cc3262f78365468252ee0f8f3d94f66c12c9570c150ddcf81f1bf92"
+    },
+    "subjects": {
+      "network-policy": "53ce293dceaba102e39f4ede2657dcd39a4223a3f387a53d3ed586f654d2d694",
+      "filesystem-policy": "d35b47e91dbcc3b888f1b7e826069cafa097b10c7ec5a069c425b821b26e44f0",
+      "http-selector": "8256461295337490dd96397b11569debd5dc46d372e616e7ae92502219197978"
+    },
+    "wire_modes": [
+      "native",
+      "tool"
+    ]
+  },
+  "runs": [
+    {
+      "wire_mode": "native",
+      "counts": {
+        "limit": 30,
+        "requests": 0,
+        "roles": 12
+      },
+      "outcomes": [
+        {
+          "case": "network-policy",
+          "arm": "baseline",
+          "status": "offline_contract_passed",
+          "scripted_model_dispatches": 4,
+          "semantic_judgment": "not_performed"
+        },
+        {
+          "case": "network-policy",
+          "arm": "candidate",
+          "status": "offline_contract_passed",
+          "scripted_model_dispatches": 4,
+          "semantic_judgment": "not_performed"
+        },
+        {
+          "case": "filesystem-policy",
+          "arm": "candidate",
+          "status": "offline_contract_passed",
+          "scripted_model_dispatches": 4,
+          "semantic_judgment": "not_performed"
+        },
+        {
+          "case": "filesystem-policy",
+          "arm": "baseline",
+          "status": "offline_contract_passed",
+          "scripted_model_dispatches": 4,
+          "semantic_judgment": "not_performed"
+        },
+        {
+          "case": "http-selector",
+          "arm": "baseline",
+          "status": "offline_contract_passed",
+          "scripted_model_dispatches": 4,
+          "semantic_judgment": "not_performed"
+        },
+        {
+          "case": "http-selector",
+          "arm": "candidate",
+          "status": "offline_contract_passed",
+          "scripted_model_dispatches": 4,
+          "semantic_judgment": "not_performed"
+        }
+      ]
+    },
+    {
+      "wire_mode": "tool",
+      "counts": {
+        "limit": 30,
+        "requests": 0,
+        "roles": 12
+      },
+      "outcomes": [
+        {
+          "case": "network-policy",
+          "arm": "baseline",
+          "status": "offline_contract_passed",
+          "scripted_model_dispatches": 4,
+          "semantic_judgment": "not_performed"
+        },
+        {
+          "case": "network-policy",
+          "arm": "candidate",
+          "status": "offline_contract_passed",
+          "scripted_model_dispatches": 4,
+          "semantic_judgment": "not_performed"
+        },
+        {
+          "case": "filesystem-policy",
+          "arm": "candidate",
+          "status": "offline_contract_passed",
+          "scripted_model_dispatches": 4,
+          "semantic_judgment": "not_performed"
+        },
+        {
+          "case": "filesystem-policy",
+          "arm": "baseline",
+          "status": "offline_contract_passed",
+          "scripted_model_dispatches": 4,
+          "semantic_judgment": "not_performed"
+        },
+        {
+          "case": "http-selector",
+          "arm": "baseline",
+          "status": "offline_contract_passed",
+          "scripted_model_dispatches": 4,
+          "semantic_judgment": "not_performed"
+        },
+        {
+          "case": "http-selector",
+          "arm": "candidate",
+          "status": "offline_contract_passed",
+          "scripted_model_dispatches": 4,
+          "semantic_judgment": "not_performed"
+        }
+      ]
+    }
+  ]
+}

@@ -58,3 +58,15 @@ describe('formatAutoRunEvaluationEvent', () => {
     })).toContain('Evaluation failed');
   });
 });
+
+it('formats partial, empty, and malformed evaluation outcomes', () => {
+  expect(formatAutoRunEvaluationEvent(null)).toBeNull();
+  expect(formatAutoRunEvaluationEvent({type: 'progress_update', operation_stage: 'other'})).toBeNull();
+  expect(formatAutoRunEvaluationEvent({type: 'progress_update', operation_stage: 'ragas_evaluation', evaluation_step_kind: 'metric'})).toBe('➡️ Ragas evaluation metric');
+  expect(formatAutoRunEvaluationEvent({type: 'evaluation_step_complete'})).toBeNull();
+  expect(formatAutoRunEvaluationEvent({type: 'evaluation_step_complete', status: 'skipped'})).toBe('⚠️ Ragas evaluation operation: evaluation skipped');
+  expect(formatAutoRunEvaluationEvent({type: 'evaluation_step_complete', status: 'failed', evaluation_step_kind: 'judge'})).toContain('judge failed');
+  expect(formatAutoRunEvaluationEvent({type: 'evaluation_complete', success: false})).toBe('❌ Evaluation failed');
+  expect(formatAutoRunEvaluationEvent({type: 'evaluation_complete'})).toBe('✅ Evaluation complete: 0 metrics');
+  expect(formatAutoRunEvaluationEvent({type: 'evaluation_complete', scores: {a: 0.2, b: 0.8, ignored: 'bad'}, metrics_evaluated: 'invalid'})).toBe('✅ Evaluation complete: 2 metrics | Average 50.0% | a=20.0%, b=80.0%');
+});

@@ -1,0 +1,137 @@
+{
+  "case": "admin",
+  "fixture_provenance": "Sanitized recorded publications and delivered method; replay outcomes are reconstructed, not execution evidence.",
+  "current": {
+    "schema_version": "hypothesis_set_v1",
+    "operation_id": "OP_FIXTURE",
+    "producer_task_uid": "66ba6744-d519-430d-b962-f005499502da",
+    "snapshot_hash": "5acf01af532bf695126f22cbe4cceffab95225e4779164e06e74bbd06c903656",
+    "source_refs": [
+      "artifact:artifacts/task_evidence/1b187a1a333a329a/dcc5e520-00fc-4483-9e9a-ffb6847388e3-inventory_manifest-731a2040ecdfc49c.json"
+    ],
+    "subjects": [
+      {
+        "item_id": "endpoint-d6f1e517c403a8d5",
+        "disposition": "hypotheses_supplied",
+        "reason": "",
+        "hypotheses": [
+          {
+            "hypothesis_id": "57cb73a77b3d350d9fe9cff2",
+            "authentication_requirement": {
+              "comparison": "none",
+              "roles": []
+            },
+            "observed_basis": "Client bundle declares route e.Adminpage = \"/adminpage\" in assets_index.webcrack.js line 13109 and bundles/index-quWo6y2l.webcrack.js line 13109. Client route mapping includes \"/adminpage\" in client_routes.json spa_routes. Route rendering uses conditional element={e ? <_Component16 /> : <_Component8 to={{pathname: ge.Home}} state={{from: \"/adminpage\"}}...}} indicating client-side guard based on variable e derived from sessionStorage/localStorage email. _Component16 on mount reads e = sessionStorage.getItem(\"email\") || localStorage.getItem(\"email\") and if e, calls kh(e) to check isAdmin and Kk(n) to load data. Server behavior for GET /adminpage and for the admin data endpoints referenced by kh/Kk is unobserved in retained evidence.",
+            "preconditions": [
+              "SPA serves the same shell HTML/JS for all client routes including /adminpage",
+              "Client route /adminpage is declared in the SPA bundle and listed in client_routes.json spa_routes",
+              "Route guard is implemented client-side via variable e derived from browser storage, with no observed server-side authorization check in retained artifacts",
+              "Server enforcement for the page shell and for admin data endpoints called by _Component16 is unknown / unobserved",
+              "Admin data fetch functions kh and Kk are present in the bundle and executed on component mount when e is truthy"
+            ],
+            "suspected_mechanism": "Client-side route guard only; direct navigation to /adminpage delivers the SPA shell. If browser storage contains an email value or the guard can be bypassed, _Component16 mounts and attempts to fetch admin data via kh/Kk. The security consequence depends on whether the server enforces authorization on those data endpoints; server enforcement is not evidenced in retained artifacts.",
+            "attacker_controlled_input": "URL path /adminpage requested via GET to http://target.example/adminpage; optional manipulation of browser storage email value before navigation to influence client-side guard evaluation",
+            "safe_test_steps": [
+              "Issue GET http://target.example/adminpage with no credentials and capture status, headers, body and response size",
+              "Inspect response body for SPA shell markers and for inclusion of admin component code",
+              "In a controlled browser context with empty sessionStorage/localStorage, navigate to /adminpage and record whether _Component16 mounts or redirects, and capture any network requests initiated by the page",
+              "Repeat navigation with a fabricated email value in sessionStorage/localStorage to observe client guard evaluation and subsequent calls to kh/Kk",
+              "Compare the same navigation and API calls under an authenticated admin session to establish baseline legitimate behavior",
+              "Record negative control with a known public route to confirm baseline SPA delivery"
+            ],
+            "positive_expectations": [
+              "Unauthenticated GET to /adminpage returns 200 with SPA shell, as expected for SPA architecture",
+              "Client guard evaluation allows _Component16 to mount and issues requests to admin data endpoints kh/Kk without valid server session",
+              "Server responds to those admin data requests with 200 and admin data payload to an unauthenticated or non-admin context, indicating missing server enforcement",
+              "Authenticated admin session shows same UI but receives authorized admin data, providing differential evidence"
+            ],
+            "negative_expectations": [
+              "Unauthenticated GET to /adminpage returns redirect to login or 401/403 for the page shell",
+              "Client guard prevents _Component16 mount and redirects to home for unauthenticated context",
+              "Admin data endpoints return 401/403 or empty/non-admin payload for unauthenticated requests, showing server enforcement",
+              "Response body contains only generic SPA shell without admin-specific component identifiers or network requests"
+            ],
+            "required_evidence": [
+              "HTTP GET response status and headers for http://target.example/adminpage unauthenticated",
+              "Response body contains SPA shell and references to _Component16 / admin route",
+              "Captured network requests triggered by page load in unauthenticated context, including URLs, methods, request headers and response status/body for kh/Kk calls",
+              "Comparison of admin data endpoint responses between unauthenticated and authenticated admin session with same request parameters",
+              "Evidence of client-side guard evaluation: presence/absence of sessionStorage email check and redirect behavior"
+            ],
+            "supporting_refs": [
+              "artifact:artifacts/assets_index.webcrack.js",
+              "artifact:artifacts/bundles/index-quWo6y2l.webcrack.js",
+              "artifact:artifacts/client_routes.json",
+              "artifact:artifacts/task_evidence/eb8e780f5c3517a6/client_routes-d6bfacfcdf2c4450.json"
+            ],
+            "research_refs": []
+          }
+        ]
+      }
+    ]
+  },
+  "previous": {
+    "schema_version": "hypothesis_set_v1",
+    "operation_id": "OP_FIXTURE",
+    "producer_task_uid": "66ba6744-d519-430d-b962-f005499502da",
+    "snapshot_hash": "5acf01af532bf695126f22cbe4cceffab95225e4779164e06e74bbd06c903656",
+    "source_refs": [
+      "artifact:artifacts/task_evidence/1b187a1a333a329a/dcc5e520-00fc-4483-9e9a-ffb6847388e3-inventory_manifest-731a2040ecdfc49c.json"
+    ],
+    "subjects": [
+      {
+        "item_id": "endpoint-d6f1e517c403a8d5",
+        "disposition": "hypotheses_supplied",
+        "reason": "",
+        "hypotheses": [
+          {
+            "hypothesis_id": "02f22b5d41d02288d31259a9",
+            "authentication_requirement": {
+              "comparison": "none",
+              "roles": []
+            },
+            "observed_basis": "Client bundle declares route e.Adminpage = \"/adminpage\" in assets_index.webcrack.js line 13109 and bundles/index-quWo6y2l.webcrack.js line 13109. Client route mapping includes \"/adminpage\" in client_routes.json spa_routes. Route rendering uses conditional element={e ? <_Component16 /> : <_Component8 to={{pathname: ge.Home}} state={{from: \"/adminpage\"}}...}} indicating client-side guard based on variable e.",
+            "preconditions": [
+              "SPA serves same shell for /adminpage and other routes",
+              "Client route /adminpage is declared and reachable from SPA shell",
+              "Route guard relies on client-side state e without server validation",
+              "Server does not enforce authorization for the page or for admin data endpoints"
+            ],
+            "suspected_mechanism": "Client-side route guard only; server serves SPA shell for /adminpage without verifying authorization, allowing unauthenticated actor to reach admin UI and potentially trigger admin data loads",
+            "attacker_controlled_input": "URL path /adminpage requested via GET to http://target.example/adminpage",
+            "safe_test_steps": [
+              "Issue GET http://target.example/adminpage with no credentials and capture status, headers, body",
+              "Inspect response for admin UI markers and identify any API calls initiated by the page",
+              "Repeat GET with authenticated user session and compare content and API responses",
+              "Record negative control with a known public route to confirm baseline behavior"
+            ],
+            "positive_expectations": [
+              "Unauthenticated GET to /adminpage returns 200 with SPA shell that renders admin UI or loads admin data",
+              "Client-side guard can be bypassed by direct navigation, exposing admin component or triggering admin API calls without server authorization",
+              "Response content or subsequent API requests reveal admin functionality accessible to unauthenticated actor"
+            ],
+            "negative_expectations": [
+              "Unauthenticated GET returns redirect to login or 401/403",
+              "Response body contains generic SPA shell without admin-specific markers",
+              "Server enforces authorization and returns access denied for admin resources"
+            ],
+            "required_evidence": [
+              "HTTP GET response status and headers for http://target.example/adminpage unauthenticated",
+              "Response body contains admin-specific markers or component identifiers",
+              "Network requests triggered by admin page load and their authorization checks",
+              "Comparison with authenticated user request showing differential access or content"
+            ],
+            "supporting_refs": [
+              "artifact:artifacts/assets_index.webcrack.js",
+              "artifact:artifacts/bundles/index-quWo6y2l.webcrack.js",
+              "artifact:artifacts/client_routes.json",
+              "artifact:artifacts/task_evidence/eb8e780f5c3517a6/client_routes-d6bfacfcdf2c4450.json"
+            ],
+            "research_refs": []
+          }
+        ]
+      }
+    ]
+  },
+  "guidance": "# Exposed debug/admin interfaces\n\n## Applicability and prerequisites\n\nAn assigned endpoint visibly presents debug, diagnostic or administrative functionality.\n\nEstablish interface audience and role/network policy, use test identities and select a read-only\nsynthetic diagnostic or reversible management operation. A familiar route name or product banner is\nnot a protected interface by itself.\n\nUse available HTTP replay, browser or protocol capabilities appropriate to the actual channel; no\nnamed tool is required. Preserve configured HTTP/HTTPS proxy use where the tool supports it. Work\nonly on the assigned interaction; this method does not authorize general discovery or new\nhosts/ports.\n\n## Accepted baselines and controls\n\nAn entitled test identity can obtain the agreed diagnostic or action result, and an ordinary\nendpoint confirms the lower-trust client's connectivity.\n\n## Reconnaissance\n\n1. Inspect the already assigned captures and contract for this method's input, identity, state and\n   observation channel. Record supported prerequisites separately from unknown conditions; do not\n   scan for new endpoints.\n2. Establish interface audience and role/network policy, use test identities and select a read-only\n   synthetic diagnostic or reversible management operation. A familiar route name or product banner\n   is not a protected interface by itself.\n3. Identify which baseline and negative control can be performed within scope. If the policy, test\n   data or required capability is missing, preserve that limitation instead of assuming a vulnerable\n   condition.\n\n## Hypothesis generation\n\n1. Use recorded observations only in this section; do not send new target requests or execute the\n   future tests.\n2. From recorded responses distinguish a public login shell from protected backend capabilities.\n   Design future unauthenticated/lower-role comparisons for one actual data or action operation; do\n   not broaden into endpoint discovery.\n3. Write the expected permitted, prohibited and inconclusive outcomes and the evidence needed to\n   distinguish them. State unresolved prerequisites explicitly; absent evidence does not confirm\n   either security or vulnerability.\n\n## Vulnerability verification\n\n1. Access the mapped interface using the tested low-trust context and identify concrete diagnostic\n   data or an actual management operation behind its UI.\n2. Compare the same operation under the entitled identity while keeping test object and parameters\n   equivalent. Avoid copying privileged cookies, bearer tokens or one-time CSRF values into the\n   low-trust request.\n3. Inspect the sensitive content or durable effect. A status 200, admin-branded page or available\n   JavaScript bundle does not establish access to privileged capabilities.\n4. Compare an invalid session or inert request and repeat the lower-trust operation after restoring\n   baseline state. Respect any required network restriction without expanding port or host scope.\n\n## Execution\n\n1. Apply only after the relevant boundary and operation authorization have been established. Reuse\n   the validated comparison and avoid unrelated chaining or additional data collection.\n2. Read one synthetic nonpublic diagnostic value or perform one reversible authorized test change as\n   the excluded actor. Revert changes and close/invalidate disposable sessions; do not disable\n   services or execute debug consoles.\n3. Verify restoration through the relevant authoritative channel. If cleanup cannot be confirmed,\n   stop further changes and preserve that limitation.\n\n## Analysis\n\n1. Compare the observed result with the established policy and the local controls above. A\n   successful request, available artifact, changed response or tool execution establishes\n   availability only; confirm the precise protected data or effect needed for the claim.\n2. Classify the tested mechanism as supported, refuted for the tested case, or inconclusive. Keep\n   the tested actor, object, state and channel explicit, and preserve competing explanations and\n   untested variants.\n\n### False positives and competing explanations\n\nHealth checks, login pages and static admin assets can intentionally be public. Diagnostics can be\nsanitized for external audiences, and backend actions may remain protected despite a visible UI.\n\n## Evidence requirements\n\nRetain interface access policy, isolated actor contexts, actual protected operation, sensitive\nmarker or durable state and valid/invalid controls.\n\nFor hypothesis work, specify these as future evidence requirements rather than inventing completed\noutcomes. Preserve secrets only in the appropriate sensitive evidence context; redact secret values\nfrom report text and shareable records.\n\n## Limitations and trigger non-examples\n\nVisible exposure is a configuration observation until a restricted capability or disclosure is\nestablished. Do not test arbitrary privileged functions merely because the interface lists them.\n\nDo not activate this method merely from a vulnerability name, a tool's success status or an\nincidental filename. A semantic match recommends guidance; it does not satisfy prerequisites or\nprove a finding. Equivalent tooling may be used, and unavailable controls remain explicit gaps."
+}

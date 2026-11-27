@@ -1,0 +1,431 @@
+[
+  {
+    "timestamp": "2026-11-06T17:14:13.333551+00:00",
+    "run_id": "eecd5daf-02f8-4841-a599-f97bd5039351",
+    "role": "technique_critic",
+    "role_invocation_id": "ad464610-a629-4988-ae67-bb53e96a7f32",
+    "provider": "ollama",
+    "model_id": "muse-glimmer:30b",
+    "model_attempt": 1,
+    "elapsed_seconds": 85.243,
+    "response": {
+      "role": "assistant",
+      "content": [
+        {
+          "toolUse": {
+            "toolUseId": "tooluse_1939c8ceebf7443e8589774e",
+            "name": "retained_source_lookup",
+            "input": {
+              "url": "https://man.openbsd.org/pf.conf",
+              "start": 0,
+              "length": 146
+            }
+          }
+        },
+        {
+          "reasoningContent": {
+            "reasoningText": {
+              "text": "Describe reusable policy-based connectivity comparison with identity binding, controls and evidence requirements. No target execution...\n\nWe need evaluate draft. The draft references pf.conf manual. Need check support. We have retained source characters 146. Need to lookup to verify claims about last matching rule decides action and first time packet matches pass rule state entry created.\n\nWe need to call retained_source_lookup."
+            }
+          }
+        }
+      ],
+      "metadata": {
+        "usage": {
+          "inputTokens": "[REDACTED]",
+          "outputTokens": "[REDACTED]",
+          "totalTokens": "[REDACTED]"
+        },
+        "metrics": {
+          "latencyMs": 85207,
+          "timeToFirstByteMs": 85219
+        }
+      }
+    },
+    "stop_reason": "tool_use",
+    "type": "model_output",
+    "level": "debug"
+  },
+  {
+    "timestamp": "2026-11-06T17:17:13.845916+00:00",
+    "run_id": "eecd5daf-02f8-4841-a599-f97bd5039351",
+    "role": "technique_critic",
+    "role_invocation_id": "ad464610-a629-4988-ae67-bb53e96a7f32",
+    "provider": "ollama",
+    "model_id": "muse-glimmer:30b",
+    "model_attempt": 2,
+    "elapsed_seconds": 180.506,
+    "response": {
+      "role": "assistant",
+      "content": [
+        {
+          "text": "{\"reason\": \"The draft provides a reusable policy-based connectivity comparison framework with identity binding, controls and evidence requirements, and the core policy evaluation and state creation claims are supported by the retained pf.conf excerpts. A factual claim about subsequent packet handling following state without re-evaluation is asserted without retained support, which is a material unsupported mechanism under core:technical_support. Security-relevant checks are present and interpretations are supplied.\", \"issue_dispositions\": [], \"category\": \"authored_content\", \"issues\": [{\"id\": \"issue-1\", \"category\": \"authored_content\", \"criterion_id\": \"core:technical_support\", \"material_impact\": \"The statefulness control asserts that subsequent packets follow state and do not re-evaluate policy, an asserted factual mechanism about pf behavior that is not supported by the retained excerpts. This undermines the advertised operational sufficiency of the reusable method.\", \"problem\": \"Unsupported factual mechanism about stateful packet handling: the draft states 'verify subsequent packets follow state, not re-evaluate policy' without retained support.\", \"requested_correction\": \"Remove or qualify the claim to only what is supported by retained sources, e.g., observe first-packet state entry creation, and note that subsequent handling behavior must be established during future application with target-specific evidence.\", \"requirement_ids\": [\"method\"], \"source_urls\": [\"https://man.openbsd.org/pf.conf\"], \"draft_references\": [\"da0191fe62909:b38\"], \"absence_scope\": \"inspected_passages\", \"draft_excerpt\": \"Statefulness control: Observe first-packet state creation on pass and verify subsequent packets follow state, not re-evaluate policy.\", \"passage_ids\": [\"bebc0239c72c87fd30b739ed0ac19e28b0c2077e70aa6c0d2f1e298eccd92bb1\"], \"passages\": [{\"url\": \"https://man.openbsd.org/pf.conf\", \"start\": 0, \"end\": 146}], \"absence_of_support\": \"Retained excerpts provide 'the last matching rule decides what action is taken' and 'the first time a packet matches a pass rule, a state entry is created.' No retained passage supports the claim that subsequent packets follow state and do not re-evaluate policy.\"}], \"suggestions\": [], \"interpretations\": [{\"check_purpose\": \"boundary_violation\", \"draft_references\": [\"da0191fe62909:b36\"], \"prerequisite_or_policy\": \"Documented intended allow/deny decisions per identity attribute, service and direction expressed as ordered rules with defined evaluation precedence; explicit identity binding model mapping attributes to enforcement points with stated trust assumptions.\", \"legitimate_outcome\": \"Connectivity outcome matches documented policy for the bound identity and state creation follows first-packet pass semantics.\", \"suspected_violation\": \"Outcome differs from policy for the bound identity, or identity binding is bypassed, indicating a policy boundary violation.\", \"distinguishing_control\": \"Identity isolation control: repeat test with a different identity that should map to a different policy outcome to verify binding is effective.\"}, {\"check_purpose\": \"boundary_violation\", \"draft_references\": [\"da0191fe62909:b37\"], \"prerequisite_or_policy\": \"Policy evaluation precedence defined with last-matching-rule semantics.\", \"legitimate_outcome\": \"Decision follows last matching rule in the ordered policy set for the bound identity.\", \"suspected_violation\": \"Decision does not follow last-matching-rule precedence, suggesting rule ordering or policy application error.\", \"distinguishing_control\": \"Order sensitivity control: test with a non-matching rule preceding a matching rule to confirm last-matching-rule precedence.\"}, {\"check_purpose\": \"boundary_violation\", \"draft_references\": [\"da0191fe62909:b38\"], \"prerequisite_or_policy\": \"Policy defines pass action and state creation on first matching pass.\", \"legitimate_outcome\": \"First-packet state creation is observed on pass as per first-packet pass semantics.\", \"suspected_violation\": \"State is created/maintained contrary to policy for the bound identity.\", \"distinguishing_control\": \"Statefulness control as described: observe first-packet state creation on pass; subsequent handling behavior must be established during future application.\"}, {\"check_purpose\": \"boundary_violation\", \"draft_references\": [\"da0191fe62909:b39\"], \"prerequisite_or_policy\": \"Documented deny decision for a known identity-service pair.\", \"legitimate_outcome\": \"Known denied identity-service pair is denied.\", \"suspected_violation\": \"Known denied pair is allowed, indicating policy bypass.\", \"distinguishing_control\": \"Negative control: test a known denied identity-service pair to confirm denial is observable.\"}], \"no_security_checks_reason\": \"\"}"
+        }
+      ],
+      "metadata": {
+        "usage": {
+          "inputTokens": "[REDACTED]",
+          "outputTokens": "[REDACTED]",
+          "totalTokens": "[REDACTED]"
+        },
+        "metrics": {
+          "latencyMs": 180466,
+          "timeToFirstByteMs": 180475
+        }
+      }
+    },
+    "stop_reason": "end_turn",
+    "type": "model_output",
+    "level": "debug"
+  },
+  {
+    "timestamp": "2026-11-06T17:20:02.018165+00:00",
+    "run_id": "eecd5daf-02f8-4841-a599-f97bd5039351",
+    "role": "technique_critic",
+    "role_invocation_id": "ad464610-a629-4988-ae67-bb53e96a7f32",
+    "provider": "ollama",
+    "model_id": "muse-glimmer:30b",
+    "model_attempt": 3,
+    "elapsed_seconds": 168.16,
+    "schema_id": "018795a1a924c8dc7df86e10107896aac2eb8bec36e8e966f02fc25e56b93b32",
+    "schema_name": "CriticFindings",
+    "structured_mode": "native",
+    "response": {
+      "role": "assistant",
+      "content": [
+        {
+          "toolUse": {
+            "toolUseId": "f3ddcddbbdce43409f37875dc0bdd6bc",
+            "name": "CriticFindings",
+            "input": {
+              "reason": "The draft provides a reusable policy-based connectivity comparison framework with identity binding, controls and evidence requirements, and the core policy evaluation and state creation claims are supported by the retained pf.conf excerpts. A factual claim about subsequent packet handling following state without re-evaluation is asserted without retained support, which is a material unsupported mechanism under core:technical_support. Security-relevant checks are present and interpretations are supplied.",
+              "issue_dispositions": [],
+              "category": "authored_content",
+              "issues": [
+                {
+                  "id": "issue-1",
+                  "category": "authored_content",
+                  "criterion_id": "core:technical_support",
+                  "material_impact": "The statefulness control asserts that subsequent packets follow state and do not re-evaluate policy, an asserted factual mechanism about pf behavior that is not supported by the retained excerpts. This undermines the advertised operational sufficiency of the reusable method.",
+                  "problem": "Unsupported factual mechanism about stateful packet handling: the draft states 'verify subsequent packets follow state, not re-evaluate policy' without retained support.",
+                  "requested_correction": "Remove or qualify the claim to only what is supported by retained sources, e.g., observe first-packet state entry creation, and note that subsequent handling behavior must be established during future application with target-specific evidence.",
+                  "requirement_ids": [
+                    "method"
+                  ],
+                  "source_urls": [
+                    "https://man.openbsd.org/pf.conf"
+                  ],
+                  "draft_references": [
+                    "da0191fe62909:b38"
+                  ],
+                  "absence_scope": "inspected_passages",
+                  "draft_excerpt": "Statefulness control: Observe first-packet state creation on pass and verify subsequent packets follow state, not re-evaluate policy.",
+                  "passage_ids": [
+                    "bebc0239c72c87fd30b739ed0ac19e28b0c2077e70aa6c0d2f1e298eccd92bb1"
+                  ],
+                  "passages": [
+                    {
+                      "url": "https://man.openbsd.org/pf.conf",
+                      "start": 0,
+                      "end": 146
+                    }
+                  ],
+                  "absence_of_support": "Retained excerpts provide 'the last matching rule decides what action is taken' and 'the first time a packet matches a pass rule, a state entry is created.' No retained passage supports the claim that subsequent packets follow state and do not re-evaluate policy."
+                }
+              ],
+              "suggestions": [],
+              "interpretations": [
+                {
+                  "check_purpose": "boundary_violation",
+                  "draft_references": [
+                    "da0191fe62909:b36"
+                  ],
+                  "prerequisite_or_policy": "Documented intended allow/deny decisions per identity attribute, service and direction expressed as ordered rules with defined evaluation precedence; explicit identity binding model mapping attributes to enforcement points with stated trust assumptions.",
+                  "legitimate_outcome": "Connectivity outcome matches documented policy for the bound identity and state creation follows first-packet pass semantics.",
+                  "suspected_violation": "Outcome differs from policy for the bound identity, or identity binding is bypassed, indicating a policy boundary violation.",
+                  "distinguishing_control": "Identity isolation control: repeat test with a different identity that should map to a different policy outcome to verify binding is effective."
+                },
+                {
+                  "check_purpose": "boundary_violation",
+                  "draft_references": [
+                    "da0191fe62909:b37"
+                  ],
+                  "prerequisite_or_policy": "Policy evaluation precedence defined with last-matching-rule semantics.",
+                  "legitimate_outcome": "Decision follows last matching rule in the ordered policy set for the bound identity.",
+                  "suspected_violation": "Decision does not follow last-matching-rule precedence, suggesting rule ordering or policy application error.",
+                  "distinguishing_control": "Order sensitivity control: test with a non-matching rule preceding a matching rule to confirm last-matching-rule precedence."
+                },
+                {
+                  "check_purpose": "boundary_violation",
+                  "draft_references": [
+                    "da0191fe62909:b38"
+                  ],
+                  "prerequisite_or_policy": "Policy defines pass action and state creation on first matching pass.",
+                  "legitimate_outcome": "First-packet state creation is observed on pass as per first-packet pass semantics.",
+                  "suspected_violation": "State is created/maintained contrary to policy for the bound identity.",
+                  "distinguishing_control": "Statefulness control as described: observe first-packet state creation on pass; subsequent handling behavior must be established during future application."
+                },
+                {
+                  "check_purpose": "boundary_violation",
+                  "draft_references": [
+                    "da0191fe62909:b39"
+                  ],
+                  "prerequisite_or_policy": "Documented deny decision for a known identity-service pair.",
+                  "legitimate_outcome": "Known denied identity-service pair is denied.",
+                  "suspected_violation": "Known denied pair is allowed, indicating policy bypass.",
+                  "distinguishing_control": "Negative control: test a known denied identity-service pair to confirm denial is observable."
+                }
+              ],
+              "no_security_checks_reason": ""
+            }
+          }
+        }
+      ],
+      "metadata": {
+        "usage": {
+          "inputTokens": "[REDACTED]",
+          "outputTokens": "[REDACTED]",
+          "totalTokens": "[REDACTED]"
+        },
+        "metrics": {
+          "latencyMs": 168121,
+          "timeToFirstByteMs": 168132
+        }
+      }
+    },
+    "stop_reason": "tool_use",
+    "validation_outcome": "validated",
+    "type": "model_output",
+    "level": "debug"
+  },
+  {
+    "timestamp": "2026-11-06T17:20:02.033258+00:00",
+    "run_id": "eecd5daf-02f8-4841-a599-f97bd5039351",
+    "role": "technique_critic",
+    "role_invocation_id": "ad464610-a629-4988-ae67-bb53e96a7f32",
+    "provider": "ollama",
+    "model_id": "muse-glimmer:30b",
+    "schema_name": "CriticFindings",
+    "validation_outcome": "validated",
+    "type": "structured_output",
+    "level": "debug"
+  },
+  {
+    "timestamp": "2026-11-06T17:20:02.033889+00:00",
+    "run_id": "eecd5daf-02f8-4841-a599-f97bd5039351",
+    "role": "technique_critic",
+    "expected_schema": "Critique",
+    "call_id": "3fddc078-1979-4293-b4e5-ad14ce5a21b9",
+    "status": "completed",
+    "role_calls": 1,
+    "elapsed_seconds": 434.048,
+    "type": "technique_model_call",
+    "level": "info"
+  },
+  {
+    "timestamp": "2026-11-06T17:22:35.895294+00:00",
+    "run_id": "eecd5daf-02f8-4841-a599-f97bd5039351",
+    "role": "technique_critique_assessor",
+    "role_invocation_id": "39bd84f7-3b25-42b4-8362-78af076df7df",
+    "provider": "ollama",
+    "model_id": "muse-glimmer:30b",
+    "model_attempt": 1,
+    "elapsed_seconds": 153.848,
+    "response": {
+      "role": "assistant",
+      "content": [
+        {
+          "text": "Evidence notes \u2013 investigation pass\n\n* Check purpose: technical_support \u2013 asserted factual mechanisms\n  * Draft reference: b16 \u201cNote that evaluation order matters and the last matching rule decides the action taken.\u201d\n  * Observation: Mechanism asserted is last-matching-rule precedence.\n  * Retained support: passage \u201cthe last matching rule decides what action is taken\u201d \u2013 meaning matches.\n  * Permitted scenario: N/A \u2013 prerequisite/legitimate-behavior check.\n  * Discriminator: N/A\n  * Counterexample judgments: null / null\n\n* Check purpose: technical_support \u2013 asserted factual mechanisms\n  * Draft reference: b11, b31, b38 \u201cfirst-packet state creation\u201d / \u201cstate entry is created\u201d\n  * Observation: Mechanism asserted is first-packet pass creates state entry.\n  * Retained support: passage \u201cthe first time a packet matches a pass rule, a state entry is created.\u201d \u2013 meaning matches.\n  * Permitted scenario: N/A\n  * Discriminator: N/A\n  * Counterexample judgments: null / null\n\n* Check purpose: interpretation \u2013 outcome distinction\n  * Draft reference: b49-b51 legitimate behavior vs boundary violation hypothesis; b51 \u201cInterpretation must be conditioned on established policy and binding; do not infer violation from outcome alone.\u201d\n  * Observation: Interpretation step requires established policy/binding before labeling violation.\n  * Permitted scenario: N/A \u2013 prerequisite/legitimate-behavior check.\n  * Discriminator: N/A\n  * Counterexample judgments: null / null\n\n* Check purpose: operational_sufficiency \u2013 prerequisites and controls\n  * Draft reference: b7-b12 Prerequisites; b35-b40 Controls; b41-b47 Evidence Requirements\n  * Observation: Method lists policy definition, identity binding model, test environment controls, observation capability, baseline/variation procedure, identity isolation, order sensitivity, statefulness, negative control, and evidence artifacts.\n  * Permitted scenario: N/A\n  * Discriminator: N/A\n  * Counterexample judgments: null / null\n\n* Check purpose: attribution\n  * Draft reference: m14-m17 source metadata and selection_reason\n  * Observation: Source URL cited, title given, selection_reason describes use of rule precedence and state creation excerpts.\n  * Retained support: source inspection covers characters 0-146 containing both excerpts.\n  * Permitted scenario: N/A\n  * Discriminator: N/A\n  * Note: metadata.sources[0].retrieved_at is empty; missing retrieval date is advisory per criteria and no explicit requirement or version-dependent claim makes it material.\n\n* Check purpose: restrictions\n  * Draft reference: b1-b55 body\n  * Observation: No target execution instructions or particular command syntax requested; method is descriptive and reusable.\n  * Permitted scenario: N/A\n  * Discriminator: N/A\n\n* Check purpose: requirement:method \u2013 deliverable completeness\n  * Draft reference: m3 purpose; b5 purpose; b7-b12 prerequisites; b13-b34 procedure; b35-b40 controls; b41-b47 evidence requirements\n  * Observation: Draft describes reusable policy-based connectivity comparison with identity binding, controls and evidence requirements, no target execution/command syntax.\n  * Permitted scenario: N/A\n  * Discriminator: N/A\n\nNo material unsupported factual mechanism, missing requested deliverable, or concrete defect identified in this pass. No actual boundary-violation claim requiring counterexample analysis is present in the draft.\n"
+        }
+      ],
+      "metadata": {
+        "usage": {
+          "inputTokens": "[REDACTED]",
+          "outputTokens": "[REDACTED]",
+          "totalTokens": "[REDACTED]"
+        },
+        "metrics": {
+          "latencyMs": 153819,
+          "timeToFirstByteMs": 153828
+        }
+      }
+    },
+    "stop_reason": "end_turn",
+    "type": "model_output",
+    "level": "debug"
+  },
+  {
+    "timestamp": "2026-11-06T17:25:29.741198+00:00",
+    "run_id": "eecd5daf-02f8-4841-a599-f97bd5039351",
+    "role": "technique_critique_assessor",
+    "role_invocation_id": "39bd84f7-3b25-42b4-8362-78af076df7df",
+    "provider": "ollama",
+    "model_id": "muse-glimmer:30b",
+    "model_attempt": 2,
+    "elapsed_seconds": 173.834,
+    "schema_id": "43a7fa3cd58f1c9944e161ff8a4336ee69a0fcf91deaf951b14cdc91e29cb52d",
+    "schema_name": "AssessorFindings",
+    "structured_mode": "native",
+    "response": {
+      "role": "assistant",
+      "content": [
+        {
+          "toolUse": {
+            "toolUseId": "1d047c3e9bb34554a9682f7b33fb87ed",
+            "name": "AssessorFindings",
+            "input": {
+              "interpretation_reviews": [
+                {
+                  "check_purpose": "boundary_violation",
+                  "interpretation_index": 0,
+                  "draft_references": [
+                    "da0191fe62909:b36"
+                  ],
+                  "permitted_counterexample": "A test where the observed connectivity outcome differs from the documented policy for the bound identity because the documented policy was updated between baseline capture and observation, while the identity binding itself remains effective and the observation of a differing outcome is recorded.",
+                  "counterexample_matches_check": true,
+                  "control_excludes_counterexample": false,
+                  "control_references": [
+                    "da0191fe62909:b36"
+                  ],
+                  "actual_discriminator": "Identity isolation control: Repeat test with a different identity that should map to a different policy outcome to verify binding is effective.",
+                  "critic_correct": false
+                },
+                {
+                  "check_purpose": "boundary_violation",
+                  "interpretation_index": 1,
+                  "draft_references": [
+                    "da0191fe62909:b37"
+                  ],
+                  "permitted_counterexample": "A test where the decision does not follow last-matching-rule precedence because the policy set under test uses first-match semantics, so the observed decision deviation is consistent with the actual policy semantics in use.",
+                  "counterexample_matches_check": true,
+                  "control_excludes_counterexample": false,
+                  "control_references": [
+                    "da0191fe62909:b37"
+                  ],
+                  "actual_discriminator": "Order sensitivity control: If policy allows, test with a non-matching rule preceding a matching rule to confirm last-matching-rule precedence.",
+                  "critic_correct": false
+                },
+                {
+                  "check_purpose": "boundary_violation",
+                  "interpretation_index": 2,
+                  "draft_references": [
+                    "da0191fe62909:b38"
+                  ],
+                  "permitted_counterexample": "A test where state is created/maintained contrary to policy for the bound identity because the policy under test permits state creation for that identity-service pair, so the observed state creation is legitimate under the established policy.",
+                  "counterexample_matches_check": true,
+                  "control_excludes_counterexample": false,
+                  "control_references": [
+                    "da0191fe62909:b38"
+                  ],
+                  "actual_discriminator": "Statefulness control: Observe first-packet state creation on pass and verify subsequent packets follow state, not re-evaluate policy.",
+                  "critic_correct": false
+                },
+                {
+                  "check_purpose": "boundary_violation",
+                  "interpretation_index": 3,
+                  "draft_references": [
+                    "da0191fe62909:b39"
+                  ],
+                  "permitted_counterexample": "A test where a known denied identity-service pair is allowed because the denial rule was removed or superseded by a later matching pass rule in the ordered policy set, so the observed allow is consistent with the current policy.",
+                  "counterexample_matches_check": true,
+                  "control_excludes_counterexample": false,
+                  "control_references": [
+                    "da0191fe62909:b39"
+                  ],
+                  "actual_discriminator": "Negative control: Test a known denied identity-service pair to confirm denial is observable.",
+                  "critic_correct": false
+                }
+              ],
+              "critic_supported": true,
+              "reason": "The critic correctly identifies a material unsupported factual mechanism about subsequent packet handling following state without re-evaluation of policy. The retained pf.conf excerpts support last-matching-rule precedence and first-packet state creation only. The draft asserts 'verify subsequent packets follow state, not re-evaluate policy' at b38 without retained support, which is a core:technical_support blocker. The critic's decision to reject publication is justified by this unsupported mechanism. Interpretation reviews show the critic's boundary-violation interpretations lack adequate discriminators in the actual draft, but the material blocker identified by the critic is valid and sufficient for rejection; agreement with the critic's decision and issue is appropriate.",
+              "findings": []
+            }
+          }
+        }
+      ],
+      "metadata": {
+        "usage": {
+          "inputTokens": "[REDACTED]",
+          "outputTokens": "[REDACTED]",
+          "totalTokens": "[REDACTED]"
+        },
+        "metrics": {
+          "latencyMs": 173785,
+          "timeToFirstByteMs": 173794
+        }
+      }
+    },
+    "stop_reason": "tool_use",
+    "validation_outcome": "validated",
+    "type": "model_output",
+    "level": "debug"
+  },
+  {
+    "timestamp": "2026-11-06T17:25:29.751253+00:00",
+    "run_id": "eecd5daf-02f8-4841-a599-f97bd5039351",
+    "role": "technique_critique_assessor",
+    "role_invocation_id": "39bd84f7-3b25-42b4-8362-78af076df7df",
+    "provider": "ollama",
+    "model_id": "muse-glimmer:30b",
+    "schema_name": "AssessorFindings",
+    "validation_outcome": "validated",
+    "type": "structured_output",
+    "level": "debug"
+  },
+  {
+    "timestamp": "2026-11-06T17:25:29.751745+00:00",
+    "run_id": "eecd5daf-02f8-4841-a599-f97bd5039351",
+    "role": "technique_critique_assessor",
+    "expected_schema": "IssueAssessment",
+    "call_id": "8ce26e2d-18f8-4e14-975e-7ba324b2bfe0",
+    "status": "completed",
+    "role_calls": 1,
+    "elapsed_seconds": 327.708,
+    "type": "technique_model_call",
+    "level": "info"
+  },
+  {
+    "timestamp": "2026-11-06T17:27:46.409222+00:00",
+    "run_id": "eecd5daf-02f8-4841-a599-f97bd5039351",
+    "role": "technique_critique_assessor",
+    "role_invocation_id": "f8f6e672-cedc-4772-8dc1-c13bd8daa1ca",
+    "provider": "ollama",
+    "model_id": "muse-glimmer:30b",
+    "model_attempt": 1,
+    "elapsed_seconds": 136.65,
+    "response": {
+      "role": "assistant",
+      "content": [
+        {
+          "text": "Evidence notes \u2013 investigation pass\n\n* check_purpose: technical_support\n  criterion_id: core:technical_support\n  requirement_ids: []\n  draft_refs: da0191fe62909:b16, da0191fe62909:b38, da0191fe62909:b45\n  observation: Draft asserts last-matching-rule precedence and first-packet state creation on pass.\n  permitted_scenario: N/A\n  discriminator: N/A\n  notes: Asserted mechanisms map to retained excerpts \u201cthe last matching rule decides what action is taken\u201d and \u201cthe first time a packet matches a pass rule, a state entry is created.\u201d Source inspection covers 0-146. No unsupported factual mechanism identified.\n\n* check_purpose: interpretation\n  criterion_id: core:interpretation\n  requirement_ids: []\n  draft_refs: da0191fe62909:b49, da0191fe62909:b50, da0191fe62909:b51\n  observation: Legitimate behavior defined as outcome matches documented policy for bound identity and state creation follows first-packet pass semantics; boundary violation hypothesis defined as outcome differs from policy, state created/maintained contrary to policy, or identity binding bypassed, with interpretation conditioned on established policy and binding.\n  permitted_scenario: N/A\n  discriminator: N/A\n  notes: Outcome interpretations are tied to explicit policy/binding establishment. No unconditional violation label found.\n\n* check_purpose: operational_sufficiency\n  criterion_id: core:operational_sufficiency\n  requirement_ids: [\"method\"]\n  draft_refs: da0191fe62909:b7, da0191fe62909:b13, da0191fe62909:b35, da0191fe62909:b41\n  observation: Prerequisites, procedure steps 1-6, controls and evidence requirements are described generically with explicit necessary prerequisites and controls.\n  permitted_scenario: N/A\n  discriminator: N/A\n  notes: Method is reusable and does not require target execution or particular command syntax. Future validation items are separated.\n\n* check_purpose: attribution\n  criterion_id: core:attribution\n  requirement_ids: []\n  draft_refs: da0191fe62909:m14, da0191fe62909:m15, da0191fe62909:m17, da0191fe62909:b54\n  observation: Source listed as OpenBSD pf.conf manual with selection reason describing rule precedence and state creation support; limitations note source support is limited to evaluation order and state creation semantics.\n  permitted_scenario: N/A\n  discriminator: N/A\n  notes: Attribution describes retained sources and limitations. No body placement required by request. Retrieved_at empty is not material under supplied criteria.\n\n* check_purpose: restrictions\n  criterion_id: core:restrictions\n  requirement_ids: [\"method\"]\n  draft_refs: da0191fe62909:m12, da0191fe62909:b5\n  observation: Deliverable describes reusable policy-based connectivity comparison with identity binding, controls and evidence requirements; no target execution or particular command syntax requested.\n  permitted_scenario: N/A\n  discriminator: N/A\n  notes: Complies with supplied restrictions.\n\n* check_purpose: requirement_method\n  criterion_id: requirement:method\n  requirement_ids: [\"method\"]\n  draft_refs: da0191fe62909:m3, da0191fe62909:b2, da0191fe62909:b4\n  observation: Title and purpose state reusable methodology for comparing connectivity outcomes under defined policy using identity binding, controlled variations, and evidence requirements to distinguish legitimate behavior from boundary violations.\n  permitted_scenario: N/A\n  discriminator: N/A\n  notes: Requested deliverable present.\n\nNo concrete material errors, unsupported material assertions, or missing requested deliverables identified in this pass."
+        }
+      ],
+      "metadata": {
+        "usage": {
+          "inputTokens": "[REDACTED]",
+          "outputTokens": "[REDACTED]",
+          "totalTokens": "[REDACTED]"
+        },
+        "metrics": {
+          "latencyMs": 136622,
+          "timeToFirstByteMs": 136630
+        }
+      }
+    },
+    "stop_reason": "end_turn",
+    "type": "model_output",
+    "level": "debug"
+  },
+  {
+    "timestamp": "2026-11-06T17:31:33.432541+00:00",
+    "run_id": "eecd5daf-02f8-4841-a599-f97bd5039351",
+    "role": "technique_critique_assessor",
+    "expected_schema": "AssessmentCorrection",
+    "call_id": "ec4f3005-e6db-415b-8bdf-2001f064e89b",
+    "status": "failed",
+    "role_calls": 1,
+    "elapsed_seconds": 363.678,
+    "type": "technique_model_call",
+    "level": "warning"
+  }
+]

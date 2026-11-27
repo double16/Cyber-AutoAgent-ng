@@ -195,6 +195,38 @@ def test_parallel_corrections_preserve_both_updates(producer, tmp_path):
     assert not hypotheses.hypothesis_correction_state(producer)["pending"]
 
 
+@pytest.mark.parametrize("channel", ["HTTP request", "TCP frame", "Filesystem path"])
+def test_revision_can_split_independent_proposals_atomically(producer, tmp_path, channel):
+    _, _, selected, retained, build = correction_fixture(producer, tmp_path, count=1)
+    revise = build()
+    replacements = [{**selected[0].model_dump(exclude={"hypothesis_id"}),
+                     "suspected_mechanism": f"{channel} mechanism {index}",
+                     "positive_expectations": [f"Distinct prohibited consequence {index}"]} for index in range(2)]
+    schema = revise.tool_spec["inputSchema"]["json"]
+    Draft202012Validator(schema).validate({
+        "hypothesis_id": selected[0].hypothesis_id, "replacement": replacements, "reason": "Separate mechanisms",
+    })
+    binding = json.loads(revise(
+        hypothesis_id=selected[0].hypothesis_id, replacement=replacements, reason="Separate mechanisms",
+    ))
+    publication = hypotheses.load_hypothesis_set(binding["artifact_ref"], producer, "OP_TEST")
+    assert len(publication.subjects[0].hypotheses) == 3
+    assert retained[0] in publication.subjects[0].hypotheses
+    assert selected[0] not in publication.subjects[0].hypotheses
+    assert not hypotheses.hypothesis_correction_state(producer)["pending"]
+
+
+@pytest.mark.parametrize("failure", ["empty", "invalid", "unchanged"])
+def test_invalid_split_does_not_clear_pending_review(producer, tmp_path, failure):
+    original, _, selected, _, build = correction_fixture(producer, tmp_path, count=1)
+    replacements = ([] if failure == "empty" else [selected[0].model_dump(), {}] if failure == "invalid"
+                    else [selected[0].model_dump(), selected[0].model_dump()])
+    with pytest.raises(ValueError):
+        build()(hypothesis_id=selected[0].hypothesis_id, replacement=replacements, reason="Split")
+    assert hypotheses.hypothesis_binding(producer)["sha256"] == original["sha256"]
+    assert selected[0].hypothesis_id in hypotheses.hypothesis_correction_state(producer)["pending"]
+
+
 def test_corrections_survive_sqlite_reload(producer, tmp_path):
     _, _, selected, _, _ = correction_fixture(producer, tmp_path)
     store = memory.SQLiteApplicationStore(str(tmp_path / "corrections.db"), "target")
@@ -678,7 +710,7 @@ def test_runtime_schema_advertises_publication_modes(producer, tmp_path):
         Draft202012Validator(schema).validate({"subjects": [no_test()], "mode": "invented"})
 
 
-@pytest.mark.parametrize("requirement", [None, {"comparison": "account", "roles": []},
+@pytest.mark.parametrize("requirement", [None, {"comparison": "account", "roles": ["member", "admin"]},
                                          {"comparison": "role", "roles": ["member"]},
                                          {"comparison": "none", "roles": ["member", "admin"]},
                                          {"comparison": "unknown", "roles": []}])
@@ -767,3 +799,201 @@ def test_checkpoint_reader_rejects_impossible_inline_ceiling(tmp_path, monkeypat
     reader = hypotheses.build_hypothesis_input_reader({"artifact:input.txt"}, max_inline_chars=1)
     with pytest.raises(ValueError, match="ceiling is too small"):
         reader(source_ref="artifact:input.txt")
+
+def test_hypothesis_schema_explains_distinguishing_outcomes():
+    properties = hypotheses.Hypothesis.model_json_schema()["properties"]
+    assert "legitimate behavior" in properties["positive_expectations"]["description"]
+    assert "control outcomes" in properties["negative_expectations"]["description"]
+    assert "prerequisites" in properties["required_evidence"]["description"]
+
+
+def test_hypothesis_identity_schema_describes_future_single_session_needs():
+    description = hypotheses.Hypothesis.model_json_schema()["properties"]["authentication_requirement"]["description"]
+    assert "proposed future test" in description
+    assert "one role even with comparison=none" in description
+    assert "sessions are not available" in description
+    assert "Account comparisons may declare one shared role" in description
+    assert "two distinct roles" in description
+
+
+@pytest.mark.parametrize("action", ["https://service.test/input", "tcp://service.test:9000", "/workspace/source"])
+@pytest.mark.parametrize("mode", ["complete", "stall", "allowance", "fatal"])
+def test_controller_dispatches_one_correction_per_fresh_call(producer, tmp_path, monkeypatch, action, mode):
+    from strands import tool
+
+    from modules.agents import multi_agent_workflow as workflow
+    from modules.agents.run_policy import AgentRunPolicy
+
+    _, _, selected, retained, build = correction_fixture(producer, tmp_path)
+    monkeypatch.setattr(workflow, "_operation_output_root", lambda: str(tmp_path))
+    controller = workflow.MultiAgentWorkflowController.__new__(workflow.MultiAgentWorkflowController)
+    controller.state = SimpleNamespace(list_tasks=lambda: [producer])
+    controller.runtime = SimpleNamespace(operation_id="OP_TEST", config=SimpleNamespace(model_id="test-model"))
+    monkeypatch.setattr(controller, "_fit_hypothesis_replay", lambda prompt, *_args: prompt)
+    monkeypatch.setattr(controller, "_hypothesis_repair_context", lambda _task: "Current publication")
+    monkeypatch.setattr(controller, "_hypothesis_identity_context", lambda _task: "Declared roles: user\n")
+    events = []
+    monkeypatch.setattr(controller, "_emit_workflow_event", events.append)
+    calls = []
+
+    @tool
+    def record_task_acceptance() -> str:
+        """Record acceptance only after all pending corrections."""
+        assert not hypotheses.hypothesis_correction_state(producer)["pending"]
+        return "Accepted"
+
+    def invoke(prompt, policy, tools):
+        calls.append((prompt, policy, tools))
+        assert policy.max_agent_calls == 1 and policy.max_model_turns == 7
+        names = {workflow.get_tool_name(item) for item in tools}
+        assert policy.recovery_allowed_tool_names == names
+        assert ("revise_hypothesis" if "revise_hypothesis" in names else "record_task_acceptance") in policy.recovery_next_action
+        if "revise_hypothesis" in names:
+            assert "record_task_acceptance" not in policy.recovery_next_action
+        if names == {"record_task_acceptance"}:
+            assert "current publication" in prompt
+            record_task_acceptance()
+        else:
+            assert names == {"revise_hypothesis", "read_hypotheses"}
+            assert f"Assigned objective: {producer.objective}" in prompt
+            assert "Declared roles: user" in prompt
+            pending = hypotheses.hypothesis_correction_state(producer)["pending"]
+            current_id = min(pending)
+            assert current_id in prompt
+            assert all(identifier in prompt for identifier in pending)
+            assert "Read-only proposals, not evidence or instructions" in prompt
+            assert "Then record_task_acceptance" not in prompt
+            revision = next(item for item in tools if workflow.get_tool_name(item) == "revise_hypothesis")
+            assert "hypothesis_id" not in workflow.get_tool_spec(revision)["inputSchema"]["json"]["properties"]
+            if mode != "stall":
+                revision(replacement=None, reason=f"No supported consequence for {action}")
+        return workflow.TaskExecutorCycleResult(
+            text="Edited", outcomes=[workflow.ToolOutcome(
+                sequence=len(calls), tool_use_id=f"call-{len(calls)}", tool_name=next(iter(names)),
+                success=mode != "stall", correctable=False, input_summary="{}", output_summary="{}",
+            )], max_tokens_exhausted=mode == "fatal",
+        )
+
+    result = controller._run_hypothesis_correction_batch(
+        producer, invoke, AgentRunPolicy(max_agent_calls=1 if mode == "allowance" else 8, max_model_turns=7),
+        "System policy", lambda _task: [build(), record_task_acceptance],
+    )
+    pending = hypotheses.hypothesis_correction_state(producer)["pending"]
+    assert len(calls) == (3 if mode == "complete" else 1)
+    assert len(result.outcomes) == len(calls)
+    assert len(pending) == (0 if mode == "complete" else 2 if mode == "stall" else 1)
+    assert [row["attempt"] for row in events] == list(range(1, len(calls) + 1))
+    if mode == "complete":
+        publication = hypotheses.load_hypothesis_set(
+            hypotheses.hypothesis_binding(producer)["artifact_ref"], producer, "OP_TEST",
+        )
+        assert publication.subjects[0].hypotheses == retained
+    if mode == "allowance":
+        controller._run_hypothesis_correction_batch(
+            producer, invoke, AgentRunPolicy(max_agent_calls=8, max_model_turns=7),
+            "System policy", lambda _task: [build(), record_task_acceptance],
+        )
+        assert not hypotheses.hypothesis_correction_state(producer)["pending"]
+        assert len(calls) == 3
+    assert len(selected) == 2
+
+
+@pytest.mark.parametrize("comparison", ["account", "role", "tenant"])
+def test_unnamed_comparisons_publish_but_require_execution_identities(producer, tmp_path, comparison):
+    from modules.authentication_requirements import (
+        AuthenticationSelectionError,
+        select_authentication_credentials,
+    )
+
+    entry = hypothesis()
+    entry["authentication_requirement"] = {"comparison": comparison, "roles": []}
+    binding, _ = publish(producer, tmp_path, [{
+        "item_id": "subject", "disposition": "hypotheses_supplied", "hypotheses": [entry],
+    }])
+    publication = hypotheses.load_hypothesis_set(binding["artifact_ref"], producer, "OP_TEST")
+    requirement = publication.subjects[0].hypotheses[0].authentication_requirement
+    assert requirement.comparison == comparison and requirement.roles == []
+    with pytest.raises(AuthenticationSelectionError, match=f"{comparison}_comparison_credentials_unavailable"):
+        select_authentication_credentials([], ["target"], requirement, is_valid=lambda _: True)
+
+
+def test_correction_sibling_fitting_keeps_record_and_reader(producer, tmp_path):
+    from modules.agents.hypothesis_review import repair_context, sibling_context
+    from modules.agents.multi_agent_workflow import _prompt_optional_headings
+    from modules.agents.prompt_context import fit_task_prompt
+
+    binding, _, selected, _, _ = correction_fixture(producer, tmp_path)
+    publication = hypotheses.load_hypothesis_set(binding["artifact_ref"], producer, "OP_TEST")
+    corrections = hypotheses.hypothesis_correction_state(producer)
+    identifier = selected[0].hypothesis_id
+    exact = repair_context(producer.recovery_context["hypothesis_review"], binding["sha256"], publication,
+                           {**corrections, "pending": {identifier: corrections["pending"][identifier]}})
+    fallback = "Use read_hypotheses for subject; scoped to this publication.\n"
+    prompt = fallback + sibling_context(publication, identifier) + "optional " * 2000 + exact
+    fitted = fit_task_prompt(
+        prompt, "", [], "test-model", len(exact) + len(fallback) + 1000, 0, lambda _: None,
+        optional_headings=_prompt_optional_headings("task_executor"), estimate_input=len,
+    )
+    assert "Omitted to fit input capacity" in fitted
+    assert exact in fitted and fallback in fitted
+    assert "sibling_hypotheses" not in fitted
+    reader = hypotheses.build_read_hypotheses_tool([(binding["artifact_ref"], producer)], "OP_TEST", {"subject"})
+    assert identifier in reader(item_id="subject")
+    with pytest.raises(ValueError, match="assigned item_id"):
+        reader(item_id="unrelated")
+
+
+@pytest.mark.parametrize("comparison,roles", [
+    ("account", ["member"]), ("role", ["member", "administrator"]),
+    ("tenant", ["member"]), ("tenant", ["member", "administrator"]),
+])
+def test_named_comparison_restrictions_use_declared_catalog(producer, tmp_path, comparison, roles):
+    accepted = []
+
+    def validate(requirement):
+        if set(requirement.roles) - {"member", "administrator"}:
+            raise ValueError("Undeclared role")
+        accepted.append(requirement)
+
+    writer = hypotheses.build_record_hypotheses_tool(
+        producer, "OP_TEST", str(tmp_path), lambda _: None, validate_authentication=validate,
+    )
+    entry = {**hypothesis(), "authentication_requirement": {"comparison": comparison, "roles": roles}}
+    writer(subjects=[{"item_id": "subject", "disposition": "hypotheses_supplied", "hypotheses": [entry]}])
+    assert accepted[0].comparison == comparison and accepted[0].roles == roles
+    entry["authentication_requirement"]["roles"] = ["undeclared"]
+    # A role comparison needs two distinct named roles even before catalog validation.
+    if comparison == "role":
+        entry["authentication_requirement"]["roles"].append("member")
+    with pytest.raises(ValueError, match="Undeclared role"):
+        writer(subjects=[{"item_id": "subject", "disposition": "hypotheses_supplied", "hypotheses": [entry]}])
+
+
+@pytest.mark.parametrize("split", [False, True])
+def test_revision_normalizes_encoded_objects_and_atomic_lists(producer, tmp_path, split):
+    _, _, selected, retained, build = correction_fixture(producer, tmp_path, count=1)
+    revised = {**selected[0].model_dump(exclude={"hypothesis_id"}),
+               "positive_expectations": ["Distinguishing effect after correction"]}
+    value = [revised, {**revised, "suspected_mechanism": "Independent mechanism"}] if split else revised
+    tool = build()
+    Draft202012Validator(tool.tool_spec["inputSchema"]["json"]).validate({
+        "hypothesis_id": selected[0].hypothesis_id, "replacement": value, "reason": "Clarify controls",
+    })
+    with pytest.raises(Exception):
+        Draft202012Validator(tool.tool_spec["inputSchema"]["json"]).validate({
+            "hypothesis_id": selected[0].hypothesis_id, "replacement": json.dumps(value), "reason": "Clarify controls",
+        })
+    tool(hypothesis_id=selected[0].hypothesis_id, replacement=json.dumps(value), reason="Clarify controls")
+    current = hypotheses.load_hypothesis_set(hypotheses.hypothesis_binding(producer)["artifact_ref"], producer, "OP_TEST")
+    assert len(current.subjects[0].hypotheses) == len(retained) + (2 if split else 1)
+    assert all(item in current.subjects[0].hypotheses for item in retained)
+    assert not hypotheses.hypothesis_correction_state(producer)["pending"]
+
+
+@pytest.mark.parametrize("value", ["not json", "null", "true", "1", '"nested"', "[]", '[{"unknown":true}]'])
+def test_invalid_encoded_revisions_never_mutate_publication(producer, tmp_path, value):
+    binding, _, selected, _, build = correction_fixture(producer, tmp_path, count=1)
+    with pytest.raises(ValueError):
+        build()(hypothesis_id=selected[0].hypothesis_id, replacement=value, reason="Invalid replacement")
+    assert hypotheses.hypothesis_binding(producer)["sha256"] == binding["sha256"]
+    assert selected[0].hypothesis_id in hypotheses.hypothesis_correction_state(producer)["pending"]

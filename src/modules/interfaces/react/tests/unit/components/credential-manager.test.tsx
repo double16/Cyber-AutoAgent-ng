@@ -170,3 +170,19 @@ describe('CredentialManager', () => {
     expect(onStartRotation).toHaveBeenCalledWith(request, 'Rotate only request-1', 'https://app.example.test');
   });
 });
+
+it('reports unavailable rotation start and failed queue requests without exposing credentials', async () => {
+  const {CredentialManager} = await import('../../../src/components/CredentialManager.js');
+  const service = {
+    list: jest.fn<any>().mockResolvedValue({credentials: [{credential_id: 'c', credential_type: 'api_key', status: 'valid', management_policy: 'operation', history: [], rotation_requests: [{status: 'queued', request_id: 'r'}]}]}),
+    queueRotation: jest.fn<any>().mockRejectedValue('queue unavailable'),
+  };
+  let view!: ReactTestRenderer;
+  await act(async () => {view = TestRenderer.create(<CredentialManager service={service as any} initialTarget="target" onClose={jest.fn()}/>);});
+  act(() => inputHandler?.('s', {})); expect(text(view.toJSON())).toContain('Rotation start is unavailable');
+  act(() => inputHandler?.('r', {}));
+  act(() => view.root.findByType('input').props.onChange({target: {value: 'reason'}}));
+  await act(async () => inputHandler?.('', {return: true}));
+  expect(text(view.toJSON())).toContain('Rotation request failed: queue unavailable');
+  act(() => view.unmount());
+});

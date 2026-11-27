@@ -13,5 +13,11 @@ export const formatWorkflowActivityEvent = (event: any): string | null => {
     ? ` [${event.attempt}/${event.attempt_total}]`
     : '';
   const icon = status === 'completed' ? '✅' : status === 'failed' ? '⚠️' : '🔄';
-  return `${icon} ${label}${phase}${task}${cycle || attempt} ${status}`;
+  const failure = status === 'failed' && event.failure_summary
+    ? `: ${String(event.failure_summary).replaceAll(/[\r\n]+/g, ' ').slice(0, 1000)}`
+    : '';
+  const stopReason = event.stop_reason === 'duplicate_submission'
+    ? ' (repeated rejected submission)'
+    : event.stop_reason === 'attempts_exhausted' ? ' (attempts exhausted)' : '';
+  return `${icon} ${label}${phase}${task}${cycle || attempt} ${status}${failure}${stopReason}`;
 };

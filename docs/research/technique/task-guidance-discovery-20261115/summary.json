@@ -1,0 +1,24 @@
+{
+  "primary": {
+    "guidance_correct": 3,
+    "guidance_completed": 3,
+    "none_correct": 2,
+    "none_completed": 3
+  },
+  "unknown_policy_primary": {
+    "guidance": "inconclusive",
+    "none": "violation"
+  },
+  "exploratory_unknown_policy": {
+    "guidance": "unresolved: Markdown instead of required JSON",
+    "none": "violation"
+  },
+  "budget": {
+    "prior": 100,
+    "extension_authorized": 30,
+    "extension_used": 18,
+    "cumulative": 118,
+    "extension_unused": 12
+  },
+  "limits": "Small synthetic study; no retrieval/adoption measurement; exploratory text inspected but not counted as structured success."
+}

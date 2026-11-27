@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
 import os
+
+# Tests use bundled provider metadata and must not fetch it during imports.
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 import shutil
 import sys
 import tempfile
@@ -33,6 +36,31 @@ os.environ["ENABLE_LANGFUSE_PROMPTS"] = "false"
 def isolate_tool_result_cache(monkeypatch, tmp_path):
     """Keep filesystem-backed tool result cache entries isolated between tests."""
     monkeypatch.setattr(result_cache, "RESULT_CACHE_DIR", tmp_path / "tool-result-cache")
+
+
+@pytest.fixture
+def isolated_technique_service(monkeypatch):
+    """Isolate technique persistence in tests that replace memory initialization."""
+    from types import SimpleNamespace
+
+    from strands import tool
+
+    @tool
+    def get_technique(request: str) -> str:
+        """Return isolated reusable guidance."""
+        return "guidance"
+
+    from modules.techniques.events import TechniqueEvents
+
+    service = SimpleNamespace(
+        tool=lambda: get_technique,
+        runner=SimpleNamespace(),
+        events=TechniqueEvents(),
+        private_values=(),
+        synchronize_module=lambda *args: None,
+    )
+    monkeypatch.setattr("modules.techniques.bootstrap.operation_techniques", lambda *args, **kwargs: service)
+    return service
 
 
 # Ensure provider override envs do not leak into tests expecting defaults

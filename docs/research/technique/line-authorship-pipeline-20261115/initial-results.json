@@ -1,0 +1,39 @@
+{
+  "counts": {
+    "limit": 9,
+    "requests": 9,
+    "roles": 8
+  },
+  "outcomes": [
+    {
+      "case": "generate-network",
+      "status": "generated_pending_human_adjudication",
+      "revision": "5086df87-b4b5-52d8-a99c-4462cd302818",
+      "document_sha256": "8ad1810e756c0c6a2750f0ed507ea8e07776f37ef40796489982a873dd7f26a2",
+      "input_sha256": "aa3a6fda4e09235fb8a0e9f03aa082b4f7a151bab08c52c030e8f45f96937aff",
+      "counts": {
+        "limit": 9,
+        "requests": 6,
+        "roles": 5
+      },
+      "human_adjudication": "pending"
+    },
+    {
+      "case": "generate-filesystem",
+      "status": "unresolved",
+      "error_type": "CalibrationBudgetExhausted",
+      "error": "Cumulative calibration allowance exhausted",
+      "input_sha256": "dcff606774882fd7fa35cef07ca1f7ea53f85a8fa641ca80503d5d8b15716fd3",
+      "counts": {
+        "limit": 9,
+        "requests": 9,
+        "roles": 8
+      },
+      "human_adjudication": "pending"
+    },
+    {
+      "case": "generate-http",
+      "status": "unattempted_budget_exhausted"
+    }
+  ]
+}

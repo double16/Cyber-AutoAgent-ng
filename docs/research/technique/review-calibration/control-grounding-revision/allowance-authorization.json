@@ -1,0 +1,8 @@
+{
+  "user_message": "yes",
+  "approved_proposal": "Up to 21 new sequential calls to replay all three unchanged fixtures against the reference-grounding revision",
+  "provider_request_cap": 21,
+  "role_invocation_cap": 21,
+  "prior_live_requests": 61,
+  "unused_prior_requests_transferred": false
+}

@@ -1,0 +1,79 @@
+{
+  "date": "2026-11-12",
+  "scope": "Three new web techniques and existing OAuth/OIDC update",
+  "user_approval": "User explicitly approved resources, procedures and final exact drafts before saving.",
+  "authors": [
+    "/root",
+    "/root/draft_new"
+  ],
+  "source_selector": "/root/sources",
+  "independent_critic": "/root/critic",
+  "validation": "Independent critic JSON outputs replayed through production publication_review.assess; no live production model invocation. Saved bytes equal reviewed hashes.",
+  "limitations": "Offline authoring review only; no target probes or effectiveness rating. Historical library provenance not reconstructed.",
+  "documents": [
+    {
+      "file": "client-side-script-asset-assessment.md",
+      "sha256": "65228c97834a7cb6c2e950513b2f4461deea24a7a321b223fec113d758fa4953",
+      "approved": true,
+      "review": {
+        "approved": true,
+        "decision_origin": "legacy",
+        "issue_dispositions": [],
+        "category": "authored_content",
+        "reason": "The complete draft explicitly inventories all identifiable bundle dependencies and distinct versions, preserves evidence locations and conflicting clues, and separates package presence, runtime use, affectedness and impact. Sensitive-content and integrity comparisons have actual audience/trust prerequisites and controls; fixture demonstrations do not imply target compromise. Retained SRI and OWASP references support the described background without claiming the original inventory procedure is source-verified.",
+        "issues": [],
+        "suggestions": [],
+        "interpretations": [],
+        "no_security_checks_reason": ""
+      }
+    },
+    {
+      "file": "oauth-oidc.md",
+      "sha256": "99c97b90c4c5ffd7b7d0b99eae761573781e97029b76f2ec7cedf2c36baa67d7",
+      "approved": true,
+      "review": {
+        "approved": true,
+        "decision_origin": "legacy",
+        "issue_dispositions": [],
+        "category": "authored_content",
+        "reason": "The complete draft preserves existing OAuth/OIDC flow tests and supplies a separate discovery/key-fetch branch with issuer provenance, actual fetch-location prerequisites, isolated actor-controlled variations, legitimate cross-host and key-rotation controls, synthetic credential handling, cache isolation and restoration. It distinguishes metadata retrieval from prohibited destinations, leaked credentials and wrong-context token acceptance. Inspected retained OAuth cheat sheet, RFC 9700, OIDC Core and Discovery passages support the attributed facts; original outbound-fetch procedures are honestly distinguished from source-backed requirements. No material issues found.",
+        "issues": [],
+        "suggestions": [],
+        "interpretations": [],
+        "no_security_checks_reason": ""
+      }
+    },
+    {
+      "file": "openapi-documentation-exposure.md",
+      "sha256": "73ba7169aeaa6192f677d7bbf731d1e3df62a0135501d01628fb75b3592cdc59",
+      "approved": true,
+      "review": {
+        "approved": true,
+        "decision_origin": "legacy",
+        "issue_dispositions": [],
+        "category": "authored_content",
+        "reason": "The complete draft satisfies the agreed full-lifecycle method. Effective security inheritance, overrides, alternatives and anonymous access are distinguished from deployed authorization; audience policy, isolated actor controls, actual protected results and bounded scope prevent disclosure and status-code false positives. Retained OpenAPI and OWASP passages support the stated source contributions.",
+        "issues": [],
+        "suggestions": [],
+        "interpretations": [],
+        "no_security_checks_reason": ""
+      }
+    },
+    {
+      "file": "url-query-secret-exposure.md",
+      "sha256": "06a00fdb887ecbf39b872f1dd28b65f914a0b6512dfe58684ea830841ecd84af",
+      "approved": true,
+      "review": {
+        "approved": true,
+        "decision_origin": "legacy",
+        "issue_dispositions": [],
+        "category": "authored_content",
+        "reason": "The complete draft provides actionable channel-specific comparisons with synthetic values, intended-recipient policy, fresh-context and receiver controls, cleanup, and explicit unavailable-evidence limits. It correctly qualifies broad query-string exposure claims using actual referrer behavior and separates confidentiality from credential replay. Retained OWASP, Referrer Policy draft and RFC 9700 passages support the stated background and limitations.",
+        "issues": [],
+        "suggestions": [],
+        "interpretations": [],
+        "no_security_checks_reason": ""
+      }
+    }
+  ]
+}

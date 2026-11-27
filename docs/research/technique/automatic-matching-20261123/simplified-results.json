@@ -1,0 +1,84 @@
+{
+  "status": "completed",
+  "study_type": "single-arm whole-corpus recheck",
+  "requests": 18,
+  "request_cap": 160,
+  "positive_deliveries": 8,
+  "positive_cases": 8,
+  "valid_empty_controls": 2,
+  "negative_cases": 2,
+  "runtime_or_capacity_failures": 0,
+  "cases": [
+    {
+      "case": "navigation",
+      "title": "Open redirect destination control",
+      "requests": 2,
+      "same_revision_as_original_baseline": true,
+      "runtime_or_capacity_failure": false
+    },
+    {
+      "case": "preview",
+      "title": "Server-side request destination boundaries",
+      "requests": 2,
+      "same_revision_as_original_baseline": true,
+      "runtime_or_capacity_failure": false
+    },
+    {
+      "case": "map-title",
+      "title": "HTML and CSS injection",
+      "requests": 2,
+      "same_revision_as_original_baseline": true,
+      "runtime_or_capacity_failure": false
+    },
+    {
+      "case": "signed-context",
+      "title": "JWT trust boundaries",
+      "requests": 2,
+      "same_revision_as_original_baseline": true,
+      "runtime_or_capacity_failure": false
+    },
+    {
+      "case": "record-reader",
+      "title": "Object-level authorization/IDOR",
+      "requests": 3,
+      "same_revision_as_original_baseline": true,
+      "runtime_or_capacity_failure": false
+    },
+    {
+      "case": "export-reader",
+      "title": "Path traversal and file inclusion boundaries",
+      "requests": 2,
+      "same_revision_as_original_baseline": true,
+      "runtime_or_capacity_failure": false
+    },
+    {
+      "case": "static-health",
+      "title": null,
+      "requests": 0,
+      "same_revision_as_original_baseline": true,
+      "runtime_or_capacity_failure": false
+    },
+    {
+      "case": "constant-banner",
+      "title": null,
+      "requests": 0,
+      "same_revision_as_original_baseline": true,
+      "runtime_or_capacity_failure": false
+    },
+    {
+      "case": "opaque-navigation",
+      "title": "Open redirect destination control",
+      "requests": 2,
+      "same_revision_as_original_baseline": true,
+      "runtime_or_capacity_failure": false
+    },
+    {
+      "case": "opaque-authentication",
+      "title": "Authentication endpoint hypothesis generation from minimal client evidence",
+      "requests": 3,
+      "same_revision_as_original_baseline": true,
+      "runtime_or_capacity_failure": false
+    }
+  ],
+  "conclusion": "Simplified path restored useful conditional/partial guidance without rejecting legitimate generic authentication reuse or adding spurious recommendations to the negative controls. No production or adoption uplift claim follows from this recheck."
+}

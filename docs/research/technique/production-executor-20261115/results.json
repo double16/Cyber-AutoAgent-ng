@@ -1,0 +1,431 @@
+{
+  "counts": {
+    "requests": 31,
+    "limit": 100
+  },
+  "outcomes": [
+    {
+      "mode": "unknown",
+      "arm": "lookup",
+      "reason": "task_executor_done",
+      "lookups": [
+        "header-selector comparison guidance for account access assessment"
+      ],
+      "observations": [
+        {
+          "id": "obs-1",
+          "kind": "identity",
+          "response": {
+            "session-red": "A",
+            "session-blue": "B"
+          }
+        },
+        {
+          "id": "obs-2",
+          "kind": "policy",
+          "response": {
+            "available": false,
+            "reason": "Policy record unavailable"
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "session-red",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "session-blue",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "A",
+                "value": "record-A"
+              }
+            }
+          }
+        }
+      ],
+      "acceptance": [
+        {
+          "criterion_id": "classification",
+          "status": "satisfied",
+          "disposition": "observation",
+          "summary": "Published evidence-backed comparison classification as inconclusive due to missing policy record. Identity mapping observed: session-red maps to A, session-blue maps to B. Cross-selector requests returned not authorized responses with object owner matching selector. Classification artifact created for independent review.",
+          "evidence_refs": [
+            "artifact:artifacts/task_evidence/94253de173650cac/result-573d749163e56e7e.json"
+          ],
+          "coverage": []
+        }
+      ],
+      "answer": {
+        "classification": "inconclusive",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4"
+        ],
+        "explanation": "Identity mapping shows session-red maps to A and session-blue maps to B. Policy record unavailable per context inspection. Cross-selector requests for session-red with selector B and session-blue with selector A both returned status 200 with body error 'not authorized' and object owner matching selector. Without an established access-control policy, the policy prerequisite for an authorization violation cannot be confirmed, and the negative control outcome cannot be validated against documented entitlements. Classification is therefore inconclusive pending policy evidence."
+      },
+      "correct_classification": true,
+      "valid_evidence_ids": true,
+      "decisive_probe": true,
+      "discovery_evidence": true,
+      "supported_correct": true,
+      "status": "completed",
+      "requests": 8,
+      "journal_outcome_count": 8,
+      "artifact": "unknown-lookup-artifact.json",
+      "artifact_sha256": "573d749163e56e7e27686e68a098accb3f51f644b88377477a0b3ba17637c0b4"
+    },
+    {
+      "mode": "unknown",
+      "arm": "none",
+      "reason": "task_executor_done",
+      "lookups": [],
+      "observations": [
+        {
+          "id": "obs-1",
+          "kind": "identity",
+          "response": {
+            "session-red": "A",
+            "session-blue": "B"
+          }
+        },
+        {
+          "id": "obs-2",
+          "kind": "policy",
+          "response": {
+            "available": false,
+            "reason": "Policy record unavailable"
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "session-red",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "A",
+                "value": "record-A"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "session-red",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-5",
+          "principal": "session-blue",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "A",
+                "value": "record-A"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-6",
+          "principal": "session-blue",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        }
+      ],
+      "acceptance": [
+        {
+          "criterion_id": "classification",
+          "status": "satisfied",
+          "disposition": "observation",
+          "summary": "Published evidence-backed comparison classification inconclusive for X-Account access assessment; identity confirmed, policy unavailable, all four credential-selector tests returned not authorized with object data.",
+          "evidence_refs": [
+            "artifact:artifacts/task_evidence/94253de173650cac/result-fc30642ec2b8bc59.json"
+          ],
+          "coverage": []
+        }
+      ],
+      "answer": {
+        "classification": "inconclusive",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4",
+          "obs-5",
+          "obs-6"
+        ],
+        "explanation": "Identity mapping shows session-red=A and session-blue=B. Policy record unavailable. All four request_account tests returned status 200 with body error 'not authorized' while still returning object data for the selector. Without policy evidence and with ambiguous authorization signals, classification remains inconclusive for independent review."
+      },
+      "correct_classification": true,
+      "valid_evidence_ids": true,
+      "decisive_probe": true,
+      "discovery_evidence": true,
+      "supported_correct": true,
+      "status": "completed",
+      "requests": 8,
+      "journal_outcome_count": 8,
+      "artifact": "unknown-none-artifact.json",
+      "artifact_sha256": "fc30642ec2b8bc595411d987d92ccc8501e0adad9079a0082a47ebc6d927f2b0"
+    },
+    {
+      "mode": "shared",
+      "arm": "none",
+      "reason": "task_executor_done",
+      "lookups": [],
+      "observations": [
+        {
+          "id": "obs-1",
+          "kind": "identity",
+          "response": {
+            "session-red": "A",
+            "session-blue": "B"
+          }
+        },
+        {
+          "id": "obs-2",
+          "kind": "policy",
+          "response": {
+            "available": true,
+            "permissions": {
+              "A": [
+                "A",
+                "B"
+              ],
+              "B": [
+                "B"
+              ]
+            }
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "session-red",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "session-blue",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized"
+            }
+          }
+        }
+      ],
+      "acceptance": [
+        {
+          "criterion_id": "classification",
+          "status": "satisfied",
+          "disposition": "observation",
+          "summary": "Published evidence-backed comparison classification for X-Account access. Identity and policy retrieved; cross-account access attempts returned not authorized errors. Classification no_violation_observed recorded as artifact:artifacts/result.json for independent review.",
+          "evidence_refs": [
+            "artifact:artifacts/task_evidence/94253de173650cac/result-0e46a2ad955fa99a.json"
+          ],
+          "coverage": []
+        }
+      ],
+      "answer": {
+        "classification": "no_violation_observed",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4"
+        ],
+        "explanation": "Identity shows session-red maps to A and session-blue maps to B. Policy shows A permissions include A and B, B permissions include only B. Request account tests show session-red accessing selector B returns status 200 with error not authorized, and session-blue accessing selector A returns status 200 with error not authorized. No evidence of unauthorized access permitted."
+      },
+      "correct_classification": true,
+      "valid_evidence_ids": true,
+      "decisive_probe": true,
+      "discovery_evidence": true,
+      "supported_correct": true,
+      "status": "completed",
+      "requests": 6,
+      "journal_outcome_count": 6,
+      "artifact": "shared-none-artifact.json",
+      "artifact_sha256": "0e46a2ad955fa99a23c65480c7a1517fd1219bc02ddd5a2ff2e81c4330c5e027"
+    },
+    {
+      "mode": "shared",
+      "arm": "lookup",
+      "reason": "task_executor_done",
+      "lookups": [
+        "header-selector comparison guidance for account access assessment with identity mapping and policy permissions"
+      ],
+      "observations": [
+        {
+          "id": "obs-1",
+          "kind": "identity",
+          "response": {
+            "session-red": "A",
+            "session-blue": "B"
+          }
+        },
+        {
+          "id": "obs-2",
+          "kind": "policy",
+          "response": {
+            "available": true,
+            "permissions": {
+              "A": [
+                "A",
+                "B"
+              ],
+              "B": [
+                "B"
+              ]
+            }
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "session-red",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "A",
+                "value": "record-A"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "session-red",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-5",
+          "principal": "session-blue",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized"
+            }
+          }
+        },
+        {
+          "id": "obs-6",
+          "principal": "session-blue",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        }
+      ],
+      "acceptance": [
+        {
+          "criterion_id": "classification",
+          "status": "satisfied",
+          "disposition": "observation",
+          "summary": "Comparison of session-red and session-blue against selectors A and B shows all requests returned not authorized with no object disclosure. Identity mapping and policy evidence recorded. Classification published as no_violation_observed for independent review.",
+          "evidence_refs": [
+            "artifact:artifacts/task_evidence/94253de173650cac/result-01fcf339eb85ec6f.json"
+          ],
+          "coverage": []
+        }
+      ],
+      "answer": {
+        "classification": "no_violation_observed",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4",
+          "obs-5",
+          "obs-6"
+        ],
+        "explanation": "Identity mapping shows session-red maps to A and session-blue maps to B. Policy permits A to access A and B, B only B. All four account requests returned status 200 with body error 'not authorized'. No object data was returned for unauthorized attempts, and no successful disclosure of cross-account data was observed. The evidence supports no violation observed within the tested selector combinations."
+      },
+      "correct_classification": true,
+      "valid_evidence_ids": true,
+      "decisive_probe": true,
+      "discovery_evidence": true,
+      "supported_correct": true,
+      "status": "completed",
+      "requests": 9,
+      "journal_outcome_count": 9,
+      "artifact": "shared-lookup-artifact.json",
+      "artifact_sha256": "01fcf339eb85ec6fc2622df0eba31607638dc65bff88fa1a277ae681bfbdd404"
+    }
+  ],
+  "allowance_remaining": 69,
+  "scope": "Production executor core, not whole workflow",
+  "caveat": "Correct labels and required cited observations do not establish every explanatory sentence or causal guidance contribution."
+}

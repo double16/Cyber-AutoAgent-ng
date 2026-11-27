@@ -1,0 +1,41 @@
+{
+  "provenance": "Offline calibration reconstructed from the supplied continuation plan; no historical scores modified.",
+  "cases": [
+    {
+      "id": "static_javascript_mismatch",
+      "guidance": "Exercise an observed input with paired baseline and injection controls; compare server behavior.",
+      "result": "The /player subject supplied static JavaScript. No input exercise or paired comparison was recorded. The document was cited to justify exclusion.",
+      "expected_score": 0
+    },
+    {
+      "id": "unsupported_exclusion",
+      "guidance": "Exclude the network path only after a paired allowed and denied reachability control.",
+      "result": "No service inputs were listed; the task succeeded and cited the guidance, but no reachability control was recorded.",
+      "expected_score": 0
+    },
+    {
+      "id": "justified_exclusion",
+      "guidance": "Exclude this access hypothesis when the same request is denied without identity and allowed with the required identity.",
+      "result": "The procedure's paired identity requests were recorded: denied without identity, allowed with required identity; the access hypothesis was excluded on that criterion.",
+      "expected_score": 1
+    },
+    {
+      "id": "actual_filesystem_control",
+      "guidance": "Compare file access as owner and non-owner before interpreting permissions.",
+      "result": "The delivered comparison was applied to the assigned file; recorded owner access succeeded and non-owner access was denied.",
+      "expected_score": 1
+    },
+    {
+      "id": "neutral_contribution",
+      "guidance": "Compare equivalent responses across identities.",
+      "result": "The task cited the technique but only reported an independently observed version banner.",
+      "expected_score": 0
+    },
+    {
+      "id": "unavailable_evidence",
+      "guidance": "Record paired baseline and negative-control outputs.",
+      "result": "The task claims the controls were applied, but the necessary output artifact cannot be read.",
+      "expected_score": null
+    }
+  ]
+}

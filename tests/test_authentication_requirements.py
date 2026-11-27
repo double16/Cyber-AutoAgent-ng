@@ -99,3 +99,43 @@ def test_unused_roles_and_targets_are_not_checked_for_session_validity():
     result = select(records, roles=["member"], is_valid=lambda record: checked.append(record["credential_id"]))
     assert checked == ["member"]
     assert result[0]["credential_id"] == "member"
+
+
+def test_identity_schema_describes_single_session_without_changing_wire_defaults():
+    schema = AuthenticationRequirement.model_json_schema()["properties"]
+    from modules.tools.hypotheses import SubjectHypotheses
+
+    nested = SubjectHypotheses.model_json_schema()["$defs"]["AuthenticationRequirement"]["properties"]
+    assert nested["comparison"] == schema["comparison"]
+    assert schema["comparison"]["enum"] == ["none", "account", "role", "tenant"]
+    assert schema["comparison"]["description"]
+    assert "no explicit role restriction" in schema["roles"]["description"]
+    assert AuthenticationRequirement().model_dump() == {"comparison": "none", "roles": []}
+    assert AuthenticationRequirement(comparison="single", roles=["member"]).comparison == "none"
+    with pytest.raises(ValidationError):
+        AuthenticationRequirement(comparison="unsupported")
+
+
+@pytest.mark.parametrize("target", ["https://target.test", "ssh://target.test", "/repo/project"])
+def test_single_authenticated_baseline_does_not_require_a_second_authenticated_identity(target):
+    from modules.tools.hypotheses import Hypothesis
+    from tests.test_hypotheses import hypothesis
+
+    values = hypothesis()
+    values.update(
+        authentication_requirement={"comparison": "none", "roles": ["operator"]},
+        safe_test_steps=[
+            "Use one operator session for the permitted baseline and a separately scoped anonymous control",
+        ],
+    )
+    proposed = Hypothesis.model_validate(values)
+    records = [credential("operator-session", target=target, role="operator")]
+    selected = select_authentication_credentials(
+        records, [target], proposed.authentication_requirement, is_valid=lambda _record: True,
+    )
+    assert [record["credential_id"] for record in selected] == ["operator-session"]
+    assert proposed.authentication_requirement.model_dump() == {"comparison": "none", "roles": ["operator"]}
+    with pytest.raises(ValidationError, match="exactly two distinct roles"):
+        Hypothesis.model_validate({
+            **values, "authentication_requirement": {"comparison": "role", "roles": ["operator"]},
+        })

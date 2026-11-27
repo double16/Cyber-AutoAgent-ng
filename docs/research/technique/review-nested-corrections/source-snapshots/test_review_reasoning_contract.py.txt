@@ -1,0 +1,63 @@
+"""Controller invariants and complete inputs; scripted models do not validate semantics."""
+
+from types import SimpleNamespace
+
+import pytest
+
+from modules.prompts.security_interpretation import SECURITY_INTERPRETATION
+from modules.techniques.coverage import Requirement
+from modules.techniques.critique import Critique, IssueAssessment, ReviewSnapshot, assess
+from modules.techniques.review_corrections import AssessmentCorrection
+from modules.techniques.support_scope import SUPPORT_SCOPE_GUIDANCE
+
+
+@pytest.mark.parametrize("subject", [
+    "Establish file read entitlements from access configuration, then compare the same file under two identities.",
+    "Establish network allow/deny policy from rules, then compare connectivity with identity fixed.",
+    "Establish HTTP object entitlements from policy, then vary only the object selector with identity fixed.",
+])
+@pytest.mark.parametrize("matching_counterexample", [False, True])
+def test_no_impossible_counterexample_control_requirement_and_no_uncontrolled_approval(
+    scripted_service, subject, matching_counterexample,
+):
+    reference = ReviewSnapshot(subject).body_references[0]
+    prompts = []
+    interpretation = {
+        "check_purpose": "boundary_violation", "draft_references": [reference],
+        "prerequisite_or_policy": "Establish intended policy using configuration",
+        "legitimate_outcome": "Observed access matches established policy",
+        "suspected_violation": "Access contradicts established policy",
+        "distinguishing_control": "Compare fixed identity and object with established policy",
+    }
+    review = {
+        "check_purpose": "boundary_violation", "interpretation_index": 0, "draft_references": [reference],
+        "permitted_counterexample": "A matching permitted scenario" if matching_counterexample else
+                                    "No permitted scenario satisfies the established prerequisite",
+        "counterexample_matches_check": matching_counterexample, "control_excludes_counterexample": False,
+        "control_references": [], "actual_discriminator": "", "critic_correct": True,
+    }
+
+    def runner(role, prompt, schema, tools):
+        prompts.append(str(prompt))
+        if schema is Critique:
+            return Critique(approved=True, decision_origin="controller_findings", reason="Policy-based check",
+                            interpretations=[interpretation])
+        if schema is AssessmentCorrection:
+            return AssessmentCorrection(critic_supported=True, reason="Unchanged independent judgment",
+                                        findings=[], review_changes=[])
+        return IssueAssessment(critic_supported=True, reason="Independent assessment", interpretation_reviews=[review])
+
+    scripted_service.service.runner = SimpleNamespace(structured=runner)
+    args = (scripted_service.service, subject, subject, [Requirement(id="method", description=subject)], [], [])
+    if matching_counterexample:
+        with pytest.raises(ValueError, match="after one correction"):
+            assess(*args)
+    else:
+        assert assess(*args).approved
+    # Initial, independent, and any correction inputs retain the complete subject and shared rules.
+    for prompt in prompts:
+        assert subject in prompt
+        assert SECURITY_INTERPRETATION in prompt
+        assert SUPPORT_SCOPE_GUIDANCE in prompt
+        assert "missing premise, contradiction or unjustified generalization" in prompt
+        assert "counterexample_matches_check=false" in prompt

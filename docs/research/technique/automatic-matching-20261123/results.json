@@ -1,0 +1,239 @@
+{
+  "cases": 10,
+  "matching_requests": 10,
+  "total_requests": 53,
+  "arms": {
+    "baseline": {
+      "positive_deliveries": 8,
+      "positive_cases": 8,
+      "valid_empty_controls": 2,
+      "negative_cases": 2,
+      "selection_requests": 17,
+      "runtime_or_capacity_failures": 0
+    },
+    "candidate": {
+      "positive_deliveries": 7,
+      "positive_cases": 8,
+      "valid_empty_controls": 2,
+      "negative_cases": 2,
+      "selection_requests": 26,
+      "runtime_or_capacity_failures": 0
+    }
+  },
+  "per_case": [
+    {
+      "case": "navigation",
+      "matching_status": "completed",
+      "lead_count": 1,
+      "lead_requests": [
+        "Open redirect destination control hypothesis generation"
+      ],
+      "arms": {
+        "baseline": {
+          "title": "Open redirect destination control",
+          "requests": 2,
+          "delivery_count": 1
+        },
+        "candidate": {
+          "title": "Open redirect destination control",
+          "requests": 2,
+          "delivery_count": 1
+        }
+      }
+    },
+    {
+      "case": "preview",
+      "matching_status": "completed",
+      "lead_count": 2,
+      "lead_requests": [
+        "Server-side request destination boundaries hypothesis generation",
+        "Server-side request destination boundaries hypothesis generation"
+      ],
+      "arms": {
+        "baseline": {
+          "title": "Server-side request destination boundaries",
+          "requests": 2,
+          "delivery_count": 1
+        },
+        "candidate": {
+          "title": "Server-side request destination boundaries",
+          "requests": 2,
+          "delivery_count": 1
+        }
+      }
+    },
+    {
+      "case": "map-title",
+      "matching_status": "completed",
+      "lead_count": 2,
+      "lead_requests": [
+        "HTML and CSS injection assessment",
+        "Reflected, stored and DOM XSS with browser message trust hypothesis generation"
+      ],
+      "arms": {
+        "baseline": {
+          "title": "HTML and CSS injection",
+          "requests": 2,
+          "delivery_count": 1
+        },
+        "candidate": {
+          "title": "HTML and CSS injection",
+          "requests": 2,
+          "delivery_count": 1
+        }
+      }
+    },
+    {
+      "case": "signed-context",
+      "matching_status": "completed",
+      "lead_count": 1,
+      "lead_requests": [
+        "JWT trust boundaries hypothesis generation"
+      ],
+      "arms": {
+        "baseline": {
+          "title": "JWT trust boundaries",
+          "requests": 2,
+          "delivery_count": 1
+        },
+        "candidate": {
+          "title": "JWT trust boundaries",
+          "requests": 2,
+          "delivery_count": 1
+        }
+      }
+    },
+    {
+      "case": "record-reader",
+      "matching_status": "completed",
+      "lead_count": 2,
+      "lead_requests": [
+        "Object-level authorization/IDOR hypothesis generation",
+        "Header-selector authorization comparison with policy, identity and invalid-value controls"
+      ],
+      "arms": {
+        "baseline": {
+          "title": "Object-level authorization/IDOR",
+          "requests": 3,
+          "delivery_count": 1
+        },
+        "candidate": {
+          "title": "Object-level authorization/IDOR",
+          "requests": 3,
+          "delivery_count": 1
+        }
+      }
+    },
+    {
+      "case": "export-reader",
+      "matching_status": "completed",
+      "lead_count": 1,
+      "lead_requests": [
+        "Path traversal and file inclusion boundaries hypothesis generation"
+      ],
+      "arms": {
+        "baseline": {
+          "title": "Path traversal and file inclusion boundaries",
+          "requests": 2,
+          "delivery_count": 1
+        },
+        "candidate": {
+          "title": "Path traversal and file inclusion boundaries",
+          "requests": 2,
+          "delivery_count": 1
+        }
+      }
+    },
+    {
+      "case": "static-health",
+      "matching_status": "completed",
+      "lead_count": 0,
+      "lead_requests": [],
+      "arms": {
+        "baseline": {
+          "title": null,
+          "requests": 0,
+          "delivery_count": 0
+        },
+        "candidate": {
+          "title": null,
+          "requests": 0,
+          "delivery_count": 0
+        }
+      }
+    },
+    {
+      "case": "constant-banner",
+      "matching_status": "completed",
+      "lead_count": 0,
+      "lead_requests": [],
+      "arms": {
+        "baseline": {
+          "title": null,
+          "requests": 0,
+          "delivery_count": 0
+        },
+        "candidate": {
+          "title": null,
+          "requests": 0,
+          "delivery_count": 0
+        }
+      }
+    },
+    {
+      "case": "opaque-navigation",
+      "matching_status": "completed",
+      "lead_count": 1,
+      "lead_requests": [
+        "Open redirect destination control hypothesis generation"
+      ],
+      "arms": {
+        "baseline": {
+          "title": "Open redirect destination control",
+          "requests": 2,
+          "delivery_count": 1
+        },
+        "candidate": {
+          "title": null,
+          "requests": 11,
+          "delivery_count": 0
+        }
+      }
+    },
+    {
+      "case": "opaque-authentication",
+      "matching_status": "completed",
+      "lead_count": 1,
+      "lead_requests": [
+        "Generate future test hypotheses for authentication endpoint with minimal client evidence"
+      ],
+      "arms": {
+        "baseline": {
+          "title": "Authentication endpoint hypothesis generation from minimal client evidence",
+          "requests": 2,
+          "delivery_count": 1
+        },
+        "candidate": {
+          "title": "Authentication endpoint hypothesis generation from minimal client evidence",
+          "requests": 2,
+          "delivery_count": 1
+        }
+      }
+    }
+  ],
+  "adjudication": [
+    {
+      "case": "map-title",
+      "finding": "HTML and CSS injection is a useful broad subset: plain marker, DOM location, harmless markup variation, interpretation versus inert text, and a separate scoped XSS follow-up. Different title from expected DOM-XSS specialist is not a selection failure."
+    },
+    {
+      "case": "opaque-authentication",
+      "finding": "Captured generic minimal-evidence authentication guidance is appropriate for explicitly assigned credential-validation investigation; both arms reused it."
+    },
+    {
+      "case": "opaque-navigation",
+      "finding": "Matcher selected redirect guidance. Baseline delivered it. Candidate marked methodological capability conditional but rejected task relevance due missing recorded navigation prerequisites and the wider server-side retrieval question. This is an unnecessary whole-task veto of useful partial/conditional guidance."
+    }
+  ],
+  "decision": "Remove the experimental per-document task-relevance veto. Keep task relevance in matching, methodology capability coverage in selection, and bounded fallback. Full-corpus simplified recheck and coverage running."
+}

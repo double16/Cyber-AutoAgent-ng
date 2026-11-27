@@ -1,0 +1,50 @@
+[
+  {
+    "id": "header-unconditional",
+    "expected_approval": false,
+    "required_finding": "The stated observation can occur under permitted behavior; specify the actual boundary and distinguishing control.",
+    "human_adjudication_required": true
+  },
+  {
+    "id": "header-conditional",
+    "expected_approval": true,
+    "required_finding": null,
+    "human_adjudication_required": true
+  },
+  {
+    "id": "storage-unconditional",
+    "expected_approval": false,
+    "required_finding": "The stated observation can occur under permitted behavior; specify the actual boundary and distinguishing control.",
+    "human_adjudication_required": true
+  },
+  {
+    "id": "storage-conditional",
+    "expected_approval": true,
+    "required_finding": null,
+    "human_adjudication_required": true
+  },
+  {
+    "id": "reuse-unconditional",
+    "expected_approval": false,
+    "required_finding": "The stated observation can occur under permitted behavior; specify the actual boundary and distinguishing control.",
+    "human_adjudication_required": true
+  },
+  {
+    "id": "reuse-conditional",
+    "expected_approval": true,
+    "required_finding": null,
+    "human_adjudication_required": true
+  },
+  {
+    "id": "filesystem-unconditional",
+    "expected_approval": false,
+    "required_finding": "The stated observation can occur under permitted behavior; specify the actual boundary and distinguishing control.",
+    "human_adjudication_required": true
+  },
+  {
+    "id": "filesystem-conditional",
+    "expected_approval": true,
+    "required_finding": null,
+    "human_adjudication_required": true
+  }
+]

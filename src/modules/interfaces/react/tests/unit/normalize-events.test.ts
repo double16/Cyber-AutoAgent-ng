@@ -9,7 +9,7 @@ import { describe, it, expect } from '@jest/globals';
 let normalizeEvent;
 
 beforeAll(async () => {
-  const mod = await import('../../dist/services/events/normalize.js');
+  const mod = await import('../../src/services/events/normalize.js');
   normalizeEvent = mod.normalizeEvent;
 });
 

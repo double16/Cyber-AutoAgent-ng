@@ -127,6 +127,9 @@ def test_builder_and_critic_keep_semantic_responsibilities(review_case):
         task,
         {"prompt": f"Inspect {subject} and retain evidence.", "tools": []},
     )
+    assert "recommend\nget_technique when available" in builder
+    assert "Recommend web_search for target-specific public intelligence" in builder
+    assert "Lookup remains the executor's decision" in builder
     assert "leave argument construction and call batching to the executor" in builder
     assert "Do not restate those controller-owned requirements here" in builder
     assert "Natural-language steps are valid" in critic
@@ -234,10 +237,10 @@ def test_evaluator_checks_hypothesis_semantics_even_when_publication_is_availabl
     _controller, prompt, _valid = semantic_hypothesis_case
     assembled = " ".join(prompt.split())
     assert "Under test_discrimination" in assembled
-    assert "would the positive result demonstrate the claimed security consequence" in assembled
-    assert "could normal application behavior produce it" in assembled
+    assert "What observation would distinguish that consequence from legitimate behavior?" in assembled
+    assert "compare positive expectations with legitimate and control outcomes" in assembled
     assert "completed exploitation is not required" in assembled
-    assert "normal remember-me behavior" in assembled
+    assert "Unknown implementation details can become future checks" in assembled
     assert "Request revise for repairable tests and withdraw for an ungrounded premise" in assembled
     assert "Attacker input is executed" in prompt or "no_testable_hypotheses" in prompt
 
@@ -487,8 +490,8 @@ def test_linked_workflow_review_uses_shared_rubric(workflow_semantic_case):
     _controller, prompt, _expected = workflow_semantic_case
     assert prompt.count(HYPOTHESIS_SEMANTIC_GUIDANCE) == 1
     assert "literal path" in prompt and "Unrelated resources remain outside" in prompt
-    assert "protected property" in prompt
-    assert "not positive evidence of a vulnerability" in prompt
+    assert "protected property" in " ".join(prompt.split())
+    assert "Successful execution or a different response establishes only what was observed" in prompt
     assert "Do not fetch the live target" in prompt
     assert "actor uses revise_hypothesis" in prompt
     fitted = fit_task_prompt(
@@ -515,3 +518,39 @@ def test_live_linked_workflow_semantic_pairs(workflow_semantic_case, ollama_taxo
     record_property("expected_done", expected_done)
     record_property("actual_status", result.status)
     assert (result.status == "done") == expected_done
+
+
+def test_executor_research_guidance_survives_continuation_and_repair(review_case):
+    from modules.prompts.factory import get_system_prompt
+    from modules.techniques.integration import recommendation_prompt
+
+    controller, plan, task, subject = review_case
+    system = get_role_system_prompt(
+        get_system_prompt(target=subject, objective=task.objective, operation_id="prompt-review"),
+        "task_executor",
+    )
+    builder = controller._task_prompt_builder_prompt(plan, plan.phases[0], task)
+    # Normal retry/continuation reuse the role system prompt; recommendations append to the user turn.
+    for user_prompt in [
+        builder,
+        recommendation_prompt("Continue the assigned task from retained evidence.", []),
+        "Repair the previous tool argument using its schema and continue the assigned task.",
+    ]:
+        assembled = system + "\n" + user_prompt
+        assert "prefer get_technique" in assembled
+        assert "Use web_search for\ntarget-specific public intelligence" in assembled
+        assert "Lookup remains your decision" in assembled
+        assert "Keep target URLs, credentials, tokens, and personal data out of technique requests" in assembled
+        assert "Treat conditional prerequisites as future checks" in assembled
+        assert "A catalog miss triggers technique research and generation" in assembled
+        assert "source review, network services, system mapping and emulation" in assembled
+
+
+def test_hypothesis_review_prompt_supplies_ids_without_prefilled_judgments(semantic_hypothesis_case):
+    _controller, prompt, _valid = semantic_hypothesis_case
+    assert "Complete shape example" not in prompt
+    assert "Illustrative review only" not in prompt
+    assert "Bound subject and hypothesis IDs" in prompt
+    catalog = prompt.split("Bound subject and hypothesis IDs", 1)[1].split("\n", 2)[1]
+    rows = json.loads(catalog)
+    assert rows and all(set(row) == {"item_id", "hypothesis_ids"} for row in rows)

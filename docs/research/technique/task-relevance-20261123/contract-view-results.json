@@ -1,0 +1,63 @@
+{
+  "requests": 112,
+  "promotion_gate_passed": false,
+  "runtime_presentation_changes": "reverted",
+  "studies": {
+    "review": {
+      "baseline": {
+        "decisions": 32,
+        "valid": 32,
+        "correct": 32,
+        "errors": []
+      },
+      "candidate": {
+        "decisions": 32,
+        "valid": 32,
+        "correct": 30,
+        "errors": [
+          {
+            "case": "http_missing_admin_baseline",
+            "repetition": 1,
+            "actual": "adequate"
+          },
+          {
+            "case": "http_missing_admin_baseline",
+            "repetition": 0,
+            "actual": "adequate"
+          }
+        ]
+      }
+    },
+    "selection": {
+      "baseline": {
+        "decisions": 24,
+        "valid": 24,
+        "correct": 23,
+        "errors": [
+          {
+            "case": "ssrf-valid",
+            "repetition": 1,
+            "actual": false
+          }
+        ]
+      },
+      "candidate": {
+        "decisions": 24,
+        "valid": 24,
+        "correct": 23,
+        "errors": [
+          {
+            "case": "open-redirects-mismatch",
+            "repetition": 0,
+            "actual": true
+          }
+        ]
+      }
+    }
+  },
+  "limitations": [
+    "Frozen small corpora; not end-to-end or production-context estimates.",
+    "Review baseline varied between separate studies, so do not attribute all score differences to presentation.",
+    "No post-result tuning or selective reruns."
+  ]
+}

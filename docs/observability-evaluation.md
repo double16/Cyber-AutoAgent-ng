@@ -9,6 +9,26 @@ association as inferred. The exporter uses the shared secret-redaction utility, 
 
 ## Architecture Overview
 
+The Docker Compose stack pins Langfuse web and worker to server release 4.83.0.
+This supports the self-hosted Observations API v2 and Python SDK v5. For existing v3 data,
+follow the [upstream upgrade guide](https://langfuse.com/self-hosting/upgrade) before
+starting v4; a fresh installation does not need a v3 data migration.
+
+The application uses Langfuse Python SDK 5.2 and requires server 4.59.0 or newer.
+Evaluation and session export reconstruct traces from Observations API v2, including
+JSON-decoded inputs/outputs and every cursor page. API failures abort the read rather
+than treating partial data as a complete session. Reads cover all retained session history
+by default, with a fixed end time across cursor pages. To narrow an export, specify a UTC window:
+
+```bash
+uv run caa-export-langfuse-session --session-id OPERATION_ID \
+  --from-time 2026-11-01T00:00:00+00:00 --to-time 2026-11-20T23:59:59+00:00 \
+  --output review.yaml
+```
+
+Strands OTLP exports include `x-langfuse-ingestion-version: 4` so observations are
+available through the v2 API without the legacy ingestion delay.
+
 ### Observability Stack
 ```mermaid
 graph LR

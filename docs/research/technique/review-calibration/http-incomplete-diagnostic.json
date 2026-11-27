@@ -1,0 +1,68 @@
+{
+  "kind": "offline_revalidation_of_retained_live_output",
+  "new_model_calls": 0,
+  "validation_error": "Issue authz-interpretation-missing-entitlement references unknown requirement IDs",
+  "available_requirement_ids": [
+    "method"
+  ],
+  "proposed_requirement_ids": [
+    "method",
+    "core:interpretation",
+    "core:operational_sufficiency"
+  ],
+  "critic_findings": {
+    "reason": "The draft misclassifies object selection as an authorization violation without establishing entitlement policy, and it omits required controls and evidence requirements for distinguishing legitimate access from a boundary violation.",
+    "category": "authored_content",
+    "issues": [
+      {
+        "id": "authz-interpretation-missing-entitlement",
+        "category": "authored_content",
+        "criterion_id": "core:interpretation",
+        "material_impact": "The advertised reusable test will label any header-driven object change as an IDOR, causing false positives and undermining operational sufficiency of the method.",
+        "problem": "Draft states changing the selector header alone confirms an IDOR vulnerability and that it is unnecessary to establish whether the same identity is entitled to both objects. This treats object selection as a violation without an established entitlement restriction.",
+        "requested_correction": "Require explicit establishment of the authorization policy and entitlement baseline before labeling a violation, and define the comparison as same identity, same endpoint/operation, selector changed, with evidence that the second object is outside the identity's entitlement.",
+        "requirement_ids": [
+          "method",
+          "core:interpretation",
+          "core:operational_sufficiency"
+        ],
+        "source_urls": [
+          "https://portswigger.net/web-security/access-control/idor"
+        ],
+        "draft_references": [
+          "df57d88e905f7:b17",
+          "df57d88e905f7:b18",
+          "df57d88e905f7:b19"
+        ],
+        "absence_scope": "inspected_passages",
+        "draft_excerpt": "If changing the header changes the returned object, that alone confirms an IDOR vulnerability. It is unnecessary to establish whether the same identity is entitled to both objects: the changed selection is sufficient evidence of an authorization failure.",
+        "passage_ids": [
+          "d1d15aec23f3d9f9bc4e85bd8596a5ff6d1e53458817ebfd57af6f30a35b636a"
+        ],
+        "passages": [
+          {
+            "url": "https://portswigger.net/web-security/access-control/idor",
+            "start": 0,
+            "end": 123
+          }
+        ],
+        "absence_of_support": ""
+      }
+    ],
+    "suggestions": [],
+    "interpretations": [
+      {
+        "draft_references": [
+          "df57d88e905f7:b10",
+          "df57d88e905f7:b12",
+          "df57d88e905f7:b17"
+        ],
+        "prerequisite_or_policy": "API contract identifies a request header as an object selector and an entitlement policy is established via documentation, configuration, or independently known authorized/denied baselines for the test identity.",
+        "legitimate_outcome": "A request with the selector returns an object the test identity is entitled to, and a request with an altered selector either returns an object the identity is also entitled to or is rejected per policy.",
+        "suspected_violation": "With the same identity, endpoint and operation, changing only the selector causes the service to return an object the identity is not entitled to, i.e., bypassing access controls to view records of other customers.",
+        "distinguishing_control": "Baseline request with selector A records status and returned object identity; controlled variation changes only selector to B while retaining identity, endpoint and operation; negative control removes selector; evidence includes contract reference, request pairs, identity label, selector values, response status, returned object identifiers, and timestamps, with explicit entitlement evidence for A and non-entitlement evidence for B."
+      }
+    ],
+    "no_security_checks_reason": ""
+  }
+}

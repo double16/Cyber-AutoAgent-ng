@@ -305,3 +305,30 @@ describe('EventAggregator', () => {
         ]);
     });
 });
+
+it('resets operation state and handles thinking, output and tool lifecycle boundaries', () => {
+  const a = new EventAggregator();
+  expect(a.processEvent({type: 'thinking_end'})).toEqual([]);
+  expect(a.processEvent({type: 'delayed_thinking_start'})).toEqual([{type: 'delayed_thinking_start'}]);
+  expect(a.processEvent({type: 'delayed_thinking_start'})).toEqual([]);
+  expect(a.processEvent({type: 'thinking_end'})).toEqual([{type: 'thinking_end'}]);
+  a.processEvent({type: 'thinking'});
+  const tool = a.processEvent({type: 'tool_start', toolName: 'network', args: {host: 'example'}, tool_id: 'id'});
+  expect(tool[0].type).toBe('thinking_end');
+  expect(tool[1]).toMatchObject({type: 'tool_start', tool_name: 'network'});
+  expect(a.processEvent({type: 'tool_start', tool_id: 'id'})).toEqual([]);
+  expect(a.processEvent({type: 'tool_end', toolId: 'id', toolName: 'network'}).at(-1)).toMatchObject({tool: 'network'});
+  a.processEvent({type: 'thinking'});
+  expect(a.processEvent({type: 'tool_end', toolId: 'unknown'})[0].type).toBe('thinking_end');
+  expect(a.processEvent({type: 'operation_init'})).toEqual([]);
+  expect(a.processEvent({type: 'tool_start', tool_id: 'id'})[0]).toMatchObject({tool_name: '', tool_input: {}});
+  a.processEvent({type: 'progress_update', step: 'phase'});
+  expect(a.processEvent({type: 'tool_output', output: 'result'}).map(e => e.type)).toEqual(['progress_update', 'tool_output']);
+  a.processEvent({type: 'progress_update', step: 2});
+  expect(a.processEvent({type: 'shell_command', command: 'ls'})[0].type).toBe('progress_update');
+  expect(a.processEvent({type: 'output'})).toEqual([]);
+  expect(a.processEvent({type: 'reasoning', content: ' '})).toEqual([]);
+  expect(a.processEvent({type: 'reasoning_delta', content: 'legacy'})).toEqual([]);
+  expect(a.processEvent({type: 'operation_complete'})[0]).toMatchObject({metrics: {}});
+  for (const type of ['operation_terminated', 'operation_finalized']) expect(a.processEvent({type})).toEqual([{type}]);
+});

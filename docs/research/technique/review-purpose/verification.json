@@ -1,0 +1,129 @@
+{
+  "status": "offline_verified_live_not_authorized",
+  "receipt": {
+    "candidate_code_identity": "e731af2b8afc70a37c92b1e893703563d01a73b851499db029f08081babe659a",
+    "subjects": {
+      "human-network": "8541967e20efda3e79b9abf985164de66a9294eb1ef3ef033052bc7a376795d8",
+      "human-filesystem": "87312dcd1019a59718315f74c02aa4bdaea7f2e85a22438471e7497d9ae66365",
+      "http-selector": "8256461295337490dd96397b11569debd5dc46d372e616e7ae92502219197978"
+    },
+    "wire_modes": [
+      "native",
+      "tool"
+    ],
+    "status": "passed"
+  },
+  "outcomes": [
+    {
+      "case": "human-network",
+      "wire_mode": "native",
+      "status": "offline_contract_passed",
+      "counts": {
+        "limit": 21,
+        "requests": 0,
+        "roles": 2
+      },
+      "scripted_model_dispatches": 4
+    },
+    {
+      "case": "human-filesystem",
+      "wire_mode": "native",
+      "status": "offline_contract_passed",
+      "counts": {
+        "limit": 21,
+        "requests": 0,
+        "roles": 4
+      },
+      "scripted_model_dispatches": 4
+    },
+    {
+      "case": "http-selector",
+      "wire_mode": "native",
+      "status": "offline_contract_passed",
+      "counts": {
+        "limit": 21,
+        "requests": 0,
+        "roles": 6
+      },
+      "scripted_model_dispatches": 4
+    },
+    {
+      "case": "human-network",
+      "wire_mode": "tool",
+      "status": "offline_contract_passed",
+      "counts": {
+        "limit": 21,
+        "requests": 0,
+        "roles": 2
+      },
+      "scripted_model_dispatches": 4
+    },
+    {
+      "case": "human-filesystem",
+      "wire_mode": "tool",
+      "status": "offline_contract_passed",
+      "counts": {
+        "limit": 21,
+        "requests": 0,
+        "roles": 4
+      },
+      "scripted_model_dispatches": 4
+    },
+    {
+      "case": "http-selector",
+      "wire_mode": "tool",
+      "status": "offline_contract_passed",
+      "counts": {
+        "limit": 21,
+        "requests": 0,
+        "roles": 6
+      },
+      "scripted_model_dispatches": 4
+    }
+  ],
+  "regressions_passed": 2265,
+  "skipped": 18,
+  "coverage": {
+    "src/modules/techniques/critique.py": {
+      "covered_lines": 448,
+      "num_statements": 453,
+      "percent_covered": 98.12792511700468,
+      "percent_covered_display": "98",
+      "missing_lines": 5,
+      "excluded_lines": 0,
+      "percent_statements_covered": 98.8962472406181,
+      "percent_statements_covered_display": "99",
+      "num_branches": 188,
+      "num_partial_branches": 7,
+      "covered_branches": 181,
+      "missing_branches": 7,
+      "percent_branches_covered": 96.27659574468085,
+      "percent_branches_covered_display": "96"
+    },
+    "src/modules/techniques/review_calibration_offline.py": {
+      "covered_lines": 62,
+      "num_statements": 63,
+      "percent_covered": 97.33333333333333,
+      "percent_covered_display": "97",
+      "missing_lines": 1,
+      "excluded_lines": 0,
+      "percent_statements_covered": 98.41269841269842,
+      "percent_statements_covered_display": "98",
+      "num_branches": 12,
+      "num_partial_branches": 1,
+      "covered_branches": 11,
+      "missing_branches": 1,
+      "percent_branches_covered": 91.66666666666667,
+      "percent_branches_covered_display": "92"
+    }
+  },
+  "ruff": "passed",
+  "new_live_calls": 0,
+  "prior_live_calls": 162,
+  "patch_sha256": "35453cdb38e0bfb5de937bd72862de50aaa7f51335bd0b376147274319dc5102",
+  "live_gate": "Rejected without a new allowance",
+  "limitations": [
+    "Model purpose classification and semantic reasoning remain unverified live.",
+    "Filesystem input context now includes explicit user clarification; this is not the earlier frozen case."
+  ]
+}

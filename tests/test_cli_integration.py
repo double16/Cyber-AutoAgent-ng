@@ -2082,6 +2082,7 @@ def test_cli_deployment_telemetry_and_signal_variants(monkeypatch):
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk")
     cyberautoagent.setup_langfuse_connection(logger, "container")
     assert cyberautoagent.os.environ["OTEL_EXPORTER_OTLP_HEADERS"].startswith("Authorization=Basic")
+    assert "x-langfuse-ingestion-version=4" in cyberautoagent.os.environ["OTEL_EXPORTER_OTLP_HEADERS"]
 
     monkeypatch.setattr(cyberautoagent.traceback, "extract_stack", lambda: [SimpleNamespace(filename="main.py", name="main")])
     thread = SimpleNamespace(start=Mock())

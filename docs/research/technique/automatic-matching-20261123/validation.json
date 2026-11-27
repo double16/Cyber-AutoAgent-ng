@@ -1,0 +1,54 @@
+{
+  "full_suite": {
+    "passed": 8378,
+    "skipped": 47,
+    "deselected": 89,
+    "log": "/tmp/matching-simplification-coverage.log"
+  },
+  "additional_cache_test": "11-test cache run passed after full-suite collection",
+  "focused_delivery_cache_tests": 57,
+  "historical_integrity_and_readiness_combined": 69,
+  "ruff": "passed",
+  "diff_check": "passed",
+  "changed_file_coverage": {
+    "src/modules/agents/hypothesis_context.py": {
+      "line_percent": 99.16,
+      "branch_percent": 95.83
+    },
+    "src/modules/agents/hypothesis_review.py": {
+      "line_percent": 99.04,
+      "branch_percent": 98.35
+    },
+    "src/modules/agents/multi_agent_workflow.py": {
+      "line_percent": 90.76,
+      "branch_percent": 85.03
+    },
+    "src/modules/authentication_requirements.py": {
+      "line_percent": 100.0,
+      "branch_percent": 100.0
+    },
+    "src/modules/prompts/security_interpretation.py": {
+      "line_percent": 100.0,
+      "branch_percent": 100
+    },
+    "src/modules/techniques/delivery.py": {
+      "line_percent": 100.0,
+      "branch_percent": 98.33
+    },
+    "src/modules/techniques/feedback.py": {
+      "line_percent": 99.41,
+      "branch_percent": 97.06
+    },
+    "src/modules/techniques/integration.py": {
+      "line_percent": 95.7,
+      "branch_percent": 93.75
+    },
+    "src/modules/techniques/service.py": {
+      "line_percent": 97.11,
+      "branch_percent": 90.74
+    }
+  },
+  "matching_diagnostic_requests": 53,
+  "simplified_corpus_recheck_requests": 18,
+  "deployment": "not performed"
+}

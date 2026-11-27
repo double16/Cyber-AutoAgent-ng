@@ -206,8 +206,7 @@ class ConfigManager:
         self, model_id: str, region_name: str, provider: str
     ) -> dict[str, Any]:
         """Get configuration for standard (non-thinking) models."""
-        provider_config = self.get_server_config(provider)
-        llm_config = provider_config.llm
+        llm_config = self._generation_defaults(provider, model_id)["llm"]
         max_tokens = min(llm_config.max_tokens, self.get_max_tokens(provider, model_id))
 
         config = {
@@ -263,8 +262,7 @@ class ConfigManager:
 
     def get_local_model_config(self, model_id: str, provider: str) -> dict[str, Any]:
         """Get configuration for local Ollama models."""
-        provider_config = self.get_server_config(provider)
-        llm_config = provider_config.llm
+        llm_config = self._generation_defaults(provider, model_id)["llm"]
         max_tokens = min(llm_config.max_tokens, self.get_max_tokens(provider, model_id))
 
         return {
@@ -330,7 +328,7 @@ class ConfigManager:
         defaults = deepcopy(self._default_configs[provider])
 
         # Apply environment variable overrides
-        defaults = self._apply_environment_overrides(provider, defaults)
+        defaults = self._apply_environment_overrides(provider, defaults, model_id=overrides.get("model_id"))
 
         # Apply function parameter overrides
         defaults.update(overrides)
@@ -420,26 +418,7 @@ class ConfigManager:
         # Resolve host for ollama provider
         host = self.get_ollama_host() if provider == "ollama" else None
 
-        # Build SDK configuration with environment overrides
-        sdk_config_default = SDKConfig()
-        sdk_config = SDKConfig(
-            enable_hooks=overrides.get(
-                "enable_hooks",
-                self.getenv_bool("CYBER_SDK_ENABLE_HOOKS", sdk_config_default.enable_hooks)
-            ),
-            enable_streaming=overrides.get(
-                "enable_streaming",
-                self.getenv_bool("CYBER_SDK_ENABLE_STREAMING", sdk_config_default.enable_streaming)
-            ),
-            conversation_window_size=overrides.get(
-                "conversation_window_size",
-                self.getenv_int("CYBER_CONVERSATION_WINDOW", sdk_config_default.conversation_window_size)
-            ),
-            enable_telemetry=overrides.get(
-                "enable_telemetry",
-                self.getenv_bool("ENABLE_SDK_TELEMETRY", sdk_config_default.enable_telemetry),
-            )
-        )
+        sdk_config = self.get_sdk_config(provider, **overrides)
 
         config = ServerConfig(
             server_type=provider,
@@ -458,6 +437,30 @@ class ConfigManager:
         self._config_cache[cache_key] = config
         return config
 
+    def _validate_provider(self, provider: str) -> None:
+        if provider not in self._default_configs:
+            raise ValueError(f"Unsupported provider type: {provider}")
+
+    def _generation_defaults(self, provider: str, model_id: str | None = None) -> dict[str, Any]:
+        """Apply deterministic model settings before any capability discovery."""
+        self._validate_provider(provider)
+        return self._apply_environment_overrides(
+            provider, deepcopy(self._default_configs[provider]),
+            discover_limits=False, model_id=model_id,
+        )
+
+    def _lightweight_defaults(self, provider: str) -> dict[str, Any]:
+        """Resolve settings without model discovery or embedding fallback requests."""
+        defaults = self._generation_defaults(provider)
+        if provider == "litellm":
+            align_litellm_defaults(defaults, self.env, discover_limits=False)
+        return defaults
+
+    def get_model_id(self, provider: str, model_id: str | None = None) -> str:
+        """Resolve explicit, environment, then provider-default model without discovery."""
+        self._validate_provider(provider)
+        return model_id or self.getenv("CYBER_AGENT_LLM_MODEL") or self._default_configs[provider]["llm"].model_id
+
     def get_llm_config(self, server: str, **overrides) -> LLMConfig:
         """Get LLM configuration for the specified server."""
         server_config = self.get_server_config(server, **overrides)
@@ -465,8 +468,7 @@ class ConfigManager:
 
     def get_embedding_config(self, server: str, **overrides) -> EmbeddingConfig:
         """Get embedding configuration for the specified server."""
-        server_config = self.get_server_config(server, **overrides)
-        return server_config.embedding
+        return self._lightweight_defaults(server)["embedding"]
 
     def get_memory_config(self, server: str, **overrides) -> MemoryConfig:
         """Get memory configuration for the specified server."""
@@ -485,13 +487,31 @@ class ConfigManager:
 
     def get_output_config(self, server: str, **overrides) -> OutputConfig:
         """Get output configuration for the specified server."""
-        server_config = self.get_server_config(server, **overrides)
-        return server_config.output
+        self._validate_provider(server)
+        return self._get_output_config(server, {}, overrides)
 
     def get_sdk_config(self, server: str, **overrides) -> SDKConfig:
         """Get SDK configuration for the specified server."""
-        server_config = self.get_server_config(server, **overrides)
-        return server_config.sdk
+        self._validate_provider(server)
+        sdk_config_default = SDKConfig()
+        return SDKConfig(
+            enable_hooks=overrides.get(
+                "enable_hooks",
+                self.getenv_bool("CYBER_SDK_ENABLE_HOOKS", sdk_config_default.enable_hooks)
+            ),
+            enable_streaming=overrides.get(
+                "enable_streaming",
+                self.getenv_bool("CYBER_SDK_ENABLE_STREAMING", sdk_config_default.enable_streaming)
+            ),
+            conversation_window_size=overrides.get(
+                "conversation_window_size",
+                self.getenv_int("CYBER_CONVERSATION_WINDOW", sdk_config_default.conversation_window_size)
+            ),
+            enable_telemetry=overrides.get(
+                "enable_telemetry",
+                self.getenv_bool("ENABLE_SDK_TELEMETRY", sdk_config_default.enable_telemetry),
+            )
+        )
 
     def get_mcp_config(self, server: str, **overrides) -> MCPConfig:
         """Get MCP configuration for the specified server."""
@@ -621,8 +641,7 @@ class ConfigManager:
 
     def get_qdrant_memory_config(self, server: str, **overrides) -> dict[str, Any]:
         """Return the embedding and Qdrant settings used by semantic memory."""
-        server_config = self.get_server_config(server, **overrides)
-        embedding = server_config.embedding
+        embedding = self.get_embedding_config(server, **overrides)
         return {
             "embedding_provider": server,
             "embedding_model": embedding.model_id,
@@ -669,18 +688,19 @@ class ConfigManager:
         os.environ["CYBER_AGENT_EMBEDDING_MODEL"] = server_config.embedding.model_id
 
     def _apply_environment_overrides(
-        self, _server: str, defaults: dict[str, Any]
+        self, _server: str, defaults: dict[str, Any], *,
+        discover_limits: bool = True, model_id: str | None = None,
     ) -> dict[str, Any]:
         """Apply environment variable overrides to default configuration."""
         llm_cfg = (
             defaults.get("llm") if isinstance(defaults.get("llm"), LLMConfig) else None
         )
 
-        llm_model = self.getenv("CYBER_AGENT_LLM_MODEL")
+        llm_model = model_id or self.getenv("CYBER_AGENT_LLM_MODEL")
         if llm_model and llm_cfg is not None:
             if llm_model != llm_cfg.model_id:
                 logger.info(
-                    "ENV override: CYBER_AGENT_LLM_MODEL=%s replaces config model=%s",
+                    "Model override: selected=%s replaces config model=%s",
                     llm_model,
                     llm_cfg.model_id,
                 )
@@ -717,7 +737,7 @@ class ConfigManager:
                 if max_tokens != llm_cfg.max_tokens:
                     llm_cfg.max_tokens = max_tokens
                     llm_cfg.parameters["max_tokens"] = max_tokens
-            else:
+            elif discover_limits:
                 # apply limit to max tokens so we use the space for input context
                 max_tokens_limit = self.get_max_tokens(llm_cfg.provider.value, llm_cfg.model_id)
                 if 0 < max_tokens_limit < llm_cfg.max_tokens:

@@ -1,0 +1,8 @@
+{
+  "status": "adjudicated",
+  "case": "generate-filesystem",
+  "document_sha256": "78b7b925b8b1faa57d27a9be2da9fb46d67d4381a08d4ad494627d8220ce6ad1",
+  "label": "acceptable_and_useful",
+  "reason": "User judged the document acceptable and useful, beyond previous versions, and preferred its headings, numbered lists and more specific technical language over prose.",
+  "user_statement": "This document is acceptable and useful, beyond previous versions. I like the headings, numbered lists, and more specific technical language vs. prose."
+}

@@ -1,0 +1,146 @@
+{
+  "status": "offline_verified_live_not_authorized",
+  "receipt": {
+    "candidate_code_identity": "4602ecf5bbef8aeba76cec63bf272c0e389a2085460facfb9b72f70064b452cd",
+    "subjects": {
+      "human-network": "8541967e20efda3e79b9abf985164de66a9294eb1ef3ef033052bc7a376795d8",
+      "human-filesystem": "eb86ef4a65478d96d098cc9ea33b15150bb04ffb1f9fbd6530a801cac7d8d536",
+      "http-selector": "8256461295337490dd96397b11569debd5dc46d372e616e7ae92502219197978"
+    },
+    "wire_modes": [
+      "native",
+      "tool"
+    ],
+    "status": "passed"
+  },
+  "outcomes": [
+    {
+      "case": "human-network",
+      "wire_mode": "native",
+      "status": "offline_contract_passed",
+      "counts": {
+        "limit": 21,
+        "requests": 0,
+        "roles": 2
+      },
+      "scripted_model_dispatches": 4
+    },
+    {
+      "case": "human-filesystem",
+      "wire_mode": "native",
+      "status": "offline_contract_passed",
+      "counts": {
+        "limit": 21,
+        "requests": 0,
+        "roles": 4
+      },
+      "scripted_model_dispatches": 4
+    },
+    {
+      "case": "http-selector",
+      "wire_mode": "native",
+      "status": "offline_contract_passed",
+      "counts": {
+        "limit": 21,
+        "requests": 0,
+        "roles": 6
+      },
+      "scripted_model_dispatches": 4
+    },
+    {
+      "case": "human-network",
+      "wire_mode": "tool",
+      "status": "offline_contract_passed",
+      "counts": {
+        "limit": 21,
+        "requests": 0,
+        "roles": 2
+      },
+      "scripted_model_dispatches": 4
+    },
+    {
+      "case": "human-filesystem",
+      "wire_mode": "tool",
+      "status": "offline_contract_passed",
+      "counts": {
+        "limit": 21,
+        "requests": 0,
+        "roles": 4
+      },
+      "scripted_model_dispatches": 4
+    },
+    {
+      "case": "http-selector",
+      "wire_mode": "tool",
+      "status": "offline_contract_passed",
+      "counts": {
+        "limit": 21,
+        "requests": 0,
+        "roles": 6
+      },
+      "scripted_model_dispatches": 4
+    }
+  ],
+  "regressions_passed": 2257,
+  "skipped": 18,
+  "coverage": {
+    "src/modules/techniques/alignment.py": {
+      "covered_lines": 107,
+      "num_statements": 107,
+      "percent_covered": 99.3103448275862,
+      "percent_covered_display": "99",
+      "missing_lines": 0,
+      "excluded_lines": 0,
+      "percent_statements_covered": 100.0,
+      "percent_statements_covered_display": "100",
+      "num_branches": 38,
+      "num_partial_branches": 1,
+      "covered_branches": 37,
+      "missing_branches": 1,
+      "percent_branches_covered": 97.36842105263158,
+      "percent_branches_covered_display": "97"
+    },
+    "src/modules/techniques/critique.py": {
+      "covered_lines": 430,
+      "num_statements": 435,
+      "percent_covered": 98.04878048780488,
+      "percent_covered_display": "98",
+      "missing_lines": 5,
+      "excluded_lines": 0,
+      "percent_statements_covered": 98.85057471264368,
+      "percent_statements_covered_display": "99",
+      "num_branches": 180,
+      "num_partial_branches": 7,
+      "covered_branches": 173,
+      "missing_branches": 7,
+      "percent_branches_covered": 96.11111111111111,
+      "percent_branches_covered_display": "96"
+    },
+    "src/modules/techniques/support_scope.py": {
+      "covered_lines": 1,
+      "num_statements": 1,
+      "percent_covered": 100.0,
+      "percent_covered_display": "100",
+      "missing_lines": 0,
+      "excluded_lines": 0,
+      "percent_statements_covered": 100.0,
+      "percent_statements_covered_display": "100",
+      "num_branches": 0,
+      "num_partial_branches": 0,
+      "covered_branches": 0,
+      "missing_branches": 0,
+      "percent_branches_covered": 100.0,
+      "percent_branches_covered_display": "100"
+    }
+  },
+  "ruff": "passed",
+  "whitespace": "passed",
+  "new_live_calls": 0,
+  "prior_live_calls": 147,
+  "patch_sha256": "1e07a2604d875fbc14b961cc3da143d734b6bbb80bfb5da0b12adbe85fc13270",
+  "live_gate": "Rejected before dispatch without new allowance",
+  "limitations": [
+    "Semantic label agreement is not established by scripted SDK checks.",
+    "No generation or historical-score changes occurred."
+  ]
+}

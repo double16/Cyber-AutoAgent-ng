@@ -1,0 +1,13 @@
+{
+  "file": "tests/techniques/test_knowledge_grounding.py",
+  "controls": [
+    "general generation with one background reference and no per-requirement source calls",
+    "no useful reference blocks readiness",
+    "source-required versions without evidence fail",
+    "source-required quoted policy constraint cannot bypass evidence",
+    "source-required direct lookup without authority blocks authoring",
+    "knowledge-only requirements cannot acquire invented source criteria",
+    "criterion-derived attribution/research/authored repair ownership"
+  ],
+  "scope": "Unit/controller tests, not live semantic evaluations."
+}

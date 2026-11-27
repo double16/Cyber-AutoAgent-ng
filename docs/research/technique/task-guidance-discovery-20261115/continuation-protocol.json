@@ -1,0 +1,25 @@
+{
+  "limit": 30,
+  "model": "muse-glimmer:30b-mlx",
+  "plans": [
+    {
+      "mode": "unknown",
+      "arm": "none"
+    }
+  ],
+  "guidance_sha256": "7f91190f9cc73efb226698bf0bffb086f7144f6f9aa5ee33bebac4289dd32d74",
+  "prior_generation_requests": 100,
+  "total_authorized_requests": 130,
+  "design": "Three opaque behaviors, paired arms, one repeat. Shared case reverses arm order.",
+  "grading": "Fixture-owned classification, cited request evidence, and cited identity/policy discovery records.",
+  "executed_script_sha256": "1d6dc7cd8441e4387c5cf917dc112a93498788528828c41a1099206cd19c9792",
+  "corrected_proposal_is_experiment_input": false,
+  "limits": [
+    "One run per arm/case",
+    "No context-length or seed control",
+    "Synthetic tools, not operation executor",
+    "No retrieval/adoption measurement"
+  ],
+  "authorization": "User explicitly approved up to 30 additional requests to complete the interrupted comparison.",
+  "restart_policy": "Fresh run of the single budget-interrupted case; prior attempt retained. No completed case rerun."
+}

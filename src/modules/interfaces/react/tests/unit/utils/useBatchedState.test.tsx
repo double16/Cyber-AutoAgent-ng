@@ -158,3 +158,21 @@ describe('useBatchedState utilities', () => {
         hook.unmount();
     });
 });
+
+it('supports default batch windows, empty flushes and unmount with pending state/frame work', () => {
+  jest.useFakeTimers();
+  try {
+    const state = renderHook(() => useBatchedState(0));
+    act(() => state.current[2]());
+    act(() => state.current[1](1)); state.unmount();
+    const reducer = renderHook(() => useBatchedReducer((a: number, b: number) => a + b, 0));
+    act(() => {reducer.current[1](2); reducer.current[2]();}); expect(reducer.current[0]).toBe(2); reducer.unmount();
+    const onBatch = jest.fn();
+    const events = renderHook(() => useEventBatcher(onBatch));
+    act(() => events.current.flush()); act(() => events.current.addEvent('event')); events.unmount();
+    expect(onBatch).toHaveBeenCalledWith(['event']);
+    const frames = renderHook(() => useAnimationFrameBatcher(onBatch));
+    act(() => frames.current.flush()); act(() => frames.current.addItem('frame')); frames.unmount();
+    expect(onBatch).toHaveBeenCalledWith(['frame']);
+  } finally {jest.useRealTimers();}
+});

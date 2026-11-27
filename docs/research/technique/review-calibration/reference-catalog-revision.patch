@@ -1,0 +1,99 @@
+--- a/src/modules/techniques/critique.py
++++ b/src/modules/techniques/critique.py
+@@ -91,6 +91,13 @@
+     end: StrictInt = Field(gt=0)
+ 
+ 
++REQUIREMENT_REFERENCE_DESCRIPTION = (
++    "Exact request requirement IDs from reference_fields.requirement_ids.allowed_values only. "
++    "Acceptance-criterion IDs belong in criterion_id, not this list. Do not add or remove prefixes. "
++    "Use [] for an existing-content defect supported by draft_references when no request requirement is cited."
++)
++
++
+ class Issue(BaseModel):
+     model_config = ConfigDict(extra="forbid")
+     id: str = Field(min_length=1, max_length=80, pattern=r"\S")
+@@ -99,7 +106,7 @@
+     material_impact: str = Field(default="", max_length=2000)
+     problem: str = Field(min_length=1, max_length=2000, pattern=r"\S")
+     requested_correction: str = Field(min_length=1, max_length=2000, pattern=r"\S")
+-    requirement_ids: list[str] = Field(max_length=16)
++    requirement_ids: list[str] = Field(max_length=16, description=REQUIREMENT_REFERENCE_DESCRIPTION)
+     source_urls: list[str] = Field(max_length=18)
+     draft_references: list[str] = Field(
+         default_factory=list, max_length=32,
+@@ -140,7 +147,7 @@
+     model_config = ConfigDict(extra="forbid")
+     improvement: str = Field(min_length=1, max_length=2000)
+     draft_references: list[str] = Field(default_factory=list, max_length=32)
+-    requirement_ids: list[str] = Field(default_factory=list, max_length=16)
++    requirement_ids: list[str] = Field(default_factory=list, max_length=16, description=REQUIREMENT_REFERENCE_DESCRIPTION)
+ 
+ 
+ class IssueDisposition(BaseModel):
+@@ -218,7 +225,7 @@
+     problem: str = Field(min_length=1)
+     requested_correction: str = Field(min_length=1)
+     draft_references: list[str] = Field(default_factory=list)
+-    requirement_ids: list[str] = Field(default_factory=list)
++    requirement_ids: list[str] = Field(default_factory=list, description=REQUIREMENT_REFERENCE_DESCRIPTION)
+     issue_ids: list[str] = Field(default_factory=list)
+ 
+ 
+@@ -403,7 +410,13 @@
+                 raise ValueError("Issue identifiers must be unique")
+             seen.add(issue.id)
+             if not set(issue.requirement_ids) <= ids:
+-                raise ValueError(f"Issue {issue.id} references unknown requirement IDs")
++                raise ValueError(
++                    f"Issue {issue.id} references unknown requirement IDs {sorted(set(issue.requirement_ids) - ids)}. "
++                    f"Allowed requirement_ids values: {sorted(ids)}. Copy these exact values without adding "
++                    "or removing prefixes. Acceptance-criterion IDs belong in criterion_id, not requirement_ids. "
++                    "For an existing-content defect with valid draft_references, requirement_ids=[] is permitted; "
++                    "missing-deliverable issues must identify the relevant request requirements."
++                )
+             if not set(issue.source_urls) <= self.texts.keys():
+                 raise ValueError(f"Issue {issue.id} references unknown source URLs")
+             snapshot = ReviewSnapshot(markdown)
+@@ -492,8 +505,8 @@
+         "establish missing overall support. Set absence_scope explicitly. Cite passage_ids returned by lookup; "
+         "legacy offsets must be exact. Similar wording alone is not a defect. "
+         "On correction reuse retained passage IDs or withdraw unsupported issues. A reference error does "
+-        "not itself invalidate a defect: correct IDs using the supplied current requirements, or omit "
+-        "requirement_ids for existing-content issues with valid draft references. "
++        "not itself invalidate a defect: correct IDs using the supplied current requirements, or "
++        "use requirement_ids=[] for existing-content issues with valid draft references. "
+         "Judge whether evidence establishes the defect and whether the requested correction resolves it; "
+         "do not return vague feedback. Return material issues or an empty issues list; Python derives approval. "
+         "Do not require target execution, proof or terminal disposition in reusable guidance. "
+--- a/src/modules/techniques/review_contract.py
++++ b/src/modules/techniques/review_contract.py
+@@ -29,7 +29,13 @@
+                       "kind": row.kind, "origin": "validated_request", "requirement_id": row.id}
+                      for row in requirements]
+         criteria += [{**row, "id": f"restriction:{index}"} for index, row in enumerate(restrictions, 1)]
+-        payload = json.dumps({"acceptance_criteria": criteria}, ensure_ascii=False, sort_keys=True)
++        payload = json.dumps({
++            "acceptance_criteria": criteria,
++            "reference_fields": {
++                "requirement_ids": {"allowed_values": [row.id for row in requirements], "empty_list_allowed": True},
++                "criterion_id": {"allowed_values": [row["id"] for row in criteria]},
++            },
++        }, ensure_ascii=False, sort_keys=True)
+         return cls(payload, hashlib.sha256(payload.encode()).hexdigest(), frozenset(row["id"] for row in criteria))
+ 
+     @classmethod
+@@ -44,6 +50,12 @@
+     def render(self):
+         return (
+             f"Frozen acceptance contract sha256={self.identifier}\n{self.payload}\n"
++            "Reference fields have separate catalogs: requirement_ids uses only the exact request requirement "
++            "IDs in reference_fields.requirement_ids.allowed_values. criterion_id uses one exact acceptance "
++            "criterion from reference_fields.criterion_id.allowed_values. Do not copy an acceptance criterion "
++            "into requirement_ids or add/remove a prefix. Use requirement_ids=[] for an existing-content "
++            "defect supported by draft_references when no request requirement is cited. Missing-deliverable "
++            "defects still require the relevant request requirement IDs. These rules also apply on correction.\n"
+             "Only these criteria can justify a blocker. Identify material impact on the advertised method; "
+             "optional elaboration belongs in suggestions. New claims introduced by the draft can violate "
+             "existing criteria; do not invent new mandatory deliverables or silently broaden scope.\n"

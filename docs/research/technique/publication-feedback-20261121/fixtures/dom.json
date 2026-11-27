@@ -1,0 +1,229 @@
+{
+  "case": "dom",
+  "fixture_provenance": "Sanitized recorded publications and delivered method; replay outcomes are reconstructed, not execution evidence.",
+  "current": {
+    "schema_version": "hypothesis_set_v1",
+    "operation_id": "OP_FIXTURE",
+    "producer_task_uid": "84d5868a-c385-4f99-a280-80d8b075067f",
+    "snapshot_hash": "5acf01af532bf695126f22cbe4cceffab95225e4779164e06e74bbd06c903656",
+    "source_refs": [
+      "artifact:artifacts/task_evidence/1b187a1a333a329a/dcc5e520-00fc-4483-9e9a-ffb6847388e3-inventory_manifest-731a2040ecdfc49c.json"
+    ],
+    "subjects": [
+      {
+        "item_id": "endpoint-2a3345ff16fba327",
+        "disposition": "hypotheses_supplied",
+        "reason": "",
+        "hypotheses": [
+          {
+            "hypothesis_id": "f218ff585661d8511d2ddeb3",
+            "authentication_requirement": {
+              "comparison": "none",
+              "roles": []
+            },
+            "observed_basis": "Endpoint GET observed with HTTP 200 text/html SPA shell. Client bundle artifacts show URLSearchParams read of maptitle via new URL(window.location.href) and extraction of e.get('maptitle') in component eN: const eN = () => { const { searchParams: e } = new URL(window.location.href); return e.get(\"maptitle\"); }; _Component20 calls eN and passes result as mapTitle prop to JT: const e = eN(); ... return <...><JT mapTitle={e} /></...>. JT component uses e.mapTitle in an unsafe DOM sink via outerHTML template literal: r.outerHTML = `<iframe class=\"mb-4 mb-lg-0\" title=\"${e.mapTitle || \"\"}\" src=\"...\">`. This links maptitle query parameter read to DOM sink via outerHTML interpolation. SPA route list includes /?maptitle=map. No server-side handling evidence observed for maptitle.",
+            "preconditions": [
+              "Server serves root SPA shell for GET / with HTTP 200",
+              "Client bundle executes and reads window.location query parameters via URLSearchParams",
+              "Client code maps maptitle to a DOM sink via outerHTML interpolation in JT component"
+            ],
+            "suspected_mechanism": "DOM-based reflected XSS via client-side reading of maptitle query parameter and insertion into DOM via outerHTML template literal without sanitization",
+            "attacker_controlled_input": "http://target.example/?maptitle=<payload>",
+            "safe_test_steps": [
+              "Request GET http://target.example/?maptitle=test-canary and capture response",
+              "Request with benign canary value and inspect rendered DOM for presence of canary in iframe title",
+              "Request with encoded payload and compare source vs rendered DOM to confirm interpolation via outerHTML",
+              "Verify source mapping to URLSearchParams read in eN and outerHTML sink in JT"
+            ],
+            "positive_expectations": [
+              "Client reads maptitle from URL and writes value into DOM via outerHTML template literal leading to script execution in browser context",
+              "Client renders maptitle value in iframe title attribute without sanitization"
+            ],
+            "negative_expectations": [
+              "Server returns static SPA shell without reflecting maptitle into HTML source",
+              "Client reads parameter but does not render it",
+              "Parameter value is encoded or sanitized before DOM insertion"
+            ],
+            "required_evidence": [
+              "Request/response showing server response for GET / with query maptitle",
+              "Rendered DOM snapshot showing maptitle value inserted into iframe title via outerHTML",
+              "Source mapping confirming URLSearchParams usage in eN and outerHTML sink in JT"
+            ],
+            "supporting_refs": [
+              "artifact:artifacts/get_inventory_item_20261121_154744_e83352.artifact.log",
+              "artifact:artifacts/bundles/index-quWo6y2l.webcrack.js",
+              "artifact:artifacts/bundles/index-quWo6y2l_extraction.json",
+              "artifact:artifacts/client_routes.json"
+            ],
+            "research_refs": [
+              "artifact:artifacts/get_technique_20261121_161855_be8009.artifact.log"
+            ]
+          }
+        ]
+      },
+      {
+        "item_id": "parameter-22bf8547d8210229",
+        "disposition": "hypotheses_supplied",
+        "reason": "",
+        "hypotheses": [
+          {
+            "hypothesis_id": "93df27cd1a653758dd264c75",
+            "authentication_requirement": {
+              "comparison": "none",
+              "roles": []
+            },
+            "observed_basis": "Parameter maptitle linked to endpoint-2a3345ff16fba327 with GET inferred provenance. Client bundle shows URLSearchParams read via new URL(window.location.href) and e.get('maptitle') in component eN: const eN = () => { const { searchParams: e } = new URL(window.location.href); return e.get(\"maptitle\"); }; _Component20 calls eN and passes result as mapTitle prop to JT. JT component uses e.mapTitle in unsafe DOM sink via outerHTML template literal: r.outerHTML = `<iframe class=\"mb-4 mb-lg-0\" title=\"${e.mapTitle || \"\"}\" src=\"...\">`. This links maptitle query parameter read to DOM sink via outerHTML interpolation. SPA route list includes /?maptitle=map. No server-side reflection evidence observed.",
+            "preconditions": [
+              "Server serves root page for GET with query string",
+              "Client executes bundle and reads URLSearchParams",
+              "Client maps maptitle to DOM sink via outerHTML interpolation in JT component"
+            ],
+            "suspected_mechanism": "DOM-based reflected XSS via query parameter maptitle read client-side and inserted into DOM via outerHTML without sanitization",
+            "attacker_controlled_input": "maptitle query parameter value",
+            "safe_test_steps": [
+              "Request GET with maptitle canary and capture response",
+              "Inspect rendered DOM for canary presence in iframe title",
+              "Compare source vs rendered output to confirm interpolation via outerHTML",
+              "Verify URLSearchParams usage in eN and outerHTML sink in JT"
+            ],
+            "positive_expectations": [
+              "maptitle value is read from URL and inserted into DOM via outerHTML leading to script execution",
+              "maptitle value appears in iframe title attribute without encoding"
+            ],
+            "negative_expectations": [
+              "Server does not reflect maptitle into HTML or API response",
+              "Client reads parameter but does not render it",
+              "Parameter value is encoded or sanitized before DOM insertion"
+            ],
+            "required_evidence": [
+              "Request/response showing server handling of maptitle",
+              "Rendered DOM showing maptitle value in iframe title",
+              "Source mapping confirming URLSearchParams usage and outerHTML sink"
+            ],
+            "supporting_refs": [
+              "artifact:artifacts/get_inventory_item_20261121_154751_2665b6.artifact.log",
+              "artifact:artifacts/bundles/index-quWo6y2l.webcrack.js",
+              "artifact:artifacts/bundles/index-quWo6y2l_extraction.json"
+            ],
+            "research_refs": [
+              "artifact:artifacts/get_technique_20261121_161855_be8009.artifact.log"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "previous": {
+    "schema_version": "hypothesis_set_v1",
+    "operation_id": "OP_FIXTURE",
+    "producer_task_uid": "84d5868a-c385-4f99-a280-80d8b075067f",
+    "snapshot_hash": "5acf01af532bf695126f22cbe4cceffab95225e4779164e06e74bbd06c903656",
+    "source_refs": [
+      "artifact:artifacts/task_evidence/1b187a1a333a329a/dcc5e520-00fc-4483-9e9a-ffb6847388e3-inventory_manifest-731a2040ecdfc49c.json"
+    ],
+    "subjects": [
+      {
+        "item_id": "endpoint-2a3345ff16fba327",
+        "disposition": "hypotheses_supplied",
+        "reason": "",
+        "hypotheses": [
+          {
+            "hypothesis_id": "bd5e5190e64e72b2dc652d9c",
+            "authentication_requirement": {
+              "comparison": "none",
+              "roles": []
+            },
+            "observed_basis": "Endpoint GET observed with HTTP 200 text/html SPA shell. Client bundle artifacts show URLSearchParams read of maptitle via new URL(window.location.href) and extraction of e.get('maptitle') in component eN. SPA route list includes /?maptitle=map. No server-side handling evidence observed for maptitle.",
+            "preconditions": [
+              "Server serves root SPA shell for GET / with HTTP 200",
+              "Client bundle executes and reads window.location query parameters",
+              "Client code maps maptitle to a DOM sink"
+            ],
+            "suspected_mechanism": "DOM-based reflected XSS via client-side reading of maptitle query parameter and insertion into DOM without sanitization",
+            "attacker_controlled_input": "http://target.example/?maptitle=<payload>",
+            "safe_test_steps": [
+              "Request GET http://target.example/?maptitle=test-canary and capture response",
+              "Request with benign canary value and inspect rendered DOM for presence of canary",
+              "Request with encoded payload and compare source vs rendered DOM",
+              "Verify source mapping to URLSearchParams read and DOM sink"
+            ],
+            "positive_expectations": [
+              "Client reads maptitle from URL and writes value into DOM via unsafe sink such as innerHTML/document.write, leading to script execution in browser context",
+              "Client renders maptitle value in page title or visible element without sanitization"
+            ],
+            "negative_expectations": [
+              "Server returns static SPA shell without reflecting maptitle into HTML source",
+              "Client renders page without inserting URL parameter into DOM",
+              "Parameter ignored by client routing"
+            ],
+            "required_evidence": [
+              "Request/response showing server response for GET / with query maptitle",
+              "Rendered DOM snapshot showing maptitle value inserted",
+              "Source mapping confirming URLSearchParams usage and DOM sink type"
+            ],
+            "supporting_refs": [
+              "artifact:artifacts/get_inventory_item_20261121_154744_e83352.artifact.log",
+              "artifact:artifacts/bundles/index-quWo6y2l.webcrack.js",
+              "artifact:artifacts/bundles/index-quWo6y2l_extraction.json",
+              "artifact:artifacts/client_routes.json"
+            ],
+            "research_refs": [
+              "artifact:artifacts/get_technique_20261121_161855_be8009.artifact.log"
+            ]
+          }
+        ]
+      },
+      {
+        "item_id": "parameter-22bf8547d8210229",
+        "disposition": "hypotheses_supplied",
+        "reason": "",
+        "hypotheses": [
+          {
+            "hypothesis_id": "137ce90d0db826d3d1de6ec3",
+            "authentication_requirement": {
+              "comparison": "none",
+              "roles": []
+            },
+            "observed_basis": "Parameter maptitle linked to endpoint-2a3345ff16fba327 with GET inferred provenance. Client bundle shows URLSearchParams read via new URL(window.location.href) and e.get('maptitle') in component eN. SPA route list includes /?maptitle=map. No server-side reflection evidence observed.",
+            "preconditions": [
+              "Server serves root page for GET with query string",
+              "Client executes bundle and reads URLSearchParams",
+              "Client maps maptitle to DOM sink"
+            ],
+            "suspected_mechanism": "DOM-based reflected XSS via query parameter maptitle read client-side and inserted into DOM without sanitization",
+            "attacker_controlled_input": "maptitle query parameter value",
+            "safe_test_steps": [
+              "Request GET with maptitle canary and capture response",
+              "Inspect rendered DOM for canary presence",
+              "Compare source vs rendered output",
+              "Verify URLSearchParams usage and DOM sink"
+            ],
+            "positive_expectations": [
+              "maptitle value is read from URL and inserted into DOM via unsafe sink leading to script execution",
+              "maptitle value appears in page title or visible element without encoding"
+            ],
+            "negative_expectations": [
+              "Server does not reflect maptitle into HTML or API response",
+              "Client reads parameter but does not render it",
+              "Parameter value is encoded or sanitized before DOM insertion"
+            ],
+            "required_evidence": [
+              "Request/response showing server handling of maptitle",
+              "Rendered DOM showing maptitle value",
+              "Source mapping confirming sink type"
+            ],
+            "supporting_refs": [
+              "artifact:artifacts/get_inventory_item_20261121_154751_2665b6.artifact.log",
+              "artifact:artifacts/bundles/index-quWo6y2l.webcrack.js",
+              "artifact:artifacts/bundles/index-quWo6y2l_extraction.json"
+            ],
+            "research_refs": [
+              "artifact:artifacts/get_technique_20261121_161855_be8009.artifact.log"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "guidance": "# DOM-based reflected XSS via URLSearchParams hypothesis generation\n\n## Phase alignment\n**Phase:** hypothesis_generation\n**Objective:** Form plausible hypotheses with known prerequisites, explicit assumptions and concrete future supporting or refuting checks. Unknown target conditions become future validation needs. No execution is performed.\n\n## Scope definition\n\n### Evidence present for hypothesis generation\n- Observation that client JavaScript reads `location.search` via `URLSearchParams`.\n- Observation that extracted value is written to a DOM sink.\n\n### Evidence absent\n- Whether the specific parameter name is used.\n- Whether decoding, trimming or validation occurs before sink.\n- Whether the sink is HTML-parsing, script-evaluating or URL-context.\n- Whether browser URL-encoding of `location.search` neutralizes the payload.\n- Whether Content Security Policy or Trusted Types block execution.\n\n## Hypothesis formulation template\n\nFor each hypothesis document:\n\n1. Hypothesis statement\n2. Known technical prerequisites summary with status [Supported / Refuted / Unknown]\n3. Prerequisite status table with Category; Status; Evidence; Future Check\n4. Explicit assumptions checklist with Unverified tag, review date and rationale\n5. Unknowns requiring future observation\n6. Legitimate behavior vs boundary violation distinction\n7. Baseline vs controlled variation and distinguishing evidence\n8. Future supporting checks\n9. Future refuting checks\n10. Confidence rating with rationale\n\n## Hypothesis 1: URLSearchParams \u2192 innerHTML HTML-parsing sink\n\n### Hypothesis statement\nA query parameter read via `URLSearchParams` from `location.search` is assigned to `element.innerHTML` without sanitization, enabling DOM-based reflected XSS.\n\n### Known prerequisites\n\n| Category | Status | Evidence | Future Check |\n|---|---|---|---|\n| Source readable via URLSearchParams | Unknown | Code pattern not confirmed | Search page JavaScript for `new URLSearchParams(location.search)` or `URLSearchParams` |\n| Parameter reflected to DOM | Unknown | No observation | Inject unique alphanumeric token and search DOM via DevTools |\n| Sink is innerHTML / insertAdjacentHTML / document.write | Unknown | No observation | Search JavaScript for assignments to `.innerHTML`, `.outerHTML`, `insertAdjacentHTML`, `document.write` |\n| No client-side sanitization | Unknown | No observation | Trace data flow from URLSearchParams.get to sink for encode/escape |\n| Browser decodes location.search before URLSearchParams | Unknown | General behavior not confirmed for target | Confirm via console evaluation of `new URLSearchParams(location.search).get('p')` |\n| CSP / Trusted Types block | Unknown | No observation | Inspect response headers for `Content-Security-Policy` and `Trusted-Types` |\n\n### Explicit assumptions\n- `URLSearchParams` is used on the page to parse `location.search`. [Unverified] Review date: TBD. Rationale: Required for source.\n- The sink is reached on initial page load without user interaction. [Unverified] Review date: TBD. Rationale: Needed for reflected trigger.\n- No Trusted Types policy is enforced for innerHTML. [Unverified] Review date: TBD. Rationale: Enforcement would block parser sink.\n\n### Unknowns\n- Exact parameter name used.\n- Whether value is concatenated with other strings.\n- Whether the sink is created dynamically after load.\n\n### Legitimate behavior vs boundary violation\n- Legitimate: Token appears as escaped text or is not rendered.\n- Boundary violation: Token creates executable DOM nodes, e.g., `<b>marker</b>` renders as bold element.\n\n### Baseline vs controlled variation\n- Baseline: Load page with neutral query `?p=abc123`. Record DOM and network.\n- Variation: Load page with `?p=domx-test-7a4c` and inspect if token appears inside element rendered by innerHTML.\n- Distinguishing evidence: Token present in DOM tree but absent from raw HTTP response.\n\n### Future supporting checks\n- Search all scripts for `URLSearchParams` and map `get` calls to variable names.\n- Use DevTools Sources `Ctrl+Shift+F` to find source variable usage and set breakpoint before sink assignment.\n- Inject unique token `domx-test-7a4c` and verify presence in DOM via `document.querySelectorAll('*')` text search.\n- If token found in innerHTML assignment, test with inert marker `<b>domx-marker</b>` and observe DOM creation, not execution.\n\n### Future refuting checks\n- Confirm sink uses `textContent` instead of `innerHTML`.\n- Find sanitization library call between source and sink.\n- Observe that `URLSearchParams` value is only logged or sent to server.\n\n### Confidence rating\nLow. Multiple Unknown prerequisites and no source confirmation yet.\n\n## Hypothesis 2: URLSearchParams \u2192 document.write parser sink\n\n### Hypothesis statement\nA query parameter extracted with `URLSearchParams` is passed to `document.write` or `document.writeln`, causing HTML parsing of attacker-controlled data.\n\n### Known prerequisites\n\n| Category | Status | Evidence | Future Check |\n|---|---|---|---|\n| Source via URLSearchParams | Unknown | Pattern not confirmed | Static code search for `URLSearchParams` |\n| Sink is document.write | Unknown | No observation | Search scripts for `document.write` |\n| Write occurs during parsing phase | Unknown | Timing unknown | Check call stack location; document.write after load behaves differently |\n| No encoding applied | Unknown | No observation | Inspect code between extraction and write |\n| CSP blocks inline | Unknown | No observation | Check `Content-Security-Policy` for script-src restrictions |\n\n### Explicit assumptions\n- `document.write` is executed synchronously during page load. [Unverified] Review date: TBD. Rationale: Timing affects parsing.\n- The written content includes the raw parameter value. [Unverified] Review date: TBD. Rationale: Needed for reflection.\n\n### Unknowns\n- Whether surrounding context requires tag closure.\n- Whether write is conditional on parameter presence.\n\n### Legitimate behavior vs boundary violation\n- Legitimate: Written content is static or escaped.\n- Boundary violation: Written content creates new DOM elements from parameter data.\n\n### Future supporting checks\n- Locate `document.write` call and trace argument origin to `URLSearchParams.get`.\n- Inject token `domx-test-7a4c` and capture via DevTools console after load.\n- Review source for template literals concatenating parameter.\n\n### Future refuting checks\n- `document.write` is used only for static assets.\n- Value is passed through `encodeURIComponent` before write.\n\n### Confidence rating\nLow. Sink timing and encoding unknown.\n\n## Hypothesis 3: URLSearchParams \u2192 JavaScript-evaluating sink\n\n### Hypothesis statement\nA query parameter read via `URLSearchParams` is concatenated into a string passed to `eval`, `new Function`, `setTimeout(string)`, or similar JavaScript-evaluating sink.\n\n### Known prerequisites\n\n| Category | Status | Evidence | Future Check |\n|---|---|---|---|\n| Source via URLSearchParams | Unknown | | Search for URLSearchParams usage |\n| Sink is eval-like | Unknown | | Search for `eval`, `Function`, `setTimeout` with string arg |\n| Data flow from source to sink | Unknown | | Debugger trace from get to sink |\n| CSP unsafe-eval allowed | Unknown | | Check CSP header for `unsafe-eval` |\n\n### Explicit assumptions\n- String argument is not validated. [Unverified] Review date: TBD. Rationale: Validation would prevent execution.\n- Sink is reachable via crafted query. [Unverified] Review date: TBD. Rationale: Needed for trigger.\n\n### Unknowns\n- Whether argument is wrapped in object property.\n- Whether CSP `unsafe-eval` is blocked.\n\n### Legitimate behavior vs boundary violation\n- Legitimate: Parameter is used as data only.\n- Boundary violation: Parameter string is evaluated as code in browser.\n\n### Future supporting checks\n- Set breakpoint on sink and inspect argument value with crafted query using inert marker.\n- Check CSP headers for `unsafe-eval`.\n\n### Future refuting checks\n- Sink receives only static code.\n- Argument is passed as function reference, not string.\n\n### Confidence rating\nLow. Eval sinks are common but confirmation needed.\n\n## Hypothesis 4: URLSearchParams \u2192 attribute context sink\n\n### Hypothesis statement\nParameter value from `URLSearchParams` is written into an element attribute, e.g., `href`, `src`, `onerror`, enabling DOM-based XSS via attribute context.\n\n### Known prerequisites\n\n| Category | Status | Evidence | Future Check |\n|---|---|---|---|\n| Source via URLSearchParams | Unknown | | Code search |\n| Attribute assignment via DOM property or setAttribute | Unknown | | Search for `.href =`, `.src =`, `setAttribute` |\n| No attribute encoding | Unknown | | Inspect assignment code |\n\n### Explicit assumptions\n- Attribute is reflected verbatim. [Unverified] Review date: TBD. Rationale: Needed for breakout.\n- Browser will execute event handler attribute. [Unverified] Review date: TBD. Rationale: Needed for impact.\n\n### Unknowns\n- Exact attribute name.\n- Whether value is URL-encoded.\n\n### Legitimate behavior vs boundary violation\n- Legitimate: Attribute value is escaped or used as data.\n- Boundary violation: Attribute value changes element behavior, e.g., creates new element with different attribute.\n\n### Future supporting checks\n- Inject token `domx-test-7a4c` and inspect attribute value in Elements panel.\n- Trace assignment from URLSearchParams.get to property set.\n\n### Future refuting checks\n- Value is assigned to `textContent` only.\n- Attribute value is passed through `encodeURIComponent`.\n\n### Confidence rating\nLow. Attribute context requires precise mapping.\n\n## General future validation steps to establish unknown conditions\n\n1. Source confirmation\n- Open page, run in console search for `URLSearchParams`.\n- Identify parameter name by inspecting `URLSearchParams` get calls.\n\n2. Reflection confirmation\n- Choose unique token `domx-test-7a4c`.\n- Load `?p=domx-test-7a4c` and search DOM via DevTools `Ctrl+F` for token.\n- Compare raw HTTP response vs final DOM to confirm client-side reflection.\n\n3. Sink identification\n- Use DevTools Sources search for sink names.\n- Set breakpoint on sink assignment and inspect variable provenance.\n\n4. Encoding and sanitization check\n- Inject characters `< > \" ' &`.\n- Observe if characters appear raw in DOM or are escaped.\n\n5. Policy checks\n- Inspect response headers for `Content-Security-Policy` and `Trusted-Types`.\n- Note browser differences in URL-encoding of `location.search`.\n\n## Controls and limitations\n\n- Do not execute active payloads without authorization.\n- Use harmless markers and inert content for future checks.\n- Preserve uncertainty until distinguishing evidence is collected.\n- Source coverage is limited to URLSearchParams read and parser sinks; other sources and sinks remain future checks."
+}

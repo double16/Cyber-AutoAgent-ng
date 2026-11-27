@@ -1,0 +1,175 @@
+--- a/src/modules/techniques/critique.py
++++ b/src/modules/techniques/critique.py
+@@ -5,7 +5,7 @@
+ from bisect import bisect_right
+ from typing import Literal
+ 
+-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StrictBool, StrictInt
++from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StrictBool, StrictInt, model_validator
+ from strands import tool
+ 
+ from modules.techniques.alignment import REVIEW_GUIDANCE
+@@ -137,8 +137,12 @@
+     absence_of_support: str = Field(default="", max_length=2000)
+ 
+ 
++CheckPurpose = Literal["prerequisite", "legitimate_behavior", "boundary_violation"]
++
++
+ class Interpretation(BaseModel):
+     model_config = ConfigDict(extra="forbid")
++    check_purpose: CheckPurpose | None = None
+     draft_references: list[str] = Field(min_length=1)
+     prerequisite_or_policy: str = Field(
+         min_length=1, description="Actual draft prerequisite or policy, including how unknown policy is established. "
+@@ -219,6 +223,13 @@
+     material_impact: str = Field(min_length=1, max_length=2000)
+ 
+ 
++class ClassifiedInterpretation(Interpretation):
++    check_purpose: CheckPurpose = Field(
++        description="Classify what the draft actually claims. Do not downgrade a misleading violation "
++        "label into legitimate behavior; report that defect. Split mixed checks when needed.",
++    )
++
++
+ class CriticFindings(BaseModel):
+     """New model-facing contract; Python owns the publication decision."""
+ 
+@@ -228,7 +239,7 @@
+     category: Category = "authored_content"
+     issues: list[BlockingIssue] = Field(default_factory=list, max_length=32)
+     suggestions: list[Suggestion] = Field(default_factory=list, max_length=16)
+-    interpretations: list[Interpretation] = Field(default_factory=list, max_length=64)
++    interpretations: list[ClassifiedInterpretation] = Field(default_factory=list, max_length=64)
+     no_security_checks_reason: str = Field(default="", max_length=2000)
+ 
+     def critique(self) -> Critique:
+@@ -248,6 +259,7 @@
+ 
+ class InterpretationReview(BaseModel):
+     model_config = ConfigDict(extra="forbid")
++    check_purpose: CheckPurpose | None = None
+     interpretation_index: StrictInt = Field(ge=0)
+     draft_references: list[str] = Field(min_length=1)
+     permitted_counterexample: str = Field(
+@@ -256,18 +268,18 @@
+         "behavior checks, explain that no violation is claimed and counterexample analysis is not applicable. "
+         "If impossible for a boundary claim, explain the established policy that excludes it.",
+     )
+-    counterexample_matches_check: StrictBool = Field(
++    counterexample_matches_check: StrictBool | None = Field(
+         description="Does the policy-compliant scenario satisfy BOTH the check's explicit prerequisites "
+         "and the exact observation labeled suspicious? Do not infer prerequisites from expected outcomes "
+         "or unknown policy. Authorized access is not a counterexample to an observation explicitly "
+-        "requiring missing entitlements. Use false for prerequisite or legitimate-behavior checks. "
++        "requiring missing entitlements. Use null for classified prerequisite or legitimate-behavior checks. "
+         "Answer this separately from the critic verdict.",
+     )
+-    control_excludes_counterexample: StrictBool = Field(
++    control_excludes_counterexample: StrictBool | None = Field(
+         description="Does an actual procedural control exclude this same-observation permitted scenario? "
+         "Selector influence, an outcome label, hypothetical missing authorization, or a distant caveat "
+         "does not establish exclusion. True requires cited body control steps and an explanation "
+-        "of the distinction; unknown policy cannot default to denial. Use false for checks that do "
++        "of the distinction; unknown policy cannot default to denial. Use null for classified checks that do "
+         "not claim a boundary violation; do not require a discriminator against legitimate behavior.",
+     )
+     control_references: list[str] = Field(
+@@ -290,6 +302,21 @@
+     )
+ 
+ 
++    @model_validator(mode="after")
++    def validate_purpose_fields(self):
++        if self.check_purpose in {"prerequisite", "legitimate_behavior"}:
++            if (self.counterexample_matches_check is not None or self.control_excludes_counterexample is not None
++                    or self.actual_discriminator or self.control_references):
++                raise ValueError("Non-boundary checks require null counterexample judgments and empty control fields")
++        elif self.counterexample_matches_check is None or self.control_excludes_counterexample is None:
++            raise ValueError("Boundary or legacy-unclassified checks require boolean counterexample judgments")
++        return self
++
++
++class ClassifiedInterpretationReview(InterpretationReview):
++    check_purpose: CheckPurpose
++
++
+ class IssueAssessment(BaseModel):
+     model_config = ConfigDict(
+         extra="forbid", str_strip_whitespace=True,
+@@ -322,6 +349,7 @@
+ 
+ 
+ class AssessorFindings(IssueAssessment):
++    interpretation_reviews: list[ClassifiedInterpretationReview] = Field(default_factory=list)
+     findings: list[MaterialAssessmentFinding] = Field(
+         default_factory=list, description="Empty when critic_supported is true; otherwise referenced material "
+         "disagreements tied to the frozen acceptance criteria, not optional elaboration.",
+@@ -519,7 +547,8 @@
+         "target execution or fixed payloads. Assess those actual checks; methodology framing alone "
+         "does not justify omitting interpretations. A prerequisite step need not itself claim a violation. "
+         "If there are no security-relevant checks, explain that in no_security_checks_reason; otherwise "
+-        "leave that reason empty. Return interpretations for every security-relevant check: draft_references, "
++        "leave that reason empty. Return interpretations for every security-relevant check: check_purpose, "
++        "draft_references, "
+         "prerequisite_or_policy, legitimate_outcome, suspected_violation and distinguishing_control. "
+         "Interpretation distinguishing_control may summarize actual draft steps with draft references. "
+         "Both roles may faithfully summarize actual steps with current body references; do not invent controls. "
+@@ -612,7 +641,8 @@
+                     "is available in this pass. That comparison is a later, separate task.\n"
+                     "For prerequisite or legitimate-behavior checks, assess accuracy without inventing a "
+                     "violation. Explain that counterexample analysis is not applicable and set both "
+-                    "counterexample booleans false. For an actual boundary-violation claim, hold its explicit "
++                    "counterexample judgments null with empty discriminator/control references. Classify each check "
++                    "using check_purpose. For an actual boundary-violation claim, hold its explicit "
+                     "prerequisites and exact suspicious observation constant. Write that observation, a "
+                     "policy-compliant scenario with the SAME observation, "
+                     "whether the scenario actually satisfies the prerequisites and observation, and the "
+@@ -639,6 +669,9 @@
+                     "Independently discovered omitted checks belong in findings with current draft or "
+                     "requirement references; never invent interpretation indices for them. "
+                     "For EACH critic interpretation return an interpretation_reviews row, indexed from zero. "
++                    "Classify check_purpose independently from the actual draft; a classification disagreement "
++                    "requires critic_supported=false and referenced findings. Never downgrade a misleading "
++                    "violation label merely to avoid counterexample analysis. "
+                     "For an actual violation claim: Construct a concrete permitted counterexample to the exact "
+                     "suspicious observation, then "
+                     "if none can satisfy its explicit conditions, explain why and set "
+@@ -647,7 +680,8 @@
+                     "cite actual body control steps in control_references and explain them in actual_discriminator; use the "
+                     "empty string if absent or not applicable. Python resolves cited body records, not exact "
+                     "wording; judge their meaning independently. For prerequisite or legitimate-behavior "
+-                    "checks, explain no violation is claimed and set both counterexample booleans false. "
++                    "checks, classify check_purpose, explain no violation is claimed and set both counterexample "
++                    "judgments null with empty discriminator/control references. "
+                     "Paraphrased critic interpretations and reviewer instructions are not draft evidence. "
+                     "For example, own-origin JavaScript can read "
+                     "its own storage, an unexpired bearer credential can authorize multiple requests, and an "
+@@ -738,6 +772,9 @@
+                         for row in reviews:
+                             if not set(row.draft_references) <= snapshot.values.keys():
+                                 raise ValueError("Interpretation review requires valid draft references")
++                            declared = candidate.interpretations[row.interpretation_index].check_purpose
++                            if declared is not None and declared != row.check_purpose and assessment.approved:
++                                raise ValueError("Purpose disagreement requires referenced disagreement findings")
+                             resolved_control = snapshot.resolve_control(
+                                 row.actual_discriminator, row.draft_references, row.control_references,
+                             )
+--- a/src/modules/techniques/review_calibration_offline.py
++++ b/src/modules/techniques/review_calibration_offline.py
+@@ -34,12 +34,12 @@
+         reason = "Offline transport/schema test only; no semantic judgment"
+         if "critic_supported" in properties:
+             return {"critic_supported": True, "reason": reason, "findings": [], "interpretation_reviews": [{
+-                "interpretation_index": 0, "draft_references": [self.reference],
++                "check_purpose": "boundary_violation", "interpretation_index": 0, "draft_references": [self.reference],
+                 "permitted_counterexample": reason, "counterexample_matches_check": False,
+                 "control_excludes_counterexample": False, "actual_discriminator": "", "critic_correct": True,
+             }]}
+         result = {"reason": reason, "issues": [], "interpretations": [{
+-            "draft_references": [self.reference], "prerequisite_or_policy": reason,
++            "check_purpose": "boundary_violation", "draft_references": [self.reference], "prerequisite_or_policy": reason,
+             "legitimate_outcome": reason, "suspected_violation": reason, "distinguishing_control": reason,
+         }], "no_security_checks_reason": ""}
+         if "approved" in properties:

@@ -1,0 +1,20 @@
+"""Shared semantic scope for source-support assessment and document review."""
+
+SUPPORT_SCOPE_GUIDANCE = (
+    "For technical-support findings, identify the exact asserted factual mechanism and explain why it "
+    "needs support. Distinguish asserted facts from declared prerequisites to establish later and "
+    "original comparisons derived from supported facts. Original synthesis does not excuse unsupported "
+    "facts; absence of a matching source workflow alone does not establish a defect. "
+    "Operational objections must identify an advertised conclusion the existing steps cannot support. "
+    "Do not demand an authorization conclusion from a control explicitly limited to request shape, "
+    "or treat an explicitly inconclusive branch as a false finding. "
+    "Attribution objections must identify a materially false claim or misleading omission. Accurate "
+    "scope stated in metadata counts; require body placement only under an explicit obligation. "
+    "For a research gap, identify the asserted technical claim requiring evidence, not merely a "
+    "requested deliverable absent from a source. When an authored procedure, control or evidence "
+    "check can be designed from supported facts, retain it as an authoring obligation. Conditions "
+    "to establish during future application belong in future_validation. Do not introduce a "
+    "specific identity-binding mechanism when the request only asks for generic identity binding. "
+    "Keep genuine unsupported factual mechanisms and contradictions blocking; source relevance "
+    "or authority alone does not establish adequate factual support. "
+)
