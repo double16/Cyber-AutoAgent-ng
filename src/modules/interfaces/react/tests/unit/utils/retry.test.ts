@@ -134,3 +134,17 @@ describe('CircuitBreaker', () => {
         }
     });
 });
+
+it('runs predefined Docker/container retry predicates on retryable and permanent failures', async () => {
+  const {RetryConfigs} = await import('../../../src/utils/retry.js');
+  jest.useFakeTimers();
+  try {
+    for (const [manager, message] of [[RetryConfigs.docker, 'ECONNREFUSED'], [RetryConfigs.container, 'temporary unavailable']] as const) {
+      let count = 0;
+      const result = manager.execute(async () => {if (count++ === 0) throw new Error(message); return 'ready';});
+      await jest.runAllTimersAsync(); await expect(result).resolves.toBe('ready');
+    }
+    await expect(RetryConfigs.docker.execute(async () => {throw new Error('bad request');})).rejects.toThrow('bad request');
+    await expect(RetryConfigs.container.execute(async () => {throw new Error('permission denied');})).rejects.toThrow('permission denied');
+  } finally {jest.useRealTimers();}
+});

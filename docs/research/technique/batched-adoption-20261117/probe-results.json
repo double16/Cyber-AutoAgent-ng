@@ -1,0 +1,115 @@
+{
+  "model": "muse-glimmer:30b-mlx",
+  "semantic_probe": {
+    "requests": 2,
+    "scope": "test_discrimination only; actual rubric, publication rendering and bound schema through the specialist structured runner",
+    "arms": {
+      "baseline": {
+        "correct": 2,
+        "total": 4,
+        "cases": [
+          {
+            "hypothesis_id": "078b97232d58985c6c7f0ac1",
+            "title": "Conditional filesystem authorization",
+            "expected": "adequate",
+            "actual": "revise",
+            "reason": "Positive expectation is an unprivileged process reading protected file contents with no control that distinguishes authorized vs unauthorized access under an established policy. The control repeats authorized read without establishing the entitlement restriction."
+          },
+          {
+            "hypothesis_id": "5d03ad2faa223e29fb43bfd5",
+            "title": "HTTP token exposure",
+            "expected": "revise",
+            "actual": "revise",
+            "reason": "Positive and negative expectations are identical: Token appears in response body for both. No discrimination between violation and normal behavior."
+          },
+          {
+            "hypothesis_id": "73a04d0e3c10aed4483761a9",
+            "title": "Conditional HTTP token leakage",
+            "expected": "adequate",
+            "actual": "revise",
+            "reason": "Expectations describe secret presence in response body vs URL leakage, but policy for secret handling and the trust boundary for outbound URLs is not established. The control does not rule out normal application behavior."
+          },
+          {
+            "hypothesis_id": "eb18d9cc07d07ea2f7d5e5e1",
+            "title": "Network access bypass",
+            "expected": "revise",
+            "actual": "revise",
+            "reason": "Positive and negative expectations are identical: Service returns its public version banner. No distinction between allowed network access and a bypass."
+          }
+        ]
+      },
+      "comparison": {
+        "correct": 4,
+        "total": 4,
+        "cases": [
+          {
+            "hypothesis_id": "078b97232d58985c6c7f0ac1",
+            "title": "Conditional filesystem authorization",
+            "expected": "adequate",
+            "actual": "adequate",
+            "reason": "Positive expectation of unprivileged read of protected file is distinct from negative expectation of denial for unprivileged and success for authorized control, allowing discrimination once policy is established."
+          },
+          {
+            "hypothesis_id": "5d03ad2faa223e29fb43bfd5",
+            "title": "HTTP token exposure",
+            "expected": "revise",
+            "actual": "revise",
+            "reason": "Positive and negative expectations are identical: both state Token appears in response body. No distinction between claimed consequence and normal behavior."
+          },
+          {
+            "hypothesis_id": "73a04d0e3c10aed4483761a9",
+            "title": "Conditional HTTP token leakage",
+            "expected": "adequate",
+            "actual": "adequate",
+            "reason": "Positive expectation of secret in URL to unrelated origin is distinct from negative expectation of secret staying in response body and absent from outbound URLs."
+          },
+          {
+            "hypothesis_id": "eb18d9cc07d07ea2f7d5e5e1",
+            "title": "Network access bypass",
+            "expected": "revise",
+            "actual": "revise",
+            "reason": "Positive and negative expectations are identical: both state Service returns its public version banner. No discriminating control."
+          }
+        ]
+      }
+    },
+    "harness_note": "Labels joined to immutable hypothesis IDs; an initial positional report was corrected after publication reordered records. Model inputs and outputs were unchanged.",
+    "limitations": [
+      "Single call per arm; not a general efficacy estimate",
+      "Not a complete workflow evaluator run or grading of grounding, identity or root decision validity"
+    ]
+  },
+  "relevance_probe": {
+    "requests": 3,
+    "catalog": "Isolated cloned web catalog with current module synchronization",
+    "cases": [
+      {
+        "case": "homepage-dom",
+        "matcher_calls": 1,
+        "expected": "A DOM/HTML injection lead should outrank unrelated API authentication guidance.",
+        "ranked_requests": [
+          "HTML and CSS injection assessment",
+          "Reflected, stored and DOM XSS with browser message trust hypothesis generation"
+        ]
+      },
+      {
+        "case": "network",
+        "matcher_calls": 1,
+        "expected": "No web-only lead should be supplied merely because a network listener exists.",
+        "ranked_requests": []
+      },
+      {
+        "case": "filesystem",
+        "matcher_calls": 1,
+        "expected": "No web-only lead should be supplied merely because a local configuration file exists.",
+        "ranked_requests": []
+      }
+    ]
+  },
+  "scripted_replay": {
+    "legacy_matcher_calls": 3,
+    "batched_matcher_calls": 1,
+    "same_lead_retained": true,
+    "unchanged_replay_model_and_embedding_calls": 0
+  }
+}

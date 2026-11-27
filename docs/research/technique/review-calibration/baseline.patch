@@ -1,0 +1,1160 @@
+--- a/src/modules/agents/hypothesis_review.py
++++ b/src/modules/agents/hypothesis_review.py
+@@ -20,15 +20,21 @@
+     NoHypothesisBasis,
+     TaskReviewDecisionOutput,
+ )
++from modules.prompts.security_interpretation import SECURITY_INTERPRETATION
+ from modules.tools import memory
+ from modules.tools.artifact_journal import ReturnedArtifactJournal
+ from modules.tools.hypotheses import HypothesisSet, hypothesis_binding, load_hypothesis_set
+ from modules.tools.inventory_inputs import inspection_covers_input
+ 
+-HYPOTHESIS_SEMANTIC_GUIDANCE = """## Hypothesis semantic rubric
++HYPOTHESIS_SEMANTIC_GUIDANCE = SECURITY_INTERPRETATION + "\n" + """## Hypothesis semantic rubric
+ Use frozen inventory and retained source artifacts; inspect explicitly linked retained resources when
+ needed. Public research may inform future tests. Do not fetch the live target or execute proposed tests.
+ Name concrete necessary missing evidence as a prerequisite gap, not as a negative observation.
++Grounding concerns the observed basis, not proof of a proposed outcome. Keep observed facts,
++conditional mechanism assumptions and future outcomes distinct. A source-backed mechanism may be
++proposed conditionally when relevant observations motivate it and future checks establish whether
++it applies; do not demand observed exploitation, protected response content or confirmed server-side
++implementation merely to retain such a proposal. An unrelated or invented observation remains a defect.
+ Grounding: connect inspected observations to the assigned subject, proposed mechanism, and intended
+ trust boundary. Distinguish observed facts from unresolved preconditions. An explicitly evidenced link
+ to a related resource can ground a workflow hypothesis; the tested action need not use the subject's
+@@ -127,6 +133,13 @@
+     result = review.model_dump()
+     result["subject_reviews"] = semantic_review(data)["subject_reviews"]
+     changes = review_requires_changes(result)
++    if any(row.no_hypothesis_basis and row.no_hypothesis_basis.kind == "metadata_only"
++           for row in review.subject_reviews) and not review.prerequisite_gaps:
++        raise ValueError(
++            "Metadata-only empty disposition requires explicit prerequisite_gaps identifying necessary "
++            "unreviewed content, or an inspected_evidence assessment citing retained content. "
++            "Reusing an unchanged publication cannot repair missing inspection."
++        )
+     gaps = review.prerequisite_gaps
+     if any(row.no_hypothesis_basis and row.no_hypothesis_basis.kind == "necessary_evidence_unreviewed"
+            for row in review.subject_reviews) and not gaps:
+@@ -322,8 +335,10 @@
+                     )):
+                         raise ValueError("Supported conditional test requires publication repair")
+             elif basis.kind == "metadata_only":
+-                if review.status == "done" or review.repair is None or review.repair.kind not in {"acceptance", "execution"}:
+-                    raise ValueError("Metadata-only empty disposition requires publication repair")
++                if not review.prerequisite_gaps or review.status == "done":
++                    raise ValueError("Metadata-only empty disposition requires explicit prerequisite_gaps")
++                if review.status != "blocked" and (review.repair is None or review.repair.kind != "execution"):
++                    raise ValueError("Metadata-only evidence gap requires prerequisite recovery")
+             elif not review.prerequisite_gaps or review.status == "done":
+                 raise ValueError("Unreviewed necessary evidence requires prerequisite recovery")
+     criteria = {criterion.id for criterion in task.acceptance.criteria}
+@@ -356,7 +371,8 @@
+                 or not set(gap.source_refs) <= set(task.acceptance.basis.source_refs)):
+             raise ValueError("Subject prerequisite must identify frozen criteria, subjects, and sources")
+         related.append(gap.model_dump())
+-    if (row.no_hypothesis_basis and row.no_hypothesis_basis.kind == "necessary_evidence_unreviewed"
++    if (row.no_hypothesis_basis
++            and row.no_hypothesis_basis.kind in {"necessary_evidence_unreviewed", "metadata_only"}
+             and not related):
+         raise ValueError("Unreviewed necessary evidence requires a prerequisite gap for this subject")
+     return related
+--- a/src/modules/agents/multi_agent_workflow.py
++++ b/src/modules/agents/multi_agent_workflow.py
+@@ -7171,8 +7171,10 @@
+                                             status="partial_failure",
+                                             reason=(
+                                                 "Evaluator-requested terminal synthesis remained incomplete after "
+-                                                "the single bounded synthesis repair."
++                                                "the single bounded synthesis repair. Remaining review: "
++                                                + decision.reason
+                                             ),
++                                            instructions=decision.instructions,
+                                         )
+                                         self._emit_evaluator_synthesis_repair(
+                                             task,
+--- /dev/null
++++ b/src/modules/prompts/security_interpretation.py
+@@ -0,0 +1,35 @@
++"""Shared interpretation guidance for procedures and future hypothesis review."""
++
++SECURITY_INTERPRETATION = (
++    "For each future check, identify the expected legitimate behavior, the suspected security-boundary "
++    "violation, comparison controls and evidence to collect. Ordinary intended behavior alone does not "
++    "support a vulnerability hypothesis. Use explicit assumptions for unknown enforcement policies. "
++    "Distinguish establishing prerequisites, legitimate behavior and demonstrated boundary violations. "
++    "Header-based object selection, JavaScript reading browser storage and token reuse alone do not "
++    "establish violations. Explain how unknown policy is established. A distant limitation cannot excuse "
++    "an unconditional violation claim or rejection expectation in a procedure. Such inconsistencies are "
++    "authored_content defects; clarification of conditional checks does not require research. "
++    "Evaluate interpretation at the procedure step that labels an outcome. Calling a check a future "
++    "hypothesis does not excuse misclassifying legitimate behavior. A policy caveat alone is insufficient: "
++    "specify how to establish policy through documentation, configuration or independently known "
++    "authorized and denied baselines. Rejection of credential reuse requires an established revocation, "
++    "expiry or freshness contract; a valid reusable credential can legitimately succeed repeatedly. "
++    "The existence of a time-bound contract alone does not prohibit reuse inside its valid window. "
++    "Require the relevant expiry, revocation, nonce-consumption or freshness-limit event to have "
++    "occurred, and compare the observed acceptance with that actual restriction before labeling a breach. "
++    "Storage reading requires a separate demonstrated untrusted-script or confidentiality boundary, "
++    "and object selection requires an established entitlement restriction before either is a violation. "
++    "A control that merely repeats legitimate access does not distinguish a violation. "
++    "A permitted counterexample must satisfy the procedure's actual prerequisites and the exact "
++    "observation labeled suspicious; changing either does not refute the check. An expected outcome "
++    "does not itself establish a prerequisite or policy. An outcome label is not a procedural control. "
++    "Successful use of currently valid credentials or access through an intended trusted interface "
++    "is not itself a security-boundary violation. Base rejection expectations on a stated policy, "
++    "not assumed single-use properties or client behavior. "
++    "A wildcard search returning more entries, an allowed network connection or a process reading "
++    "its permitted files can be legitimate. Establish the intended query semantics, network policy "
++    "or process entitlements before labeling those observations violations. "
++    "Organize boundary tests around policy/prerequisite establishment, a baseline, one controlled "
++    "variation, legitimate and prohibited outcomes, and the evidence needed to distinguish them. "
++    "A prerequisite check or legitimate observation need not itself demonstrate a violation. "
++)
+--- a/src/modules/techniques/alignment.py
++++ b/src/modules/techniques/alignment.py
+@@ -4,14 +4,21 @@
+ 
+ from pydantic import BaseModel, ConfigDict, Field, StrictBool
+ 
++from modules.prompts.security_interpretation import SECURITY_INTERPRETATION
+ from modules.techniques.context import MethodologyContext, methodology_context
+ from modules.techniques.documents import CONTEXTS, json_payload
+ 
+-AUTHORING_GUIDANCE = (
++AUTHORING_ADDITIONS = (
+     "Include applicable checklists, representative payloads or commands, prerequisites, controls, "
+     "expected outcomes and evidence requirements without waiting for an explicit request. "
+     "For hypothesis generation, give concrete future validation steps and useful illustrative payloads, "
+-    "clearly distinguished from observed results. Synthesize original procedures from supported "
++    "clearly distinguished from observed results. "
++)
++
++REVIEW_GUIDANCE = (
++    "Judge completeness against the supplied request, requirements and applicable restrictions. "
++    "Do not turn author enrichment preferences into additional rejection criteria. "
++    "Synthesize original procedures from supported "
+     "technical facts; identical examples or ready-made checklists need not appear in sources. "
+     "A source can contribute one relevant technical fact without covering every mechanism, prerequisite "
+     "or example in the request. Combine complementary contributions to construct the requested guidance. "
+@@ -20,34 +27,11 @@
+     "Research evaluates technical foundations; draft critique evaluates actual authored deliverables "
+     "and compliance with procedural instructions. Preserve explicit user and module restrictions. "
+     "Avoid irrelevant padding and unsupported claims. "
+-    "For each future check, identify the expected legitimate behavior, the suspected security-boundary "
+-    "violation, comparison controls and evidence to collect. Ordinary intended behavior alone does not "
+-    "support a vulnerability hypothesis. Use explicit assumptions for unknown enforcement policies. "
+-    "Distinguish establishing prerequisites, legitimate behavior and demonstrated boundary violations. "
+-    "Header-based object selection, JavaScript reading browser storage and token reuse alone do not "
+-    "establish violations. Explain how unknown policy is established. A distant limitation cannot excuse "
+-    "an unconditional violation claim or rejection expectation in a procedure. Such inconsistencies are "
+-    "authored_content defects; clarification of conditional checks does not require research. "
+-    "Evaluate interpretation at the procedure step that labels an outcome. Calling a check a future "
+-    "hypothesis does not excuse misclassifying legitimate behavior. A policy caveat alone is insufficient: "
+-    "specify how to establish policy through documentation, configuration or independently known "
+-    "authorized and denied baselines. Rejection of credential reuse requires an established revocation, "
+-    "expiry or freshness contract; a valid reusable credential can legitimately succeed repeatedly. "
+-    "The existence of a time-bound contract alone does not prohibit reuse inside its valid window. "
+-    "Require the relevant expiry, revocation, nonce-consumption or freshness-limit event to have "
+-    "occurred, and compare the observed acceptance with that actual restriction before labeling a breach. "
+-    "Storage reading requires a separate demonstrated untrusted-script or confidentiality boundary, "
+-    "and object selection requires an established entitlement restriction before either is a violation. "
+-    "A control that merely repeats legitimate access does not distinguish a violation. "
+-    "A permitted counterexample must satisfy the procedure's actual prerequisites and the exact "
+-    "observation labeled suspicious; changing either does not refute the check. An expected outcome "
+-    "does not itself establish a prerequisite or policy. An outcome label is not a procedural control. "
+-    "Successful use of currently valid credentials or access through an intended trusted interface "
+-    "is not itself a security-boundary violation. Base rejection expectations on a stated policy, "
+-    "not assumed single-use properties or client behavior. "
+     "Generic placeholders and reserved example domains are appropriate illustrative inputs, not "
+     "incidental identifiers from a real operation. "
+-)
++) + SECURITY_INTERPRETATION
++
++AUTHORING_GUIDANCE = AUTHORING_ADDITIONS + REVIEW_GUIDANCE
+ 
+ PHASE_OBJECTIVES = {
+     "reconnaissance": "Discover and characterize relevant surfaces, components, versions and trust boundaries; "
+@@ -165,7 +149,7 @@
+                       {"restriction": value, "origin": "user"} for value in context.methodology_constraints
+                   ]))
+     return (
+-        policy + "\n" + AUTHORING_GUIDANCE + "\n" +
++        policy + "\n" + REVIEW_GUIDANCE + "\n" +
+         "Apply supplied module technique policy and user methodology restrictions to reusable guidance. "
+         "Guidance purpose: produce reusable methodology, never completed target execution or findings. "
+         "Source-backed facts may support original procedural synthesis. Missing target observations are "
+--- /dev/null
++++ b/src/modules/techniques/calibration_budget.py
+@@ -0,0 +1,69 @@
++"""Persistent bounded accounting and opt-in transport instrumentation for isolated trials."""
++
++import json
++import os
++import threading
++import uuid
++from contextlib import contextmanager
++from pathlib import Path
++
++
++class CalibrationBudgetExhausted(RuntimeError):
++    """An incomplete evaluation must remain incomplete when its allowance is exhausted."""
++
++
++class CalibrationBudget:
++    def __init__(self, path, limit=30):
++        if type(limit) is not int or not 1 <= limit <= 30:
++            raise ValueError("Calibration limit must be an integer from 1 to 30")
++        self.path = Path(path)
++        self.limit = limit
++        self.lock = threading.RLock()
++        if not self.path.exists():
++            self._write({"limit": limit, "requests": 0, "roles": 0})
++        if self.counts()["limit"] != limit:
++            raise ValueError("Existing calibration budget has a different limit")
++
++    def _write(self, payload):
++        temporary = self.path.with_name(f".{uuid.uuid4()}.tmp")
++        try:
++            with open(temporary, "x", opener=lambda name, flags: os.open(name, flags, 0o600)) as stream:
++                json.dump(payload, stream)
++            temporary.replace(self.path)
++        finally:
++            temporary.unlink(missing_ok=True)
++
++    def counts(self):
++        return json.loads(self.path.read_text())
++
++    def reserve(self, kind):
++        if kind not in {"requests", "roles"}:
++            raise ValueError("Unknown calibration counter")
++        with self.lock:
++            counts = self.counts()
++            if counts[kind] >= self.limit or counts["requests"] >= self.limit:
++                raise CalibrationBudgetExhausted("Cumulative calibration allowance exhausted")
++            counts[kind] += 1
++            self._write(counts)
++            return counts[kind]
++
++    @contextmanager
++    def instrument(self, transport, method, directory, *, validate_request=None):
++        """Instrument a selected transport adapter; generic accounting has no provider assumptions."""
++        original = getattr(transport, method)
++        destination = Path(directory)
++
++        async def counted(client, *args, **kwargs):
++            if validate_request is not None:
++                validate_request(kwargs)
++            number = self.reserve("requests")
++            path = destination / f"provider-request-{number:02d}.json"
++            with open(path, "x", opener=lambda name, flags: os.open(name, flags, 0o600)) as stream:
++                json.dump({"args": args, "kwargs": kwargs}, stream, ensure_ascii=False, default=str)
++            return await original(client, *args, **kwargs)
++
++        setattr(transport, method, counted)
++        try:
++            yield
++        finally:
++            setattr(transport, method, original)
+--- a/src/modules/techniques/coverage.py
++++ b/src/modules/techniques/coverage.py
+@@ -39,6 +39,15 @@
+     claim: str = Field(min_length=1, max_length=500)
+     blocking_reason: str = Field(min_length=1, max_length=500)
+     research_question: str = Field(min_length=1, max_length=500)
++
++
++class ClaimSupport(BaseModel):
++    """Model judgment tied to controller-retained source context."""
++
++    model_config = ConfigDict(extra="forbid")
++    claim: str = Field(min_length=1, max_length=1000)
++    source_urls: list[str] = Field(min_length=1, max_length=18)
++    authority_basis: str = Field(min_length=1, max_length=1000)
+ 
+ 
+ class Support(BaseModel):
+@@ -51,6 +60,11 @@
+         description="Source-backed rationale. For authored deliverables, explain the factual basis "
+                     "and how those facts support constructing the procedure; for constraints, explain compliance.",
+     )
++    authority_sufficient: StrictBool | None = Field(
++        default=None, description="Legacy records may have unknown requirement-level authority.",
++    )
++    claim_support: list[ClaimSupport] = Field(default_factory=list, max_length=16)
++    authoring_obligations: list[str] = Field(default_factory=list, max_length=8)
+     synthesis: str = Field(
+         default="", max_length=1500,
+         description="Optional supplementary synthesis detail; explanation contains the canonical rationale.",
+@@ -85,6 +99,13 @@
+         default_factory=list, max_length=18,
+         description="Legacy advisory field; omit. Python retains actual supplied source passages.",
+     )
++
++
++class AssessedSupport(EvidenceSupport):
++    """New invocations must judge authority for the assigned requirement independently."""
++
++    authority_sufficient: StrictBool
++    claim_support: list[ClaimSupport] = Field(max_length=16)
+ 
+ 
+ class CoverageValidationError(ValueError):
+@@ -146,14 +167,23 @@
+ 
+     @property
+     def sufficient(self) -> bool:
+-        return self.authoritative_sufficient and all(
++        return self.authority_ready and all(
+             not row.gaps and (row.source_urls or row._requirement_kind == "constraint") for row in self.coverage
++        )
++
++    @property
++    def authority_ready(self) -> bool:
++        """Legacy source-wide authority remains unknown at requirement level."""
++        return all(
++            row._requirement_kind == "constraint" or (
++                row.authority_sufficient if row.authority_sufficient is not None else self.authoritative_sufficient
++            ) for row in self.coverage
+         )
+ 
+     @property
+     def research_ready(self) -> bool:
+         """Permit drafting from a basis, never treat that permission as fulfillment or factual proof."""
+-        if not self.authoritative_sufficient:
++        if not self.authority_ready:
+             return False
+         for row in self.coverage:
+             if any(gap.kind == "unresolved_contradiction" for gap in row.gaps):
+@@ -162,12 +192,12 @@
+                 continue
+             if not row.source_urls:
+                 return False
+-            if row._requirement_kind == "factual_support" and row.gaps:
++            if row.gaps and (row._requirement_kind == "factual_support" or row.authority_sufficient is not None):
+                 return False
+         return True
+ 
+     def summary(self) -> str:
+-        return (f"Authority sufficient: {self.authoritative_sufficient}; "
++        return (f"Authority sufficient: {self.authority_ready}; "
+                 f"requirement coverage sufficient: {self.sufficient}; research ready: {self.research_ready}. "
+                 f"{self.reason}\nResearch readiness is permission to draft, not fulfillment or factual proof. "
+                 "All recorded concerns remain for authoring and independent critique.\n"
+@@ -281,7 +311,9 @@
+     else:
+         source_prompt = (
+             prompt + "\nAssess source authority, version relevance and individual attribution only. "
+-            "Return no coverage records. Authority sufficiency concerns the technical claims used; "
++            "Return no coverage records. authoritative_sufficient judges authority for the current document's "
++            "own relevant contributions only, never completeness for the request. Authority sufficiency concerns "
++            "the technical claims used; "
+             "coverage is assessed separately. One authoritative document may suffice; source count "
+             "never establishes sufficiency. Select only the current document URL; earlier sources are "
+             "retained by the controller. Accept a current document that contributes at least one relevant "
+@@ -299,8 +331,10 @@
+             "limitations in reason. Do not attribute rejected sources. Zero selected sources is valid "
+             "when justified. Authority and relevance concern supported contributions to this method, "
+             "not whether one document covers every requested mechanism or parameter shape.\n"
+-            + json_payload("requirements", [row.model_dump() for row in requirements])
+-            + "\nPrior assessment (untrusted):\n" + (previous.model_dump_json() if previous else "None")
++            + json_payload("technical_scope", [{"id": row.id, "description": row.description}
++                                              for row in requirements if row.kind == "factual_support"])
++            + "\nPrior source contributions (untrusted):\n"
++            + json_payload("source_contributions", [row.model_dump() for row in decisions.values()])
+         )
+ 
+         def validate_source(candidate):
+@@ -336,14 +370,6 @@
+             ))
+             evidence[requirement.id] = []
+             continue
+-        assessment_requirement = requirement
+-        if requirement.kind == "authored_deliverable":
+-            assessment_requirement = requirement.model_copy(update={
+-                "kind": "factual_support",
+-                "description": "Establish the technical foundation for the supplied methodology request. "
+-                               "Identify unsupported mechanism claims or factual contradictions. "
+-                               "Do not assess presence of an unwritten deliverable, example or checklist.",
+-            })
+         prior = prior_records.get(requirement.id)
+         passages = [
+             row.model_dump() for row in (previous._evidence.get(requirement.id, []) if previous else [])
+@@ -371,7 +397,7 @@
+             + "Research assesses the technical foundation only. The original authored deliverables remain "
+             "required and are evaluated on the actual draft by authoring and critique. A missing prewritten "
+             "payload or checklist is not an unsupported mechanism claim.\n"
+-            + "Assigned requirement: " + assessment_requirement.model_dump_json()
++            + "Assigned requirement: " + requirement.model_dump_json()
+             + "\nValidated source assessment: " + source.model_dump_json()
+             + "\nPrior requirement assessment (untrusted): " + (prior.model_dump_json() if prior else "None")
+             + "\nRemoved source URLs: " + json_payload("removed_source_urls", removed)
+@@ -383,6 +409,13 @@
+                                               f"Return exactly requirement_id {requirement.id}", requirement.id)
+             checked = SourceSelection(**source.model_dump(), coverage=[record.model_dump(exclude={"evidence"})])
+             checked.validate_references(available, [requirement])
++            for claim in record.claim_support:
++                if not set(claim.source_urls) <= set(record.source_urls):
++                    raise CoverageValidationError("references", "claim_support.source_urls",
++                                                  "Claim cites an uncited source", requirement.id)
++            if record.source_urls and not record.gaps and not record.claim_support:
++                raise CoverageValidationError("coverage", "claim_support",
++                                              "Supported requirements need referenced technical claims", requirement.id)
+             # Legacy model excerpts are advisory; only controller text supplies provenance.
+             if any(row.url not in record.source_urls for row in record.evidence):
+                 raise CoverageValidationError(
+@@ -401,7 +434,7 @@
+ 
+         record = _assessment_call(
+             service, "technique_requirement_reviewer" if review else "technique_requirement_assessor",
+-            record_prompt, EvidenceSupport, validate_record, lookup=lookup, requirement_id=requirement.id, **diagnostic,
++            record_prompt, AssessedSupport, validate_record, lookup=lookup, requirement_id=requirement.id, **diagnostic,
+         )
+         evidence[requirement.id] = record.evidence
+ 
+--- a/src/modules/techniques/critique.py
++++ b/src/modules/techniques/critique.py
+@@ -8,9 +8,11 @@
+ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StrictBool, StrictInt
+ from strands import tool
+ 
+-from modules.techniques.alignment import AUTHORING_GUIDANCE
++from modules.techniques.alignment import REVIEW_GUIDANCE
+ from modules.techniques.coverage import Attribution
+ from modules.techniques.documents import TechniqueDocument, json_payload
++from modules.techniques.review_contract import ReviewContract
++from modules.techniques.review_integrity import bind_review_prompt
+ 
+ Category = Literal["authored_content", "source_attribution", "research_coverage", "request_coverage"]
+ 
+@@ -93,6 +95,8 @@
+     model_config = ConfigDict(extra="forbid")
+     id: str = Field(min_length=1, max_length=80, pattern=r"\S")
+     category: Category
++    criterion_id: str | None = None
++    material_impact: str = Field(default="", max_length=2000)
+     problem: str = Field(min_length=1, max_length=2000, pattern=r"\S")
+     requested_correction: str = Field(min_length=1, max_length=2000, pattern=r"\S")
+     requirement_ids: list[str] = Field(max_length=16)
+@@ -130,6 +134,15 @@
+     )
+ 
+ 
++class Suggestion(BaseModel):
++    """Optional elaboration that cannot trigger publication repair."""
++
++    model_config = ConfigDict(extra="forbid")
++    improvement: str = Field(min_length=1, max_length=2000)
++    draft_references: list[str] = Field(default_factory=list, max_length=32)
++    requirement_ids: list[str] = Field(default_factory=list, max_length=16)
++
++
+ class Critique(BaseModel):
+     model_config = ConfigDict(
+         extra="forbid",
+@@ -139,6 +152,7 @@
+     category: Category = "authored_content"
+     reason: str = Field(min_length=1)
+     issues: list[Issue] = Field(default_factory=list, max_length=32)
++    suggestions: list[Suggestion] = Field(default_factory=list, max_length=16)
+     interpretations: list[Interpretation] = Field(
+         default_factory=list, max_length=64,
+         description="Assess every security-relevant check actually in the draft, including future hypothesis checks.",
+@@ -149,8 +163,32 @@
+     )
+ 
+ 
++class BlockingIssue(Issue):
++    """New invocations justify materiality against a frozen acceptance criterion."""
++
++    criterion_id: str = Field(min_length=1)
++    material_impact: str = Field(min_length=1, max_length=2000)
++
++
++class CriticFindings(BaseModel):
++    """New model-facing contract; Python owns the publication decision."""
++
++    model_config = ConfigDict(extra="forbid")
++    reason: str = Field(min_length=1)
++    category: Category = "authored_content"
++    issues: list[BlockingIssue] = Field(default_factory=list, max_length=32)
++    suggestions: list[Suggestion] = Field(default_factory=list, max_length=16)
++    interpretations: list[Interpretation] = Field(default_factory=list, max_length=64)
++    no_security_checks_reason: str = Field(default="", max_length=2000)
++
++    def critique(self) -> Critique:
++        return Critique(approved=not self.issues, **self.model_dump())
++
++
+ class AssessmentFinding(BaseModel):
+     model_config = ConfigDict(extra="forbid")
++    criterion_id: str | None = None
++    material_impact: str = Field(default="", max_length=2000)
+     problem: str = Field(min_length=1)
+     requested_correction: str = Field(min_length=1)
+     draft_references: list[str] = Field(default_factory=list)
+@@ -216,6 +254,21 @@
+     @property
+     def approved(self) -> bool:
+         return self.critic_supported
++
++
++class MaterialAssessmentFinding(AssessmentFinding):
++    criterion_id: str = Field(min_length=1)
++    material_impact: str = Field(min_length=1, max_length=2000)
++
++
++class AssessorFindings(IssueAssessment):
++    findings: list[MaterialAssessmentFinding] = Field(
++        default_factory=list, description="Empty when critic_supported is true; otherwise referenced material "
++        "disagreements tied to the frozen acceptance criteria, not optional elaboration.",
++    )
++
++    def assessment(self) -> IssueAssessment:
++        return IssueAssessment.model_validate(self.model_dump())
+ 
+ 
+ class AttributionReplacement(BaseModel):
+@@ -314,6 +367,10 @@
+         for interpretation in critique.interpretations:
+             if not set(interpretation.draft_references) <= snapshot.values.keys():
+                 raise ValueError("Unknown interpretation draft reference")
++        for suggestion in critique.suggestions:
++            if (not set(suggestion.draft_references) <= snapshot.values.keys()
++                    or not set(suggestion.requirement_ids) <= ids):
++                raise ValueError("Suggestion references must identify the current draft or requirements")
+         seen = set()
+         for issue in critique.issues:
+             if issue.id in seen:
+@@ -338,7 +395,12 @@
+                             break
+                         cursor = max(cursor, end)
+                     if cursor < len(self.texts[url]):
+-                        raise ValueError("Entire retained source absence requires complete inspection")
++                        raise ValueError(
++                            "Entire retained source absence requires complete inspection. "
++                            "Correct the claim to the inspected passages with their passage IDs and "
++                            "bounded assertion, or withdraw it. Do not infer absence in unread text. "
++                            "Inspection bounds: " + json_payload("source_inspection", self.inspection())
++                        )
+             if issue.draft_references:
+                 issue.draft_excerpt = "\n".join(str(snapshot.values[key]) for key in issue.draft_references)[:4000]
+             elif issue.draft_excerpt:
+@@ -368,12 +430,18 @@
+                     raise ValueError(f"Issue {issue.id} cites a passage not returned by retained_source_lookup")
+ 
+ 
+-def assess(service, prompt, markdown, requirements, documents, selected_urls, *, correctness=False):
++def assess(service, prompt, markdown, requirements, documents, selected_urls, *, correctness=False, review_contract=None):
+     from modules.techniques.roles import DeferredReviewPrompt
+ 
+     lookup = RetainedSources(documents)
+     snapshot = ReviewSnapshot(markdown)
+-    prompt += "\n" + AUTHORING_GUIDANCE + "\n" + snapshot.render()
++    contract = review_contract or ReviewContract.freeze(requirements)
++    prompt += "\n" + contract.render()
++    required_records = [
++        {"reference": key, "path": snapshot.paths[key], "value": value}
++        for key, value in snapshot.values.items() if snapshot.paths[key] != "metadata.source_coverage"
++    ]
++    prompt += "\n" + REVIEW_GUIDANCE + "\n" + snapshot.render()
+     prompt += "\n" + json_payload("retained_sources", [
+         {"url": url, "characters": len(text)} for url, text in lookup.texts.items()
+     ])
+@@ -383,6 +451,12 @@
+         "If there are no security-relevant checks, explain that in no_security_checks_reason; otherwise "
+         "leave that reason empty. Return interpretations for every security-relevant check: draft_references, "
+         "prerequisite_or_policy, legitimate_outcome, suspected_violation and distinguishing_control. "
++        "Interpretation distinguishing_control may summarize actual draft steps with draft references. "
++        "It need not be verbatim; only the assessor actual_discriminator requires a literal quote. "
++        "Only material defects belong in issues: explain how each defect defeats a supplied requirement "
++        "or the supported, truthful, operationally sufficient method. Optional examples, alternate tools "
++        "and stylistic elaboration belong in suggestions and never require rejection. Approval may include "
++        "suggestions when issues is empty. Do not invent missing deliverables from author preferences. "
+         "Return structured issues, each with a unique id, category, concrete problem, requested_correction, "
+         "requirement_ids, source_urls and draft_references from the supplied snapshot. Do not copy YAML. "
+         "Missing content must "
+@@ -409,8 +483,14 @@
+     for _correction in range(2):
+         candidate = None
+         try:
+-            candidate = service._json("technique_critic", prompt, Critique, [] if correction_used else [lookup.tool()])
++            candidate = service._json(
++                "technique_critic", bind_review_prompt(prompt, required_records), Critique,
++                [] if correction_used else [lookup.tool()],
++            )
+             contract_errors = []
++            if any(issue.criterion_id is not None and issue.criterion_id not in contract.criterion_ids
++                   for issue in candidate.issues):
++                contract_errors.append("Every blocker must reference a frozen acceptance criterion")
+             if not candidate.interpretations and not candidate.no_security_checks_reason.strip():
+                 contract_errors.append(
+                     "Return the structured interpretations table for security-relevant checks, or an explicit "
+@@ -462,6 +542,8 @@
+                     "remaining security-boundary evidence needed.\n"
+                 )
+                 comparison_instructions = (
++                    "Assess the publication decision and material blockers. Optional suggestions do not independently "
++                    "justify disagreement or repair. Report a genuine omitted blocker through referenced findings. "
+                     "Then compare your findings with the critic, including zero-issue approvals, interpretation "
+                     "and requested-deliverable completeness. Verify that interpretations cover every "
+                     "security-relevant check and distinguish policy, legitimate behavior, violation and control. "
+@@ -470,6 +552,8 @@
+                     "reject that reason when the draft has security-relevant checks. For each check consider "
+                     "both policy branches: the behavior is permitted, or the behavior is prohibited. Unknown "
+                     "policy cannot default to the prohibited branch. "
++                    "Independently discovered omitted checks belong in findings with current draft or "
++                    "requirement references; never invent interpretation indices for them. "
+                     "For EACH critic interpretation return an interpretation_reviews row, indexed from zero. "
+                     "Construct a concrete permitted counterexample to the exact suspicious observation, then "
+                     "if none can satisfy its explicit conditions, explain why and set "
+@@ -521,7 +605,7 @@
+                     investigation_instructions = INVESTIGATION_GUIDANCE
+                     comparison_instructions = COMPARISON_GUIDANCE
+                 assessment_evidence = (
+-                    AUTHORING_GUIDANCE + "\n"
++                    contract.render() + REVIEW_GUIDANCE + "\n"
+                     + json_payload(
+                         "retained_sources",
+                         [{"url": url, "characters": len(text)} for url, text in lookup.texts.items()],
+@@ -549,7 +633,8 @@
+                     assessment = None
+                     try:
+                         assessment = service._json(
+-                            "technique_critique_assessor", assessment_prompt, IssueAssessment,
++                            "technique_critique_assessor", bind_review_prompt(assessment_prompt, required_records),
++                            IssueAssessment,
+                             [lookup.tool()] if not assessor_attempt else [],
+                         )
+                         if assessment.approved == bool(assessment.findings):
+@@ -589,6 +674,8 @@
+                         if assessment.approved and any(not row.critic_correct for row in reviews):
+                             raise ValueError("An incorrect critic interpretation requires disagreement findings")
+                         for finding in assessment.findings:
++                            if finding.criterion_id is not None and finding.criterion_id not in contract.criterion_ids:
++                                raise ValueError("Assessment blocker must reference a frozen acceptance criterion")
+                             if (not set(finding.draft_references) <= snapshot.values.keys()
+                                     or not set(finding.requirement_ids) <= {r.id for r in requirements}
+                                     or not set(finding.issue_ids) <= {r.id for r in candidate.issues}
+--- a/src/modules/techniques/feedback.py
++++ b/src/modules/techniques/feedback.py
+@@ -3,6 +3,12 @@
+ from typing import Literal
+ 
+ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StrictBool, model_validator
++
++
++class FeedbackEvidenceGap(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++    references: list[str] = Field(min_length=1)
++    missing_input: str = Field(min_length=1)
+ 
+ 
+ class ContributionFeedback(BaseModel):
+@@ -43,6 +49,11 @@
+         "misleading_or_harmful is true. Otherwise return the empty string.",
+     )
+     reason: str = Field(min_length=1, max_length=2000)
++    necessary_evidence_gaps: list[FeedbackEvidenceGap] = Field(
++        default_factory=list,
++        description="Only evidence necessary to judge contribution that remains unavailable. Cite controller "
++                    "result references showing the access limitation. This leaves feedback pending, not neutral.",
++    )
+     evidence_mappings: list["EvidenceMapping"] = Field(default_factory=list)
+ 
+     @model_validator(mode="after")
+@@ -101,6 +112,11 @@
+     "guidance_references, result_references and explanation. Copy complete supplied IDs. "
+     "IDs appearing only in prose do not constitute a completed mapping. "
+     "For neutral judgments supply neutral_basis: not_used or contribution_unestablished. "
++    "A failed or guard-blocked read establishes an access limitation, not non-contribution. "
++    "Reuse retained evidence. If necessary contribution evidence remains unavailable, return "
++    "necessary_evidence_gaps with known result references and the missing input instead of "
++    "claiming that the access failure supports neutrality. Partial available evidence may still "
++    "establish contribution; declare only gaps necessary to decide the score. "
+ )
+ 
+ 
+@@ -153,6 +169,12 @@
+ 
+ def resolve_feedback(feedback: ContributionFeedback, references: dict[str, str]) -> list[dict]:
+     """Resolve available evidence identically for the evaluator and independent reviewer."""
++    for gap in feedback.necessary_evidence_gaps:
++        if any(key not in references or not key.startswith("result:") for key in gap.references):
++            raise ValueError("Evidence gaps require known controller result references")
++    if feedback.necessary_evidence_gaps:
++        raise ValueError("Necessary contribution evidence unavailable; feedback remains pending: "
++                         + str([gap.model_dump() for gap in feedback.necessary_evidence_gaps]))
+     if feedback.score == 0 and feedback.neutral_basis is None:
+         raise ValueError("Neutral feedback requires a structured neutral_basis")
+     if feedback.score != 0 and not feedback.evidence_mappings:
+--- a/src/modules/techniques/integration.py
++++ b/src/modules/techniques/integration.py
+@@ -73,20 +73,21 @@
+                 available.append(reference)
+             except (OSError, ValueError):
+                 unavailable.append(reference)
+-        tools = (
+-            [
+-                create_bounded_artifact_reader(
+-                    max_reads=4,
+-                    context_window_tokens=runtime.prompt_token_limit,
+-                    allowed_artifact_refs=available,
+-                    max_reads_per_artifact=2,
+-                    max_lines_per_read=200,
+-                    max_output_chars=8000,
+-                )
+-            ]
+-            if available
+-            else []
+-        )
++        def tools_factory():
++            return (
++                [
++                    create_bounded_artifact_reader(
++                        max_reads=4,
++                        context_window_tokens=runtime.prompt_token_limit,
++                        allowed_artifact_refs=available,
++                        max_reads_per_artifact=2,
++                        max_lines_per_read=200,
++                        max_output_chars=8000,
++                    )
++                ]
++                if available
++                else []
++            )
+         context = json.dumps(
+             {
+                 "available_evidence_refs": available,
+@@ -103,8 +104,8 @@
+         from modules.techniques.feedback_activity import select_feedback_activity
+ 
+         phase = next((p for p in plan.phases if p.id == task.phase), None) if plan is not None else None
+-        service.evaluate(runtime.operation_id, task.task_uid, context, tools,
+-                         task_context=select_feedback_activity(task, phase))
++        service.evaluate(runtime.operation_id, task.task_uid, context,
++                         task_context=select_feedback_activity(task, phase), tools_factory=tools_factory)
+     except Exception:
+         # Preserve pending receipts for continuation; never fabricate neutral feedback on a model failure.
+         service.events.emit(
+--- /dev/null
++++ b/src/modules/techniques/review_calibration.py
+@@ -0,0 +1,166 @@
++"""Preflight and execute isolated matched reviews; never publish or update operation storage."""
++
++import argparse
++import hashlib
++import json
++import os
++import subprocess
++import sys
++import tempfile
++from pathlib import Path
++
++from pydantic import BaseModel, ConfigDict, Field, model_validator
++
++from modules.techniques.coverage import Requirement
++from modules.techniques.documents import TechniqueDocument
++
++
++class CalibrationSource(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++    url: str = Field(min_length=1)
++    title: str = Field(min_length=1)
++    text: str = Field(min_length=1)
++
++
++class CalibrationCase(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++    id: str = Field(pattern=r"^[a-z0-9_-]+$")
++    family: str = Field(pattern=r"^(http|network|filesystem)$")
++    request: str = Field(min_length=1)
++    draft: str = Field(min_length=1)
++    requirements: list[Requirement] = Field(min_length=1)
++    sources: list[CalibrationSource] = Field(min_length=1)
++    adjudication: str = Field(default="pending", pattern=r"^(pending|acceptable|needs_correction)$")
++    adjudication_reason: str = ""
++    adjudicated_sha256: str = ""
++
++    def subject(self):
++        return self.model_dump(exclude={"adjudication", "adjudication_reason", "adjudicated_sha256"})
++
++    def digest(self):
++        return hashlib.sha256(json.dumps(self.subject(), sort_keys=True, ensure_ascii=False).encode()).hexdigest()
++
++    @model_validator(mode="before")
++    @classmethod
++    def explicit_requirement_kinds(cls, data):
++        if isinstance(data, dict):
++            for row in data.get("requirements", []):
++                if isinstance(row, dict) and "kind" not in row:
++                    raise ValueError("Calibration requirements must declare their kinds")
++        return data
++
++    @model_validator(mode="after")
++    def complete_subject(self):
++        document = TechniqueDocument(self.draft)
++        urls = {row.url for row in self.sources}
++        if len(urls) != len(self.sources):
++            raise ValueError("Duplicate retained source URLs")
++        if set(row.url for row in document.metadata.sources) - urls:
++            raise ValueError("Every document source needs retained source text")
++        if len({row.id for row in self.requirements}) != len(self.requirements):
++            raise ValueError("Duplicate requirement IDs")
++        if self.adjudication != "pending" and (
++            not self.adjudication_reason.strip() or self.adjudicated_sha256 != self.digest()
++        ):
++            raise ValueError("Adjudication must bind the exact subject digest and supply a rationale")
++        return self
++
++
++def preflight(cases):
++    if len(cases) != 3 or {case.family for case in cases} != {"http", "network", "filesystem"}:
++        raise ValueError("Matched calibration requires one HTTP, network and filesystem case")
++    if len({case.id for case in cases}) != 3:
++        raise ValueError("Calibration case IDs must be unique")
++    pending = [case.id for case in cases if case.adjudication == "pending"]
++    if not pending and sorted(case.adjudication for case in cases) != [
++        "acceptable", "acceptable", "needs_correction",
++    ]:
++        raise ValueError("Calibration requires two acceptable procedures and one materially defective procedure")
++    return {"fixtures_valid": True, "ready_for_live": not pending, "pending_adjudications": pending,
++            "subjects": [{"id": case.id, "sha256": case.digest()} for case in cases]}
++
++
++def code_identity(root):
++    root = Path(root)
++    files = sorted((root / "src").rglob("*.py"))
++    if not files:
++        raise ValueError("An arm requires a complete src tree")
++    rows = {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest() for path in files}
++    return hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest()
++
++
++def schedule(cases):
++    return [(case, arm) for index, case in enumerate(cases)
++            for arm in (("baseline", "candidate") if index % 2 == 0 else ("candidate", "baseline"))]
++
++
++def run_comparison(cases, baseline, candidate, directory, model="muse-glimmer:30b", *, execute=subprocess.run):
++    from modules.techniques.calibration_budget import CalibrationBudget
++
++    status = preflight(cases)
++    if not status["ready_for_live"]:
++        raise ValueError("Human adjudication is pending; no model calls permitted")
++    arms = {"baseline": str(Path(baseline).resolve()), "candidate": str(Path(candidate).resolve())}
++    identities = {arm: code_identity(root) for arm, root in arms.items()}
++    root = Path(directory)
++    root.mkdir(mode=0o700)
++    budget = CalibrationBudget(root / "budget.json")
++    (root / "corpus.json").write_text(json.dumps([case.model_dump() for case in cases], indent=2))
++    worker = Path(__file__).with_name("review_calibration_worker.py")
++    (root / "configuration.json").write_text(json.dumps({
++        "arms": arms, "code_identities": identities, "provider": "ollama", "model": model, "limit": 30,
++    }, indent=2))
++    outcomes = []
++    for index, (case, arm) in enumerate(schedule(cases)):
++        directory = root / f"{index:02d}-{arm}-{case.id}"
++        directory.mkdir(mode=0o700)
++        job = {"case": case.model_dump(), "arm": arm, "root": str(directory),
++               "budget": str(root / "budget.json"), "model": model,
++               "budget_module": str(worker.with_name("calibration_budget.py"))}
++        path = directory / "job.json"
++        path.write_text(json.dumps(job, indent=2))
++        if budget.counts()["requests"] >= 30:
++            result = {"status": "unattempted_budget_exhausted"}
++        else:
++            if code_identity(arms[arm]) != identities[arm]:
++                raise ValueError("Frozen arm code changed during calibration")
++            env = dict(os.environ, PYTHONPATH=str(Path(arms[arm]) / "src"))
++            with (directory / "worker.log").open("w") as stream:
++                process = execute([sys.executable, str(worker), str(path)], cwd=arms[arm], env=env,
++                                  stdout=stream, stderr=stream, check=False)
++            output = directory / "outcome.json"
++            result = json.loads(output.read_text()) if output.exists() else {
++                "status": "worker_failed", "returncode": process.returncode,
++            }
++        result.update(case=case.id, arm=arm, expected_approved=case.adjudication == "acceptable")
++        (directory / "outcome.json").write_text(json.dumps(result, indent=2))
++        outcomes.append(result)
++    (root / "results.json").write_text(json.dumps({"counts": budget.counts(), "outcomes": outcomes}, indent=2))
++    return outcomes
++
++
++def main(argv=None):
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("corpus", type=Path)
++    parser.add_argument("--baseline-root", type=Path)
++    parser.add_argument("--candidate-root", type=Path, default=Path.cwd())
++    parser.add_argument("--run", action="store_true", help="Run only fully adjudicated, preflight-valid cases")
++    args = parser.parse_args(argv)
++    cases = [CalibrationCase.model_validate(row) for row in json.loads(args.corpus.read_text())]
++    status = preflight(cases)
++    print(json.dumps(status, indent=2))
++    if not args.run:
++        return 0
++    if not args.baseline_root:
++        parser.error("--run requires an immutable --baseline-root")
++    from dotenv import load_dotenv
++
++    load_dotenv(args.candidate_root / ".env", override=False)
++    root = Path(tempfile.mkdtemp(prefix="technique-review-calibration-")) / "comparison"
++    run_comparison(cases, args.baseline_root, args.candidate_root, root)
++    print(root)
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+--- /dev/null
++++ b/src/modules/techniques/review_contract.py
+@@ -0,0 +1,38 @@
++"""Finite controller-owned criteria; semantic materiality remains a model judgment."""
++
++import hashlib
++import json
++from dataclasses import dataclass
++
++CORE_CRITERIA = (
++    ("core:technical_support", "Technical mechanisms and factual claims have adequate retained support."),
++    ("core:interpretation", "Outcome interpretations distinguish legitimate behavior from boundary violations."),
++    ("core:operational_sufficiency", "The requested method can be followed with explicit necessary prerequisites and controls."),
++    ("core:attribution", "Attribution accurately describes the retained sources and their limitations."),
++    ("core:restrictions", "The method complies with supplied restrictions and document policies."),
++)
++
++
++@dataclass(frozen=True)
++class ReviewContract:
++    payload: str
++    identifier: str
++    criterion_ids: frozenset[str]
++
++    @classmethod
++    def freeze(cls, requirements):
++        criteria = [{"id": key, "obligation": value, "origin": "shared_review_policy"}
++                    for key, value in CORE_CRITERIA]
++        criteria += [{"id": f"requirement:{row.id}", "obligation": row.description,
++                      "kind": row.kind, "origin": "validated_request", "requirement_id": row.id}
++                     for row in requirements]
++        payload = json.dumps({"acceptance_criteria": criteria}, ensure_ascii=False, sort_keys=True)
++        return cls(payload, hashlib.sha256(payload.encode()).hexdigest(), frozenset(row["id"] for row in criteria))
++
++    def render(self):
++        return (
++            f"Frozen acceptance contract sha256={self.identifier}\n{self.payload}\n"
++            "Only these criteria can justify a blocker. Identify material impact on the advertised method; "
++            "optional elaboration belongs in suggestions. New claims introduced by the draft can violate "
++            "existing criteria; do not invent new mandatory deliverables or silently broaden scope.\n"
++        )
+--- /dev/null
++++ b/src/modules/techniques/review_integrity.py
+@@ -0,0 +1,38 @@
++"""Fail before inference when authoritative review input loses document records."""
++
++import json
++
++from strands.hooks import BeforeModelCallEvent, HookProvider
++
++
++class ReviewInputIntegrityError(RuntimeError):
++    """Incomplete input is an infrastructure failure, never an authored defect."""
++
++
++class ReviewPrompt(str):
++    """A prompt carrying controller-owned document integrity requirements."""
++
++
++def bind_review_prompt(prompt, records):
++    # Preserve DeferredReviewPrompt's independent investigation/finalization boundaries.
++    bound = ReviewPrompt(prompt) if type(prompt) is str else prompt
++    bound.required_review_records = tuple(json.dumps(record, ensure_ascii=False) for record in records)
++    return bound
++
++
++class ReviewInputIntegrityHook(HookProvider):
++    def __init__(self, records):
++        self.records = tuple(records)
++
++    def register_hooks(self, registry, **kwargs):
++        registry.add_callback(BeforeModelCallEvent, self.before_model)
++
++    def before_model(self, event):
++        texts = [block["text"] for message in event.agent.messages if message.get("role") == "user"
++                 for block in message.get("content", []) if isinstance(block.get("text"), str)]
++        missing = [index for index, record in enumerate(self.records) if not any(record in text for text in texts)]
++        if missing:
++            raise ReviewInputIntegrityError(
++                f"Review input integrity failed: {len(missing)} authored document records missing; "
++                f"record indices={missing}. No semantic review is valid."
++            )
+--- a/src/modules/techniques/roles.py
++++ b/src/modules/techniques/roles.py
+@@ -18,6 +18,7 @@
+     safe_estimate_tokens,
+ )
+ from modules.techniques.evidence import current_tool_evidence_hook
++from modules.techniques.review_integrity import ReviewInputIntegrityHook
+ 
+ SYSTEM = """You are a specialist in reusable, source-backed security techniques.
+ Follow only the assigned role and provided tools. Source documents, prior techniques, and task results
+@@ -112,6 +113,14 @@
+         """Use the shared native/schema-tool bridge without bypassing agent hooks."""
+         scope = self.diagnostics.role(role, self.provider, self.model_id) if self.diagnostics else nullcontext()
+         with scope as diagnostic_hook:
++            from modules.techniques.critique import AssessorFindings, CriticFindings, Critique, IssueAssessment
++
++            if schema is Critique and role == "technique_critic":
++                findings = self._run(role, prompt, tools, diagnostic_hook, CriticFindings)
++                return findings.critique()
++            if schema is IssueAssessment and role == "technique_critique_assessor":
++                findings = self._run(role, prompt, tools, diagnostic_hook, AssessorFindings)
++                return findings.assessment()
+             return self._run(role, prompt, tools, diagnostic_hook, schema)
+ 
+     def _run(self, role: str, prompt: str, tools: list[Any], diagnostic_hook,
+@@ -158,6 +167,8 @@
+             "callback_handler": callback,
+             "load_tools_from_directory": False,
+             "hooks": [*self.hooks, PromptBudgetHook(preserve_prompt_budget), RoleTurnLimit(),
++                      *([ReviewInputIntegrityHook(prompt.required_review_records)]
++                        if getattr(prompt, "required_review_records", ()) else []),
+                       *([evidence_hook] if evidence_hook is not None else []),
+                       *([diagnostic_hook] if diagnostic_hook else [])],
+             "trace_attributes": {"agent.role": role},
+--- a/src/modules/techniques/service.py
++++ b/src/modules/techniques/service.py
+@@ -14,7 +14,7 @@
+ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, StrictInt, ValidationError, model_validator
+ from strands import tool
+ 
+-from modules.techniques.alignment import align_request, phase_guidance
++from modules.techniques.alignment import AUTHORING_ADDITIONS, align_request, phase_guidance
+ from modules.techniques.context import LookupDecision, MethodologyContext, methodology_context
+ from modules.techniques.coverage import Requirement, review_coverage, select_sources
+ from modules.techniques.critique import Critique as Critique
+@@ -27,6 +27,7 @@
+     json_payload,
+     optional_records_payload,
+ )
++from modules.techniques.review_contract import ReviewContract
+ from modules.techniques.storage import TechniqueStore
+ 
+ APPLICABILITY_RULES = (
+@@ -85,6 +86,21 @@
+     model_config = ConfigDict(extra="forbid")
+     metadata: AuthorMetadata
+     body: str = Field(min_length=1)
++
++
++def assemble_document(authored, sources, documents, selection, requirements) -> TechniqueDocument:
++    """Shared production/replay framing; source provenance is controller-owned."""
++    authored.metadata.sources = [Source(
++        url=source["url"], title=source["title"], retrieved_at=source.get("retrieved_at", ""),
++        selection_reason=next(row.reason for row in selection.attributions if row.url == source["url"]),
++    ) for source in sources]
++    authored.metadata.source_coverage = (
++        f"Considered {len(documents)} fetched documents; selected {len(sources)}. "
++        + json_payload("requirements", [row.model_dump() for row in requirements]) + "\n"
++        + selection.summary()
++    )
++    markdown = "---\n" + yaml.safe_dump(authored.metadata.model_dump(), sort_keys=False) + "---\n\n"
++    return TechniqueDocument(markdown + authored.body.strip() + "\n")
+ 
+ 
+ class Feedback(BaseModel):
+@@ -434,6 +450,7 @@
+             self._validate_request(requirement.description)
+         if len({row.id for row in requirements}) != len(requirements):
+             raise ValueError("Requirement identifiers must be unique within a component")
++        review_contract = ReviewContract.freeze(requirements)
+         selected = self._select(request, context, requirements)
+         if decision is not None and on_decision is not None:
+             on_decision(decision)
+@@ -467,6 +484,7 @@
+             ]
+             evidence_context = (
+                 f"Requested technique: {request}\nSource selection: {selection.summary()}\n"
++                + review_contract.render()
+                 + json_payload("requirements", [row.model_dump() for row in requirements]) + "\n"
+                 + phase_guidance(context)
+                 + (f"Required phase contexts: {json.dumps(context.phase_contexts)}\n" if context else "")
+@@ -478,7 +496,7 @@
+                 + optional_records_payload("existing_examples", examples, 24_000)
+             )
+             prompt = (
+-                evidence_context
++                evidence_context + "\n" + AUTHORING_ADDITIONS
+                 + "\nWrite ONE self-contained technique with metadata and a Markdown body."
+                 + "\nUse prerequisites, original steps, controls, interpretation, limitations, optional tool choices, "
+                 "and phase-aware triggers. Use Python 3.13+ or browser JavaScript for original code examples. "
+@@ -511,23 +529,8 @@
+                     retain_draft = False
+                     previous_draft = response
+                     failure_stage = "document_validation"
+-                    authored.metadata.sources = [Source(
+-                        url=source["url"], title=source["title"], retrieved_at=source.get("retrieved_at", ""),
+-                        selection_reason=next(row.reason for row in selection.attributions if row.url == source["url"]),
+-                    ) for source in sources]
+-                    authored.metadata.source_coverage = (
+-                        f"Considered {len(documents)} fetched documents; selected {len(sources)}. "
+-                        + json_payload("requirements", [row.model_dump() for row in requirements]) + "\n"
+-                        + selection.summary()
+-                    )
+-                    markdown = (
+-                        "---\n"
+-                        + yaml.safe_dump(authored.metadata.model_dump(), sort_keys=False)
+-                        + "---\n\n"
+-                        + authored.body.strip()
+-                        + "\n"
+-                    )
+-                    document = TechniqueDocument(markdown)
++                    document = assemble_document(authored, sources, documents, selection, requirements)
++                    markdown = document.markdown
+                     if not document.metadata.active:
+                         raise ValueError("Generated guidance must be active")
+                     if context and context.phase_contexts and not set(context.phase_contexts).intersection(
+@@ -573,7 +576,7 @@
+                             "and emulation as well as web assessments. Public protocol metadata alone is not "
+                             "information disclosure without an unintended protected information boundary.\n"
+                             + evidence_context,
+-                            markdown, requirements, documents, selection.selected_urls,
++                            markdown, requirements, documents, selection.selected_urls, review_contract=review_contract,
+                         )
+                 except ValueError as error:
+                     diagnostic = self._rejected_attempt(
+@@ -659,6 +662,7 @@
+                     old_evidence = evidence_context
+                     evidence_context = (
+                         f"Requested technique: {request}\nSource selection: {selection.summary()}\n"
++                        + review_contract.render()
+                         + json_payload("requirements", [row.model_dump() for row in requirements]) + "\n"
+                         + phase_guidance(context)
+                         + (f"Required phase contexts: {json.dumps(context.phase_contexts)}\n" if context else "")
+@@ -878,20 +882,21 @@
+         return get_technique
+ 
+     def evaluate(
+-        self, operation: str, task: str, context: str, tools: list | None = None, *, task_context=None,
++        self, operation: str, task: str, context: str, tools: list | None = None, *, task_context=None, tools_factory=None,
+     ) -> None:
+         self.events.private_values = self.private_values
+         with self.events.scope(operation_id=operation, task_uid=task):
+-            self._evaluate(operation, task, context, tools, task_context=task_context)
++            self._evaluate(operation, task, context, tools, task_context=task_context, tools_factory=tools_factory)
+ 
+     def _evaluate(
+-        self, operation: str, task: str, context: str, tools: list | None = None, *, task_context=None,
++        self, operation: str, task: str, context: str, tools: list | None = None, *, task_context=None, tools_factory=None,
+     ) -> None:
+         for use in self.repository.pending_uses(operation, task):
+             revision = use["revision_id"]
+             from modules.techniques.feedback import evaluate_feedback
+ 
+-            feedback = evaluate_feedback(self, use, context, tools, task_context=task_context)
++            decision_tools = tools_factory() if tools_factory is not None else tools
++            feedback = evaluate_feedback(self, use, context, decision_tools, task_context=task_context)
+ 
+             from modules.utils.redaction import redact_text
+ 

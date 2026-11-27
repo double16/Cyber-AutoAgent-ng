@@ -400,6 +400,29 @@ async def test_structured_output_raises_value_error_for_invalid_json(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_native_validation_preserves_response_and_field_details(monkeypatch):
+    from modules.config.models.structured_output import StructuredOutputValidationError
+
+    class Output(BaseModel):
+        answer: int
+
+    content = '{"answer":"not-an-integer", "password":"private-value"}'
+
+    class FakeClient:
+        async def chat(self, **request):
+            assert request["format"]["properties"]["answer"]["type"] == "integer"
+            return type("Response", (), {"message": type("Msg", (), {"content": content})()})()
+
+    monkeypatch.setattr(mod.ollama, "AsyncClient", lambda *_args, **_kwargs: FakeClient())
+    with pytest.raises(StructuredOutputValidationError) as caught:
+        async for _event in _model().structured_output(Output, []):
+            pass
+    assert caught.value.rejected_response == content
+    assert caught.value.validation_errors[0]["loc"] == ["answer"]
+    assert "private-value" not in str(caught.value)
+
+
+@pytest.mark.asyncio
 async def test_structured_output_translates_context_overflow_response_error(monkeypatch):
     class Output(BaseModel):
         answer: int

@@ -1,0 +1,22 @@
+{
+  "study": "automatic-matching-and-delivery-diagnostic",
+  "cases": 10,
+  "negative_controls": 2,
+  "model": "muse-glimmer:30b-mlx",
+  "phase": "hypothesis_generation",
+  "request_cap": 512,
+  "matcher_cap_per_case": 4,
+  "selection_delivery_cap_per_arm": 30,
+  "repetitions": 1,
+  "matching": "Actual batched RecommendationContext matching, real configured embeddings and module signal adapters. Each case matched once; exact ranked lead decision shared by both arms.",
+  "baseline": "Production delivery and fitting with the previous first-lead, methodology-only existing selection decision.",
+  "candidate": "Current production AutomaticGuidanceHook: task-local selection, up to three ranked leads, existing native relevance schema.",
+  "catalog": "All 64 module revisions plus two normalized captured generated guides from the recorded operation. Historical scores, lifecycle and use evaluation excluded from model inputs. Captures eligible only in this isolated replay.",
+  "arm_order": "Counterbalanced by case index",
+  "metrics": ["retrieved trigger availability", "ranked lead relevance and assigned/shared observation linkage", "selected and delivered guidance", "valid empty versus failed matching", "capacity and lifecycle failures", "requests by unit"],
+  "adjudication": "Expected specialist guide presence/rank is a retrieval diagnostic, not a universal useful-document gate. Independently inspect selected document procedures against assigned purpose; adaptable relevant subsets and unknown prerequisites remain valid.",
+  "controls": "Two no-observed-boundary cases with unrelated shared features; thin navigation helper and legitimately assigned minimal authentication helper test purpose preservation without treating unrecorded inputs as absent.",
+  "failure_policy": "Preserve completed results and failures. No selective reruns or prompt tuning after first live request.",
+  "limits": "Diagnostic only; no target probes, executor adoption measurement, new document authorship or whole-operation execution. Matching is shared to isolate downstream selection changes, so no comparative matching uplift claim.",
+  "deployment": "No promotion or deployment, regardless of this small diagnostic result."
+}

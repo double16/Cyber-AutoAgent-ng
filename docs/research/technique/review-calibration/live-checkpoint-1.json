@@ -1,0 +1,27 @@
+{
+  "status": "running",
+  "trial": "outputs/technique_review_trials/live-matched-review-20261105-1",
+  "counts_at_checkpoint": {
+    "limit": 30,
+    "requests": 11,
+    "roles": 5
+  },
+  "completed": [
+    {
+      "case": "network-policy",
+      "arm": "baseline",
+      "status": "completed",
+      "approved": true,
+      "requests_cumulative": 7
+    }
+  ],
+  "observations": [
+    "Baseline network approval matches human label.",
+    "Baseline assessor required one correction because its discriminator excerpt failed the exact-body contract.",
+    "Candidate network independent assessment is running."
+  ],
+  "limitations": [
+    "Interim checkpoint, not final acceptance.",
+    "Remaining allowance and outcomes must be read from the trial budget and results; do not start a second trial or reset counters."
+  ]
+}

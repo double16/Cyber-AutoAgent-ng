@@ -10,12 +10,14 @@ import os
 import sys
 import tempfile
 from collections.abc import Iterable, Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
 from langfuse import Langfuse
 
+from modules.langfuse_read import read_session_traces
 from modules.utils.proxy import configure_langfuse_proxy_bypass
 from modules.utils.redaction import REDACTED, redact
 
@@ -163,29 +165,13 @@ class LangfuseSessionExporter:
     def __init__(self, client: Any):
         self.client = client
 
-    def export(self, session_id: str) -> dict[str, Any]:
+    def export(self, session_id: str, **window: Any) -> dict[str, Any]:
         try:
-            session = self.client.api.sessions.get(session_id)
+            traces = read_session_traces(self.client, session_id, **window)
         except Exception as error:
             raise ExportError(f"Unable to retrieve Langfuse session {session_id!r}: {error}") from error
-
-        trace_summaries = list(_get(session, "traces", []) or [])
-        if not trace_summaries:
-            raise ExportError(f"Langfuse session {session_id!r} has no traces.")
-
-        traces = []
-        unavailable_traces = []
-        for summary in trace_summaries:
-            trace_id = _get(summary, "id")
-            if not trace_id:
-                continue
-            try:
-                traces.append(self.client.api.trace.get(trace_id))
-            except Exception as error:
-                unavailable_traces.append({"trace_id": str(trace_id), "error": redact(str(error))})
-
         if not traces:
-            raise ExportError(f"No traces in Langfuse session {session_id!r} could be retrieved.")
+            raise ExportError(f"Langfuse session {session_id!r} has no traces in the requested time window.")
 
         records = [self._trace_record(trace) for trace in sorted(traces, key=self._trace_sort_key)]
         packet: dict[str, Any] = {
@@ -194,8 +180,6 @@ class LangfuseSessionExporter:
             "session_id": session_id,
             "traces": records,
         }
-        if unavailable_traces:
-            packet["unavailable_traces"] = unavailable_traces
         return packet
 
     @staticmethod
@@ -335,6 +319,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Export a Langfuse session as an LLM-ready prompt review packet.")
     parser.add_argument("--session-id", required=True, help="Langfuse session ID to export")
     parser.add_argument("--output", help="Destination file; defaults to stdout")
+    parser.add_argument("--from-time", type=datetime.fromisoformat, help="ISO-8601 start (default: all retained history)")
+    parser.add_argument("--to-time", type=datetime.fromisoformat, help="ISO-8601 end (default: now)")
     parser.add_argument(
         "--format",
         choices=OUTPUT_FORMATS,
@@ -355,8 +341,13 @@ def main(argv: list[str] | None = None) -> int:
     configure_langfuse_proxy_bypass(langfuse_host=host)
     client = Langfuse(public_key=public_key, secret_key=secret_key, base_url=host)
     try:
+        window = {}
+        if args.from_time:
+            window["from_start_time"] = args.from_time
+        if args.to_time:
+            window["to_start_time"] = args.to_time
         _write_packet(
-            LangfuseSessionExporter(client).export(args.session_id),
+            LangfuseSessionExporter(client).export(args.session_id, **window),
             args.output,
             _resolve_output_format(args.output, args.format),
         )

@@ -1,0 +1,42 @@
+{
+  "summary": "The draft provides a reusable header-selector authorization test with prerequisites, controls, a step-by-step procedure, interpretation conditions, evidence requirements and future checks. The structure covers policy establishment, baseline and entitlement controls, negative control, and a comparison of baseline vs variant responses while keeping authentication constant. The methodology is largely operationally sufficient and distinguishes legitimate behavior from a boundary violation by requiring explicit policy, baseline legitimacy, unauthorized disclosure evidence and control hold.",
+  "issues": [
+    {
+      "criterion_id": "core:attribution",
+      "problem": "The body attributes a claim to the PortSwigger IDOR source without providing a passage citation. Line 74 states 'The PortSwigger IDOR concept notes bypassing access controls to view records of other customers and the conditional nature when no other controls are in place.' This is a source-attributed factual claim that is not linked to a retained source passage_id.",
+      "material_impact": "Attribution accuracy is compromised; a source-attributed statement is presented without verifiable source support, violating accurate attribution requirements.",
+      "requested_correction": "Add a citation to the retained PortSwigger passage for the IDOR definition claim, e.g., cite passage_id d1d15aec23f3d9f9bc4e85bd8596a5ff6d1e53458817ebfd57af6f30a35b636a when referencing the IDOR concept and the conditional 'If no other controls are in place' framing.",
+      "draft_references": [
+        "ddce6e88058be:b74"
+      ],
+      "passage_ids": [
+        "d1d15aec23f3d9f9bc4e85bd8596a5ff6d1e53458817ebfd57af6f30a35b636a"
+      ]
+    },
+    {
+      "criterion_id": "core:interpretation",
+      "problem": "Interpretation condition 3 treats a status code and response shape remaining consistent with a successful selection as confirmation that the server processed the header change rather than rejecting it. Same template / 200 OK alone does not distinguish legitimate processing from an authorization violation and can misclassify legitimate behavior.",
+      "material_impact": "The interpretation rule can lead to false positive violation labeling when the server legitimately processes the header but still enforces access control, undermining correct distinction between legitimate behavior and boundary violation.",
+      "requested_correction": "Replace the inference with an explicit evidence requirement: a violation is established only when the variant response contains object data attributable to the unauthorized principal, e.g., an object identifier matching H_variant, and that data is demonstrably different from the baseline object for principal A. Status code consistency should be recorded as evidence of processing, not as confirmation of a violation.",
+      "draft_references": [
+        "ddce6e88058be:b56",
+        "ddce6e88058be:b57"
+      ],
+      "passage_ids": []
+    },
+    {
+      "criterion_id": "core:correctness",
+      "problem": "The server-side processing check in Prerequisites 3 suggests observing 'a deterministic change, e.g., error, empty result, or different object' as proof the header is processed. Observing a different object on an invalid token can itself be an unauthorized disclosure and is not a reliable processing signal.",
+      "material_impact": "The check can conflate processing detection with a potential violation and may mislead the tester about whether the header is a selector.",
+      "requested_correction": "Clarify the processing check to require a deterministic, policy-consistent change such as a documented error or empty result for an invalid token, and treat an unexpected object change as a finding requiring full policy and control validation rather than as confirmation of processing.",
+      "draft_references": [
+        "ddce6e88058be:b16"
+      ],
+      "passage_ids": []
+    }
+  ],
+  "suggestions": [
+    "Add an explicit future check to verify that the header is not intended to be a client-controlled selector, e.g., documentation or code review showing the header is meant for server-side routing, and document that as a legitimate-behavior exclusion.",
+    "Consider adding a control to record the exact request chain, including any proxy or backend routing headers, to ensure the test reproduces production processing."
+  ]
+}

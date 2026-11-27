@@ -1,0 +1,58 @@
+{
+  "requests": 64,
+  "promotion_gate_passed": false,
+  "arms": {
+    "baseline": {
+      "decisions": 32,
+      "schema_and_controller_consistent": 32,
+      "designated_check_correct": 30,
+      "defects_detected": 14,
+      "defect_trials": 14,
+      "valid_controls_correct": 16,
+      "valid_control_trials": 18,
+      "whole_valid_proposals_retained": 16,
+      "mean_input_characters": 27133,
+      "errors": [
+        {
+          "case": "http_valid_single_admin",
+          "repetition": 1,
+          "actual": "revise"
+        },
+        {
+          "case": "http_valid_single_admin",
+          "repetition": 0,
+          "actual": "revise"
+        }
+      ]
+    },
+    "candidate": {
+      "decisions": 32,
+      "schema_and_controller_consistent": 32,
+      "designated_check_correct": 30,
+      "defects_detected": 14,
+      "defect_trials": 14,
+      "valid_controls_correct": 16,
+      "valid_control_trials": 18,
+      "whole_valid_proposals_retained": 16,
+      "mean_input_characters": 26382,
+      "errors": [
+        {
+          "case": "http_valid_single_admin",
+          "repetition": 0,
+          "actual": "revise"
+        },
+        {
+          "case": "http_valid_single_admin",
+          "repetition": 1,
+          "actual": "revise"
+        }
+      ]
+    }
+  },
+  "conclusion": "No semantic improvement demonstrated; both arms detect all 14 defect trials and reject the same two valid single-admin plus anonymous-control trials. Do not promote or proceed to gated end-to-end checks.",
+  "limitations": [
+    "Synthetic complete source-policy fixtures without tool use.",
+    "Small fixed corpus; no production-context causal or end-to-end effectiveness estimate.",
+    "Original malformed study excluded; no tuning or selective reruns."
+  ]
+}

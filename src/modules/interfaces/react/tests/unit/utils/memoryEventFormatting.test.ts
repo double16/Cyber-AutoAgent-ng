@@ -36,3 +36,12 @@ describe('formatAutoRunMemoryEvent', () => {
     expect(formatAutoRunMemoryEvent({type: 'task_done', title: 'Recon'})).toBeNull();
   });
 });
+
+it('handles absent event fields and scoped validation tasks', () => {
+  expect(formatAutoRunMemoryEvent(null)).toBeNull();
+  expect(formatAutoRunMemoryEvent({type: 'memory_added', content_preview: ' '})).toBe('🧠 Memory added (memory)');
+  expect(formatAutoRunMemoryEvent({type: 'task_started', task_kind: 'finding_validation', target_scope: 'all', target_ids: ['x']})).not.toContain('scope:');
+  expect(formatAutoRunMemoryEvent({type: 'task_started', task_kind: 'finding_validation', target_scope: 'selected', target_ids: ['a', null, 'b']})).toContain('[scope: a,b]');
+  expect(formatAutoRunMemoryEvent({type: 'task_started', task_kind: 'finding_validation', target_scope: 'host'})).toContain('[scope: host]');
+  expect(formatAutoRunMemoryEvent({type: 'task_done', finding_resolution: 'pending', status_reason: ' '})).toBe('⚠️ Finding requires validation "Finding"');
+});

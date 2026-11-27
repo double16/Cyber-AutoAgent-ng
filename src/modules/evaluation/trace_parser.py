@@ -17,6 +17,7 @@ from ragas.dataset_schema import MultiTurnSample, SingleTurnSample
 from ragas.messages import AIMessage, HumanMessage
 
 from modules.config.system.logger import get_logger
+from modules.langfuse_read import read_observations
 
 logger = get_logger("Evaluation.TraceParser")
 
@@ -324,9 +325,7 @@ class TraceParser:
                 for obs_id in trace.observations:
                     try:
                         # Fetch observation from Langfuse API
-                        obs = self.langfuse.api.observations.get(obs_id)
-                        if obs:
-                            observations.append(obs)
+                        observations.extend(read_observations(self.langfuse, observation_id=obs_id))
                     except Exception as e:
                         logger.warning(f"Failed to fetch observation {obs_id}: {e}")
 

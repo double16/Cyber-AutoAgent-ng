@@ -1,0 +1,14 @@
+{
+  "study": "simplified-delivery-whole-corpus-recheck",
+  "cases": 10,
+  "arms": ["simplified"],
+  "request_cap": 160,
+  "per_case_cap": 30,
+  "model": "muse-glimmer:30b-mlx",
+  "inputs": "All ten original frozen matcher decisions, ranked leads and task observations. Catalog copied into a new isolated root; new task scopes prevent receipt/cache replay.",
+  "change": "Task relevance is decided once by the matcher. Methodology selection no longer has a whole-task relevance veto. Conditional prerequisites and useful task subsets remain acceptable. Existing three-lead fallback retained.",
+  "scope": "Fresh corpus recheck, not a newly paired causal estimate and not selective rerunning of the failed navigation case.",
+  "completion": "Verify relevant guidance is delivered for positive cases, valid absence for both negative controls, no runtime/capacity failure counted as absence. Inspect broad alternatives by procedure content.",
+  "failure_policy": "Preserve results; no prompt tuning or selective reruns after the first new request.",
+  "deployment": "No deployment or promotion based solely on this recheck. Earlier failed candidates remain failed."
+}

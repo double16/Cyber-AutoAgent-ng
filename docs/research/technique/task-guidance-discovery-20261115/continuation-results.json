@@ -1,0 +1,109 @@
+{
+  "counts": {
+    "requests": 5,
+    "limit": 30
+  },
+  "outcomes": [
+    {
+      "mode": "unknown",
+      "arm": "none",
+      "index": 0,
+      "status": "completed",
+      "answer": {
+        "classification": "violation",
+        "evidence_ids": [
+          "obs-1",
+          "obs-3",
+          "obs-4",
+          "obs-5",
+          "obs-6"
+        ],
+        "explanation": "Identity mapping obs-1 shows session-red\u2192A and session-blue\u2192B. Account endpoint returns the account object for the selector-supplied value even when the response contains error \"not authorized\". Mismatched probes obs-3 (session-red / selector B) and obs-4 (session-blue / selector A) both return the target account object {owner: B/A}. Matched probes obs-5 and obs-6 also return the object with an authorization error. The X-Account selector is therefore not enforced; unauthorized access to account data is permitted."
+      },
+      "correct_classification": false,
+      "valid_evidence_ids": true,
+      "decisive_probe": true,
+      "discovery_evidence": false,
+      "supported_correct": false,
+      "requests": 5,
+      "observations": [
+        {
+          "id": "obs-1",
+          "kind": "identity",
+          "response": {
+            "session-red": "A",
+            "session-blue": "B"
+          }
+        },
+        {
+          "id": "obs-2",
+          "kind": "policy",
+          "response": {
+            "available": false,
+            "reason": "Policy record unavailable"
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "session-red",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "session-blue",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "A",
+                "value": "record-A"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-5",
+          "principal": "session-blue",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-6",
+          "principal": "session-red",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "A",
+                "value": "record-A"
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

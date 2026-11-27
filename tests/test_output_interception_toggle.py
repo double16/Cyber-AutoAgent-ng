@@ -3,6 +3,10 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("isolated_technique_service")
+
 
 class FakeReactHooks:
     def __init__(self, *args, **kwargs):

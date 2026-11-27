@@ -1,0 +1,570 @@
+{
+  "status": "failed_unresolved_filesystem_contract",
+  "candidate_code_identity": "598761fad61761b3d61bbadbc3bcc0bd93c83525c4bfa6502d4ac5346567c4ad",
+  "protocol": "protocol.json",
+  "counts": {
+    "limit": 21,
+    "requests": 17,
+    "roles": 7
+  },
+  "results": [
+    {
+      "case": "network-policy",
+      "status": "completed",
+      "review": {
+        "approved": true,
+        "decision_origin": "controller_findings",
+        "issue_dispositions": [],
+        "category": "authored_content",
+        "reason": "The draft describes a reusable policy-based connectivity comparison with identity binding, controls and evidence requirements without target execution or command syntax. Technical claims about rule evaluation and connection state are supported by the retained pf.conf excerpts, and the procedure distinguishes legitimate allowed connectivity from a suspected enforcement failure via prerequisite policy establishment, baseline allowed-peer test, controlled denied-peer variation, and identity/path verification. No blocking defects are identified.",
+        "issues": [],
+        "suggestions": [],
+        "interpretations": [
+          {
+            "draft_references": [
+              "d93354ab1ca02:b28",
+              "d93354ab1ca02:b29",
+              "d93354ab1ca02:b30",
+              "d93354ab1ca02:b31",
+              "d93354ab1ca02:b32"
+            ],
+            "prerequisite_or_policy": "The declared policy defines allowed and denied source/service pairs for a specific service, and the effective rule-set revision, enforcement interface, rule ordering and state handling at the enforcement point are established before interpretation. Source identity visible at the enforcement point, including any NAT or proxy mapping, is verified, and the test path to the intended service through that enforcement point is confirmed.",
+            "legitimate_outcome": "Allowed connectivity from a policy-allowed peer to the protected service is legitimate when the control confirms the service is reachable and the identity mapping and path are verified.",
+            "suspected_violation": "Enforcement failure is suspected only when an independently established denied identity reaches the protected service under the stated policy with identity mapping and path verified; mere response differences or successful connectivity from an unspecified peer do not establish a violation.",
+            "distinguishing_control": "Establish an allowed-peer baseline using a fresh connection, then attempt the same operation from the independently verified denied peer holding service, protocol and operation constant, with pre-existing connection state accounted for, and repeat the allowed control to confirm service availability remains unchanged. Record which rule and state decision applied when available, and preserve policy reference, rule-set revision, state considerations, source identity mapping, destination/service identity, connection attempts, timestamps and service-side observations."
+          }
+        ],
+        "no_security_checks_reason": ""
+      },
+      "counts": {
+        "limit": 21,
+        "requests": 5,
+        "roles": 2
+      }
+    },
+    {
+      "case": "filesystem-policy",
+      "status": "unresolved",
+      "error_type": "ValueError",
+      "error": "Critique assessment failed after one correction: IssueAssessment contract failed for technique_critique_assessor after one correction: actual_discriminator must be a verbatim excerpt from the frozen procedure body; return the empty string when the draft has no distinguishing control. Do not invent or paraphrase a policy-establishment step",
+      "counts": {
+        "limit": 21,
+        "requests": 12,
+        "roles": 5
+      }
+    },
+    {
+      "case": "http-selector-corrected",
+      "status": "completed",
+      "review": {
+        "approved": true,
+        "decision_origin": "controller_findings",
+        "issue_dispositions": [],
+        "category": "authored_content",
+        "reason": "The draft describes a reusable header-selector comparison with explicit prerequisite policy establishment, baseline allowed-object control, single-variable selector change, negative-control shape check, and stability re-verification. Interpretation correctly requires an independently established entitlement denial for object B, unchanged identity and policy stability, and object binding evidence before labeling an IDOR. Controls and evidence requirements are specified and no target execution is requested. No material defects against the acceptance criteria are identified.",
+        "issues": [],
+        "suggestions": [],
+        "interpretations": [
+          {
+            "draft_references": [
+              "d289e33021071:b9",
+              "d289e33021071:b10",
+              "d289e33021071:b11",
+              "d289e33021071:b13",
+              "d289e33021071:b14",
+              "d289e33021071:b33",
+              "d289e33021071:b34",
+              "d289e33021071:b35",
+              "d289e33021071:b36"
+            ],
+            "prerequisite_or_policy": "Intended entitlement policy is established independently from approved documentation, configuration, or an authoritative policy owner, with recorded rationale why the declared test identity should access object A and should not access object B for the same operation, accounting for ownership, sharing, roles and other access grants. Entitlement for both objects must be known before a security conclusion is drawn.",
+            "legitimate_outcome": "Returning a different object after a selector change can be legitimate selection when both objects are allowed for the identity under the established policy, or when the selector is required and the service correctly returns the requested allowed object A with stable identity, object binding and policy.",
+            "suspected_violation": "An IDOR is suspected only if the unchanged identity obtains controlled object B despite an independently established policy denying that identity the same operation on B, with identity, object binding and policy stability verified. A denial of B supports expected enforcement for this comparison; unknown entitlement, identity drift, ambiguous returned object or unstable policy leaves the result inconclusive.",
+            "distinguishing_control": "Baseline allowed-object request for A with status, returned object identity and non-sensitive marker; single-variable change of only the selector to object B while retaining same identity, endpoint, operation and other request context with verification of returned object identity and marker; negative-control removal of the selector to test request-shape requirement; repeat of the allowed-object request to verify identity, policy and object bindings remained stable before interpreting the comparison."
+          }
+        ],
+        "no_security_checks_reason": ""
+      },
+      "counts": {
+        "limit": 21,
+        "requests": 17,
+        "roles": 7
+      }
+    }
+  ],
+  "assessments": [
+    {
+      "case": "00-network-policy",
+      "timestamp": "2026-11-05T23:32:42.250583+00:00",
+      "stage": "critique",
+      "status": "review_snapshot",
+      "snapshot_id": "93354ab1ca026034f7ddd761eb1cae9a51d947d14a16ff4b5451c7225e77e74a",
+      "draft_reference_count": 52
+    },
+    {
+      "case": "00-network-policy",
+      "timestamp": "2026-11-05T23:36:53.116069+00:00",
+      "stage": "critique",
+      "status": "issues_validated",
+      "snapshot_id": "93354ab1ca026034f7ddd761eb1cae9a51d947d14a16ff4b5451c7225e77e74a",
+      "issues": [],
+      "source_inspection": [
+        {
+          "url": "https://man.openbsd.org/pf.conf",
+          "characters": 146,
+          "inspected_intervals": [
+            [
+              0,
+              146
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "case": "00-network-policy",
+      "timestamp": "2026-11-05T23:41:08.452708+00:00",
+      "stage": "critique_assessment",
+      "status": "assessed",
+      "snapshot_id": "93354ab1ca026034f7ddd761eb1cae9a51d947d14a16ff4b5451c7225e77e74a",
+      "proposed_decision": true,
+      "assessment": {
+        "interpretation_reviews": [
+          {
+            "interpretation_index": 0,
+            "draft_references": [
+              "d93354ab1ca02:b28",
+              "d93354ab1ca02:b29",
+              "d93354ab1ca02:b30",
+              "d93354ab1ca02:b31",
+              "d93354ab1ca02:b32"
+            ],
+            "permitted_counterexample": "A policy-compliant scenario that produces the exact observation 'an independently established denied identity reaches that protected service under the stated policy with identity mapping and path verified' cannot exist. The procedure's explicit prerequisite establishes the declared policy defines allowed and denied source/service pairs, and source identity visible at the enforcement point including NAT/proxy mapping is verified and the test path to the intended service through that enforcement point is confirmed. Under those prerequisites, a denied identity reaching the protected service is by definition a policy violation; authorized access cannot simultaneously be access despite missing entitlements. No permitted scenario satisfies both the prerequisite that the peer is denied by the stated policy and the observation that the denied identity reaches the service.",
+            "counterexample_matches_check": false,
+            "control_excludes_counterexample": false,
+            "actual_discriminator": "failure only when the independently established denied identity reaches that protected service",
+            "critic_correct": true
+          }
+        ],
+        "critic_supported": true,
+        "reason": "The draft describes a reusable policy-based connectivity comparison with identity binding, controls and evidence requirements and does not request target execution or command syntax. Technical claims about rule evaluation and connection state are supported by the retained pf.conf excerpts within the inspected intervals. The procedure establishes policy, effective rule-set revision, enforcement interface, rule ordering and state handling, verifies source identity at the enforcement point including NAT/proxy mapping, confirms test path to the intended service, uses an allowed-peer baseline and a controlled denied-peer variation holding service/protocol/operation constant, accounts for pre-existing connection state, repeats the allowed control, and requires identity mapping and path verification before labeling enforcement failure. The interpretation distinguishes legitimate allowed connectivity from a suspected enforcement failure and the critic's assessment correctly identifies the prerequisites, legitimate outcome, suspected violation and distinguishing control. No material blocker is identified under the frozen acceptance criteria.",
+        "findings": []
+      },
+      "correction_number": 0,
+      "final_disposition": "accepted"
+    },
+    {
+      "case": "01-filesystem-policy",
+      "timestamp": "2026-11-05T23:41:12.730868+00:00",
+      "stage": "critique",
+      "status": "review_snapshot",
+      "snapshot_id": "e839ba9c2b56ba4c140b663f4e075414939f9800fe7e8a1deadd4f3af6b489d9",
+      "draft_reference_count": 49
+    },
+    {
+      "case": "01-filesystem-policy",
+      "timestamp": "2026-11-05T23:45:43.948895+00:00",
+      "stage": "critique",
+      "status": "issues_validated",
+      "snapshot_id": "e839ba9c2b56ba4c140b663f4e075414939f9800fe7e8a1deadd4f3af6b489d9",
+      "issues": [],
+      "source_inspection": [
+        {
+          "url": "https://man7.org/linux/man-pages/man2/open.2.html",
+          "characters": 132,
+          "inspected_intervals": [
+            [
+              0,
+              132
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "case": "01-filesystem-policy",
+      "timestamp": "2026-11-05T23:49:56.600852+00:00",
+      "stage": "critique_assessment",
+      "status": "failed",
+      "originating_role": "technique_critique_assessor",
+      "expected_schema": "IssueAssessment",
+      "failure_kind": "contract",
+      "correction_number": 0
+    },
+    {
+      "case": "01-filesystem-policy",
+      "timestamp": "2026-11-05T23:54:17.700094+00:00",
+      "stage": "critique_assessment",
+      "status": "failed",
+      "originating_role": "technique_critique_assessor",
+      "expected_schema": "IssueAssessment",
+      "failure_kind": "contract",
+      "correction_number": 1
+    },
+    {
+      "case": "02-http-selector-corrected",
+      "timestamp": "2026-11-05T23:54:22.473232+00:00",
+      "stage": "critique",
+      "status": "review_snapshot",
+      "snapshot_id": "289e3302107199089346b84cf20251ff595290ef8da4077ce79e21a069493db3",
+      "draft_reference_count": 60
+    },
+    {
+      "case": "02-http-selector-corrected",
+      "timestamp": "2026-11-05T23:58:37.314191+00:00",
+      "stage": "critique",
+      "status": "issues_validated",
+      "snapshot_id": "289e3302107199089346b84cf20251ff595290ef8da4077ce79e21a069493db3",
+      "issues": [],
+      "source_inspection": [
+        {
+          "url": "https://portswigger.net/web-security/access-control/idor",
+          "characters": 123,
+          "inspected_intervals": [
+            [
+              0,
+              123
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "case": "02-http-selector-corrected",
+      "timestamp": "2026-11-06T00:03:31.986168+00:00",
+      "stage": "critique_assessment",
+      "status": "assessed",
+      "snapshot_id": "289e3302107199089346b84cf20251ff595290ef8da4077ce79e21a069493db3",
+      "proposed_decision": true,
+      "assessment": {
+        "interpretation_reviews": [
+          {
+            "interpretation_index": 0,
+            "draft_references": [
+              "d289e33021071:b9",
+              "d289e33021071:b10",
+              "d289e33021071:b11",
+              "d289e33021071:b13",
+              "d289e33021071:b14",
+              "d289e33021071:b33",
+              "d289e33021071:b34",
+              "d289e33021071:b35",
+              "d289e33021071:b36"
+            ],
+            "permitted_counterexample": "A policy-compliant scenario that produces the exact suspicious observation would require the unchanged test identity to obtain object B while an independently established policy denies that identity the same operation on B, with identity, object binding and policy stability verified. No policy-compliant scenario can satisfy both the explicit prerequisite of an established denial for B and the observation of successful retrieval of B by the same identity under verified stability, because the observation itself encodes a policy violation. Authorized access to B is incompatible with an established denial for B.",
+            "counterexample_matches_check": false,
+            "control_excludes_counterexample": false,
+            "actual_discriminator": "Establish the intended entitlement policy independently from approved documentation, configuration,",
+            "critic_correct": true
+          }
+        ],
+        "critic_supported": true,
+        "reason": "The critic's interpretation correctly captures the draft's prerequisite of independently established entitlement denial for object B, the requirement for unchanged identity, object binding and policy stability, and the legitimate outcome that returning a different object can be legitimate selection when both objects are allowed. The suspicious observation as defined in the draft includes an established denial for B, so no policy-compliant permitted counterexample can satisfy both the explicit prerequisites and the exact observation labeled suspicious. The draft's distinguishing controls are baseline allowed-object request with marker, single-variable selector change with identity retention, negative-control shape check, and repeat allowed control for stability, and the interpretation requires all of these before labeling an IDOR. No material defect against core:technical_support, core:interpretation, core:operational_sufficiency, core:attribution or core:restrictions is demonstrated within retained material, and the requested deliverable requirement:method is satisfied by the described reusable header-selector test with controls and evidence requirements and no target execution request.",
+        "findings": []
+      },
+      "correction_number": 0,
+      "final_disposition": "accepted"
+    }
+  ],
+  "model_inputs": [
+    {
+      "case": "00-network-policy",
+      "role": "technique_critic",
+      "input_tokens": 6889,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "00-network-policy",
+      "role": "technique_critic",
+      "input_tokens": 6639,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "00-network-policy",
+      "role": "technique_critic",
+      "input_tokens": 7934,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "00-network-policy",
+      "role": "technique_critique_assessor",
+      "input_tokens": 4869,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "00-network-policy",
+      "role": "technique_critique_assessor",
+      "input_tokens": 7484,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "01-filesystem-policy",
+      "role": "technique_critic",
+      "input_tokens": 6843,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "01-filesystem-policy",
+      "role": "technique_critic",
+      "input_tokens": 6719,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "01-filesystem-policy",
+      "role": "technique_critic",
+      "input_tokens": 8217,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "01-filesystem-policy",
+      "role": "technique_critique_assessor",
+      "input_tokens": 4816,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "01-filesystem-policy",
+      "role": "technique_critique_assessor",
+      "input_tokens": 7936,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "01-filesystem-policy",
+      "role": "technique_critique_assessor",
+      "input_tokens": 4548,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "01-filesystem-policy",
+      "role": "technique_critique_assessor",
+      "input_tokens": 8013,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "02-http-selector-corrected",
+      "role": "technique_critic",
+      "input_tokens": 7254,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "02-http-selector-corrected",
+      "role": "technique_critic",
+      "input_tokens": 6965,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "02-http-selector-corrected",
+      "role": "technique_critic",
+      "input_tokens": 8177,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "02-http-selector-corrected",
+      "role": "technique_critique_assessor",
+      "input_tokens": 5230,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "02-http-selector-corrected",
+      "role": "technique_critique_assessor",
+      "input_tokens": 8270,
+      "prompt_limit": 40000
+    }
+  ],
+  "request_provenance": [
+    {
+      "path": "outputs/technique_review_trials/final-positive-acceptance-20261105-1/live/00-network-policy/provider-request-01.json",
+      "sha256": "eaaf1717f77ad3f8998c6785357881b2c3feb4a66d7130b4e7b64fa18d0aab28",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/final-positive-acceptance-20261105-1/live/00-network-policy/provider-request-02.json",
+      "sha256": "d1b901ab630df7fa983394f51e474f56e07ff9e638f369af7fbad81d866e4136",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/final-positive-acceptance-20261105-1/live/00-network-policy/provider-request-03.json",
+      "sha256": "63223b403b89b52931ee383b0fe2704e15c5412f72d61d2c1547591e0bb47026",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/final-positive-acceptance-20261105-1/live/00-network-policy/provider-request-04.json",
+      "sha256": "a654eb83e637f37ddda6faf82863587962fed98db8bbd53f6ed7ebb8618a33bc",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/final-positive-acceptance-20261105-1/live/00-network-policy/provider-request-05.json",
+      "sha256": "462ab6c981d903e988c02987ea92d9e27f1d23b6ea7a1ee3d9635fcbd185b4f0",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/final-positive-acceptance-20261105-1/live/01-filesystem-policy/provider-request-06.json",
+      "sha256": "2fe0c32484a5d55b56915ec5d272599b1cde850ab1d046ec1274dc3b15224ecc",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/final-positive-acceptance-20261105-1/live/01-filesystem-policy/provider-request-07.json",
+      "sha256": "314d2c4db784d251edb5832e5be16ef2fee365df6c04c627ed2d71438cd77abb",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/final-positive-acceptance-20261105-1/live/01-filesystem-policy/provider-request-08.json",
+      "sha256": "29257fe698168a8a64a0cad678f5664699e595b2ad30814145b978ad94f4aab5",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/final-positive-acceptance-20261105-1/live/01-filesystem-policy/provider-request-09.json",
+      "sha256": "4c1513502fb92a795a09268c9e4b6500a530c4abba4a35f50a2ddb94e6d4187a",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/final-positive-acceptance-20261105-1/live/01-filesystem-policy/provider-request-10.json",
+      "sha256": "2088f06babfa410beb1fd2a9921670362dc24fee671200ba8c9ca425a2931a83",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/final-positive-acceptance-20261105-1/live/01-filesystem-policy/provider-request-11.json",
+      "sha256": "a768e476e6e13add261434ca679529981c55f94e28bdb45522163d3cb13a150e",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/final-positive-acceptance-20261105-1/live/01-filesystem-policy/provider-request-12.json",
+      "sha256": "cb65bd98d58a49c3fb32e37069395b3fe0a0d9282a1ddd36f587ee700460fc63",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/final-positive-acceptance-20261105-1/live/02-http-selector-corrected/provider-request-13.json",
+      "sha256": "b608da20834176e538a647493f6e7d542a0f93720680ec6fb3c570f3185315e0",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/final-positive-acceptance-20261105-1/live/02-http-selector-corrected/provider-request-14.json",
+      "sha256": "de92e0da985a8704f3f5485dd2fa78a8df291931eaf0d279e32fb30aec5b2967",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/final-positive-acceptance-20261105-1/live/02-http-selector-corrected/provider-request-15.json",
+      "sha256": "7454cbfa02e3372abc93f13939a275a26ca14335962178c751460c7bc945bc59",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/final-positive-acceptance-20261105-1/live/02-http-selector-corrected/provider-request-16.json",
+      "sha256": "3a35ab3b00878391bc9af12d6bb3d4b5a91b75d065d5fa610ca3c3af98c66143",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/final-positive-acceptance-20261105-1/live/02-http-selector-corrected/provider-request-17.json",
+      "sha256": "9096539e5c44536c92cae3feccf44f947702b75e264d65763715286fe5aeb454",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    }
+  ],
+  "prior_live_requests": 44,
+  "cumulative_live_requests": 61,
+  "remaining_requests_in_this_allowance": 4,
+  "limitations": [
+    "Unresolved filesystem review prevents acceptance despite two correct approvals.",
+    "No repeated case or replacement outcome is included in this trial.",
+    "No generation yield was measured."
+  ]
+}

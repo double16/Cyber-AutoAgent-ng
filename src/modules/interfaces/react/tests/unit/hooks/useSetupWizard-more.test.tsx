@@ -104,3 +104,19 @@ describe('useSetupWizard additional coverage', () => {
 
   });
 });
+
+it('clamps navigation and supplies generic setup failure text', async () => {
+  const {useSetupWizard} = await load();
+  let current: any; const Consumer = () => {current = useSetupWizard(); return null;};
+  let view!: ReactTestRenderer;
+  act(() => {view = TestRenderer.create(<Consumer/>);});
+  act(() => {current.actions.previousStep();});
+  act(() => {current.actions.previousStep();});
+  expect(current.state.currentStep).toBe('welcome');
+  for (let i = 0; i < 4; i++) act(() => current.actions.nextStep());
+  expect(current.state.currentStep).toBe('progress');
+  setupThrows = false; setupResult = {success: false, deploymentMode: 'local-cli'};
+  await act(async () => current.actions.startSetup('local-cli'));
+  expect(current.state.error).toBe('Setup failed');
+  act(() => view.unmount()); delete process.env.CYBER_SHOW_SETUP;
+});

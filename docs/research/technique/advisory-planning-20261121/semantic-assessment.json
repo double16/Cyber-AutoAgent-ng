@@ -1,0 +1,117 @@
+{
+  "method": "Offline analyst assessment of frozen outputs; advisory research, not a production gate.",
+  "email": {
+    "assessment": "mixed in both arms",
+    "strengths": [
+      "Header-injection procedures require raw mail or mailbox evidence of an added header versus a baseline.",
+      "Unknown server mapping and sanitization are generally preserved as future prerequisites."
+    ],
+    "limitations": [
+      "Recipient override or external delivery is sometimes treated as relay abuse without establishing intended recipient policy.",
+      "Some positive lists also include mere request acceptance; some body/header contexts remain underspecified."
+    ],
+    "comparison": "No general discrimination uplift established across the three paired repetitions.",
+    "reviewed_records": [
+      "outputs/technique_review_trials/advisory-20261121/application-email-baseline-0.json",
+      "outputs/technique_review_trials/advisory-20261121/application-email-advisory-1.json",
+      "outputs/technique_review_trials/advisory-20261121/application-email-advisory-0.json",
+      "outputs/technique_review_trials/advisory-20261121/application-email-baseline-1.json",
+      "outputs/technique_review_trials/advisory-20261121/application-email-baseline-2.json",
+      "outputs/technique_review_trials/advisory-20261121/application-email-advisory-2.json"
+    ]
+  },
+  "csrf": {
+    "assessment": "Meaningful protected-action comparisons in both arms; identity metadata incomplete.",
+    "strengths": [
+      "Protected state change and independent read-back are generally explicit.",
+      "Browser credential attachment, custom-header preflight and legitimate request controls are included."
+    ],
+    "limitations": [
+      "All ten proposed hypotheses across these six outputs left roles empty despite authenticated test preconditions.",
+      "Some ancillary fingerprint/acceptance indicators remain insufficient without the protected-action comparison."
+    ],
+    "comparison": "No general quality uplift attributable to planning alone; subsequent schema-description probe isolates identity clarity.",
+    "reviewed_records": [
+      "outputs/technique_review_trials/advisory-20261121/application-csrf-advisory-1.json",
+      "outputs/technique_review_trials/advisory-20261121/application-csrf-baseline-0.json",
+      "outputs/technique_review_trials/advisory-20261121/application-csrf-baseline-1.json",
+      "outputs/technique_review_trials/advisory-20261121/application-csrf-advisory-0.json",
+      "outputs/technique_review_trials/advisory-20261121/application-csrf-baseline-2.json",
+      "outputs/technique_review_trials/advisory-20261121/application-csrf-advisory-2.json"
+    ]
+  },
+  "oidc": {
+    "assessment": "Mixed in both arms; one advisory-arm native validation failure before schema clarification.",
+    "strengths": [
+      "Several proposals require documentation or configuration to classify public versus protected data.",
+      "Some proposals distinguish permitted issuer destinations or credential audiences from forbidden ones."
+    ],
+    "limitations": [
+      "Client-specific fields, response differences and nonstandard metadata are sometimes treated as sensitive without sufficient audience distinction.",
+      "Several SSRF-style positives establish ordinary fetching rather than a prohibited destination or protected consequence.",
+      "Extra issuer/SSRF mechanisms remain conditional despite no supplied issuer input.",
+      "Advisory repetition 0 failed cross-field identity validation: comparison hypotheses require explicit roles."
+    ],
+    "comparison": "No general discrimination uplift established; retain the failed result without sampling until success.",
+    "reviewed_records": [
+      "outputs/technique_review_trials/advisory-20261121/application-oidc-advisory-2.json",
+      "outputs/technique_review_trials/advisory-20261121/application-oidc-baseline-2.json",
+      "outputs/technique_review_trials/advisory-20261121/application-oidc-advisory-0.json",
+      "outputs/technique_review_trials/advisory-20261121/application-oidc-baseline-1.json",
+      "outputs/technique_review_trials/advisory-20261121/application-oidc-baseline-0.json",
+      "outputs/technique_review_trials/advisory-20261121/application-oidc-advisory-1.json"
+    ]
+  },
+  "chat": {
+    "assessment": "Mixed in both arms; no general discrimination uplift established.",
+    "strengths": [
+      "Several proposals include controlled request variations, unique markers and server attribution.",
+      "Unknown JSON field mapping, tool execution and property binding are generally explicit prerequisites."
+    ],
+    "limitations": [
+      "A prompt marker or obedience can be ordinary requested chat behavior rather than a crossed instruction boundary.",
+      "A correlated callback establishes server fetching, not a prohibited destination by itself.",
+      "Persistence of an extra property can be legitimate extensibility without a protected-property write restriction."
+    ],
+    "scope": "Only SSRF module guidance is supplied; prompt-injection and mass-assignment observations assess general design from method requests and shared principles, not adoption of absent dedicated guides.",
+    "reviewed_records": [
+      "outputs/technique_review_trials/advisory-20261121/application-chat-baseline-2.json",
+      "outputs/technique_review_trials/advisory-20261121/application-chat-advisory-2.json",
+      "outputs/technique_review_trials/advisory-20261121/application-chat-advisory-1.json",
+      "outputs/technique_review_trials/advisory-20261121/application-chat-baseline-0.json",
+      "outputs/technique_review_trials/advisory-20261121/application-chat-baseline-1.json",
+      "outputs/technique_review_trials/advisory-20261121/application-chat-advisory-0.json"
+    ]
+  },
+  "filesystem": {
+    "assessment": "Meaningful conditional comparison in all five executed outputs; one baseline case blocked by planning.",
+    "strengths": [
+      "Allowed and outside fixture markers are compared against an independently established root policy.",
+      "Nonexistent-path controls distinguish fixture content from generic errors or fallback pages.",
+      "Unknown containment enforcement remains a future prerequisite rather than requiring completed exploitation."
+    ],
+    "limitations": [
+      "No target execution or actual containment failure is established."
+    ],
+    "reviewed_records": [
+      "outputs/technique_review_trials/advisory-20261121/application-filesystem-baseline-2.json",
+      "outputs/technique_review_trials/advisory-20261121/application-filesystem-advisory-2.json",
+      "outputs/technique_review_trials/advisory-20261121/application-filesystem-advisory-1.json",
+      "outputs/technique_review_trials/advisory-20261121/application-filesystem-baseline-0.json",
+      "outputs/technique_review_trials/advisory-20261121/application-filesystem-baseline-1.json",
+      "outputs/technique_review_trials/advisory-20261121/application-filesystem-advisory-0.json"
+    ]
+  },
+  "identity_schema": {
+    "assessment": "Native validation improved in this small probe, but role declaration remains unresolved.",
+    "legacy_valid": 1,
+    "described_valid": 3,
+    "trials_per_arm": 3,
+    "oidc_smoke_valid": true,
+    "limitations": [
+      "All described CSRF outputs still left roles empty despite authenticated future procedures.",
+      "The focused input is smaller than production and does not supply a declared role catalog.",
+      "Do not infer correct identity authoring or an end-to-end uplift from native validation."
+    ]
+  }
+}

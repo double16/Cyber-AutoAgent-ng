@@ -1,0 +1,331 @@
+{
+  "promotion": "rejected",
+  "reason": "Revised assembly increased schema failures and mishandled a negative case.",
+  "limitation": "Decision agreement is not semantic or citation validation. Role invocations, not dispatch counts.",
+  "rows": [
+    {
+      "case": "bare-route",
+      "arm": "baseline",
+      "expected_revision": false,
+      "error": null,
+      "decision": "retain",
+      "reason": "Publication contains a reasoned no_testable_hypotheses disposition for the assigned subject. Inspected source shows only a route name with no request, implementation, input or behavior available, and investigation records inputs_unrecorded with empty operations. This supports the empty disposition and satisfies the frozen hypothesis_set criterion.",
+      "decision_matches": true
+    },
+    {
+      "case": "bare-route",
+      "arm": "revised",
+      "expected_revision": false,
+      "error": null,
+      "decision": "revise",
+      "reason": "Publication claims no_testable_hypotheses but provides no content-bearing inspection of the assigned subject. The only available evidence is a metadata note that only a route name is recorded with no request, implementation, input or behavior available, and inputs_unrecorded diagnostic. No saved inspection refs are supplied to ground inspected_evidence, so the empty disposition is unsupported under the rubric.",
+      "decision_matches": false
+    },
+    {
+      "case": "bare-route",
+      "arm": "baseline",
+      "expected_revision": false,
+      "error": null,
+      "decision": "retain",
+      "reason": "Publication disposition no_testable_hypotheses is supported by inspected source showing only a route name with no request, implementation, input or behavior available and inputs_unrecorded diagnostic. No reconciled input candidates exist to ground a conditional test.",
+      "decision_matches": true
+    },
+    {
+      "case": "bare-route",
+      "arm": "revised",
+      "expected_revision": false,
+      "error": null,
+      "decision": "retain",
+      "reason": "Publication contains a reasoned no_testable_hypotheses disposition for the assigned subject. Frozen investigation shows only a route name with no request, implementation, inputs or observed behavior, and inputs_unrecorded diagnostic. This inspected evidence supports no grounded safe security-relevant test, satisfying the hypothesis_set requirement via the allowed no_testable_hypotheses disposition.",
+      "decision_matches": true
+    },
+    {
+      "case": "bare-route",
+      "arm": "baseline",
+      "expected_revision": false,
+      "error": null,
+      "decision": "retain",
+      "reason": "Publication disposition no_testable_hypotheses is supported by inspected evidence showing only a route name with no request, implementation, input or behavior available and inputs_unrecorded diagnostic.",
+      "decision_matches": true
+    },
+    {
+      "case": "bare-route",
+      "arm": "revised",
+      "expected_revision": false,
+      "error": null,
+      "decision": "retain",
+      "reason": "Publication disposition no_testable_hypotheses is supported by frozen evidence showing only a route name with no request, implementation, input or behavior available and inputs_unrecorded diagnostic. No reconciled input candidates exist to ground a conditional test.",
+      "decision_matches": true
+    },
+    {
+      "case": "filesystem-access",
+      "arm": "baseline",
+      "expected_revision": true,
+      "error": null,
+      "decision": "retain",
+      "reason": "Publication disposition no_testable_hypotheses is supported by inspected source evidence showing no safe probe in current scope; frozen acceptance criteria satisfied.",
+      "decision_matches": false
+    },
+    {
+      "case": "filesystem-access",
+      "arm": "revised",
+      "expected_revision": true,
+      "error": "Failed to parse or validate native structured content: subject_reviews.0.no_hypothesis_basis.inspection_refs.0: Value error, Expected artifact: or artifact_id: evidence reference; memory and other kinds are unsupported [value_error]",
+      "decision": null,
+      "reason": null,
+      "decision_matches": false
+    },
+    {
+      "case": "filesystem-access",
+      "arm": "baseline",
+      "expected_revision": true,
+      "error": null,
+      "decision": "retain",
+      "reason": "Publication contains a reasoned no_testable_hypotheses disposition for the assigned subject with inspected source evidence supporting no safe probe in current scope. Frozen acceptance criteria for hypothesis_set are satisfied by the disposition.",
+      "decision_matches": false
+    },
+    {
+      "case": "filesystem-access",
+      "arm": "revised",
+      "expected_revision": true,
+      "error": "Failed to parse or validate native structured content: subject_reviews.0.no_hypothesis_basis.inspection_refs.0: Value error, Expected artifact: or artifact_id: evidence reference; memory and other kinds are unsupported [value_error]",
+      "decision": null,
+      "reason": null,
+      "decision_matches": false
+    },
+    {
+      "case": "filesystem-access",
+      "arm": "baseline",
+      "expected_revision": true,
+      "error": null,
+      "decision": "retain",
+      "reason": "The assigned publication provides a reasoned no_testable_hypotheses disposition for the frozen subject. The frozen investigation records show inputs_unrecorded and no recorded operations, and the controller-observed source review notes a filename join without observed containment checks but no safe probe scope is established in the current context. The disposition is consistent with the available inspected evidence and the frozen acceptance criteria are satisfied by the published hypothesis-set artifact.",
+      "decision_matches": false
+    },
+    {
+      "case": "filesystem-access",
+      "arm": "revised",
+      "expected_revision": true,
+      "error": "Failed to parse or validate native structured content: subject_reviews.0.no_hypothesis_basis.inspection_refs.0: Value error, Expected artifact: or artifact_id: evidence reference; memory and other kinds are unsupported [value_error]",
+      "decision": null,
+      "reason": null,
+      "decision_matches": false
+    },
+    {
+      "case": "network-access",
+      "arm": "baseline",
+      "expected_revision": true,
+      "error": null,
+      "decision": "retain",
+      "reason": "Publication contains a reasoned no_testable_hypotheses disposition for the frozen subject with inspected evidence showing a listener that accepts a principal and record selector with ownership enforcement unobserved. No reconciled input candidates are supplied and the inspected observations support no grounded safe conditional security test within the current scope.",
+      "decision_matches": false
+    },
+    {
+      "case": "network-access",
+      "arm": "revised",
+      "expected_revision": true,
+      "error": "Failed to parse or validate native structured content: subject_reviews.0.no_hypothesis_basis.inspection_refs.0: Value error, Expected artifact: or artifact_id: evidence reference; memory and other kinds are unsupported [value_error]",
+      "decision": null,
+      "reason": null,
+      "decision_matches": false
+    },
+    {
+      "case": "network-access",
+      "arm": "baseline",
+      "expected_revision": true,
+      "error": null,
+      "decision": "retain",
+      "reason": "Publication contains a reasoned no_testable_hypotheses disposition for the frozen subject with inspected source evidence and no reconciled input candidates. The hypothesis_set artifact requirement is satisfied by the published disposition.",
+      "decision_matches": false
+    },
+    {
+      "case": "network-access",
+      "arm": "revised",
+      "expected_revision": true,
+      "error": "Failed to parse or validate native structured content: subject_reviews.0.no_hypothesis_basis.inspection_refs.0: Value error, Expected artifact: or artifact_id: evidence reference; memory and other kinds are unsupported [value_error]",
+      "decision": null,
+      "reason": null,
+      "decision_matches": false
+    },
+    {
+      "case": "network-access",
+      "arm": "baseline",
+      "expected_revision": true,
+      "error": null,
+      "decision": "retain",
+      "reason": "Publication contains a reasoned no_testable_hypotheses disposition for the frozen subject with inspected source evidence showing no safe probe in scope; hypothesis_set criterion is satisfied by the published disposition.",
+      "decision_matches": false
+    },
+    {
+      "case": "network-access",
+      "arm": "revised",
+      "expected_revision": true,
+      "error": "Failed to parse or validate native structured content: subject_reviews.0.no_hypothesis_basis.inspection_refs.0: Value error, Expected artifact: or artifact_id: evidence reference; memory and other kinds are unsupported [value_error]",
+      "decision": null,
+      "reason": null,
+      "decision_matches": false
+    },
+    {
+      "case": "storage-identity",
+      "arm": "baseline",
+      "expected_revision": true,
+      "error": null,
+      "decision": "retain",
+      "reason": "Publication contains a reasoned no_testable_hypotheses disposition for the frozen subject with inspected evidence that the admin route relies on client-side editable storage and unobserved backend enforcement, supporting no safe conditional test in scope.",
+      "decision_matches": false
+    },
+    {
+      "case": "storage-identity",
+      "arm": "revised",
+      "expected_revision": true,
+      "error": "Failed to parse or validate native structured content: subject_reviews.0.no_hypothesis_basis.inspection_refs.0: Value error, Expected artifact: or artifact_id: evidence reference; memory and other kinds are unsupported [value_error]",
+      "decision": null,
+      "reason": null,
+      "decision_matches": false
+    },
+    {
+      "case": "storage-identity",
+      "arm": "baseline",
+      "expected_revision": true,
+      "error": null,
+      "decision": "retain",
+      "reason": "Publication contains a reasoned no_testable_hypotheses disposition for the frozen subject with inspected evidence supporting no safe probe in current scope; hypothesis_set min_count is satisfied by the published disposition.",
+      "decision_matches": false
+    },
+    {
+      "case": "storage-identity",
+      "arm": "revised",
+      "expected_revision": true,
+      "error": null,
+      "decision": "revise",
+      "reason": "The publication claims no_testable_hypotheses with reason 'No safe probe in current scope'. The retained inspection shows the admin route reads editable browser storage email and passes it to fetchUser(email) with the returned isAdmin flag controlling the admin view, and backend enforcement is unobserved. This client-side trust of editable storage for an admin view is a grounded, safe conditional test for unauthorized admin view via storage manipulation. The empty disposition therefore contradicts inspected evidence.",
+      "decision_matches": true
+    },
+    {
+      "case": "storage-identity",
+      "arm": "baseline",
+      "expected_revision": true,
+      "error": null,
+      "decision": "retain",
+      "reason": "Publication disposition no_testable_hypotheses is supported by inspected source showing client-side admin view control with backend enforcement unobserved and no recorded inputs or operations to ground a safe testable hypothesis.",
+      "decision_matches": false
+    },
+    {
+      "case": "storage-identity",
+      "arm": "revised",
+      "expected_revision": true,
+      "error": null,
+      "decision": "revise",
+      "reason": "Publication claims no_testable_hypotheses but inspected source shows client-side admin gate based on editable browser storage email passed to fetchUser with isAdmin flag controlling admin view and backend enforcement unobserved. This observed client-side trust boundary supports a grounded conditional test for unauthorized admin view via storage manipulation. Empty disposition is not supported.",
+      "decision_matches": true
+    },
+    {
+      "case": "unlinked-parameter",
+      "arm": "baseline",
+      "expected_revision": false,
+      "error": null,
+      "decision": "retain",
+      "reason": "Publication contains a reasoned no_testable_hypotheses disposition for subject with inspected evidence showing fixed map title and no connection between query label and rendering library. The disposition is supported by the frozen observation and input candidate assessment.",
+      "decision_matches": true
+    },
+    {
+      "case": "unlinked-parameter",
+      "arm": "revised",
+      "expected_revision": false,
+      "error": null,
+      "decision": "retain",
+      "reason": "Publication disposition no_testable_hypotheses is supported by inspected evidence. The route displays a fixed map title with no observed connection between the query label input and rendering logic, and the unused htmlRenderer library is not called. The reconciled input candidate label is present but observed behavior shows no reflection or processing, so no grounded conditional security test is supported.",
+      "decision_matches": true
+    },
+    {
+      "case": "unlinked-parameter",
+      "arm": "baseline",
+      "expected_revision": false,
+      "error": null,
+      "decision": "retain",
+      "reason": "Publication contains a reasoned no_testable_hypotheses disposition for the assigned subject and the frozen acceptance criteria for a hypothesis_set are satisfied by that publication. Inspected source shows a fixed map title with no observed connection between the query input and route handling, supporting the empty disposition.",
+      "decision_matches": true
+    },
+    {
+      "case": "unlinked-parameter",
+      "arm": "revised",
+      "expected_revision": false,
+      "error": null,
+      "decision": "retain",
+      "reason": "Publication disposition is supported by inspected evidence. The route shows a fixed map title with no observed connection between the query label input and rendering logic, and the unused htmlRenderer library is not linked to the route. The reconciled input candidate is therefore not grounded for a conditional security test.",
+      "decision_matches": true
+    },
+    {
+      "case": "unlinked-parameter",
+      "arm": "baseline",
+      "expected_revision": false,
+      "error": "Failed to parse or validate native structured content: subject_reviews.0.no_hypothesis_basis.inspection_refs.0: Value error, Expected artifact: or artifact_id: evidence reference; memory and other kinds are unsupported [value_error]; subject_reviews.0.no_hypothesis_basis.behavior_assessments.0.inspection_refs.0: Value error, Expected artifact: or artifact_id: evidence reference; memory and other kinds are unsupported [value_error]; subject_reviews.0.no_hypothesis_basis.behavior_assessments.1.inspection_refs.0: Value error, Expected artifact: or artifact_id: evidence reference; memory and other kinds are unsupported [value_error]",
+      "decision": null,
+      "reason": null,
+      "decision_matches": false
+    },
+    {
+      "case": "unlinked-parameter",
+      "arm": "revised",
+      "expected_revision": false,
+      "error": null,
+      "decision": "retain",
+      "reason": "Publication reason aligns with frozen observations: route shows fixed map title with no query linkage and no safe probe identified.",
+      "decision_matches": true
+    },
+    {
+      "case": "whole-query",
+      "arm": "baseline",
+      "expected_revision": true,
+      "error": null,
+      "decision": "retain",
+      "reason": "Publication disposition no_testable_hypotheses is consistent with inspected source showing generic render usage without established trust boundary or safe probe evidence for the assigned endpoint; no grounded conditional security test is supported by current frozen observations.",
+      "decision_matches": false
+    },
+    {
+      "case": "whole-query",
+      "arm": "revised",
+      "expected_revision": true,
+      "error": null,
+      "decision": "revise",
+      "reason": "Publication claims no_testable_hypotheses but retained source shows reflected XSS via label query parameter rendered with createContextualFragment, which grounds a testable reflected XSS hypothesis. The empty disposition is unsupported.",
+      "decision_matches": true
+    },
+    {
+      "case": "whole-query",
+      "arm": "baseline",
+      "expected_revision": true,
+      "error": null,
+      "decision": "revise",
+      "reason": "Publication claims no testable hypotheses but inspected source shows DOM sink with untrusted query input, supporting a conditional security test.",
+      "decision_matches": true
+    },
+    {
+      "case": "whole-query",
+      "arm": "revised",
+      "expected_revision": true,
+      "error": null,
+      "decision": "revise",
+      "reason": "Publication claims no_testable_hypotheses but retained source shows a grounded DOM XSS via the label query parameter. The read_artifact output records render() calling htmlRenderer(decodeURIComponent(window.location.search)) and htmlRenderer assigning createContextualFragment(input) to the displayed footer. With reconciled input candidate label at query location for subject, this is an observed reflected DOM sink with a testable reflected XSS hypothesis. The empty disposition is therefore unsupported.",
+      "decision_matches": true
+    },
+    {
+      "case": "whole-query",
+      "arm": "baseline",
+      "expected_revision": true,
+      "error": null,
+      "decision": "revise",
+      "reason": "Publication claims no testable hypotheses but inspected source shows decodeURIComponent of window.location.search passed to createContextualFragment in footer rendering, with reconciled input candidate label query. This supports a conditional DOM XSS test.",
+      "decision_matches": true
+    },
+    {
+      "case": "whole-query",
+      "arm": "revised",
+      "expected_revision": true,
+      "error": null,
+      "decision": "revise",
+      "reason": "Publication claims no_testable_hypotheses but retained source shows decodeURIComponent of window.location.search fed to createContextualFragment for footer rendering, with reconciled query input candidate label. This is a grounded DOM XSS test candidate, so empty disposition is unsupported.",
+      "decision_matches": true
+    }
+  ]
+}

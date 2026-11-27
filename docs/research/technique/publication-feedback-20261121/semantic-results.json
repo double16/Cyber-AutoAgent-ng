@@ -1,0 +1,404 @@
+{
+  "scope": "Focused native semantic checks, not full task acceptance or target execution",
+  "trials": 12,
+  "requests": 12,
+  "valid": 12,
+  "baseline_revision": "9941df56c30f99d7a5a179e74569ab02958c8a79",
+  "arms": {
+    "baseline": {
+      "dom": {
+        "trials": 3,
+        "verdicts": {
+          "grounding": {
+            "adequate": 3
+          },
+          "test_discrimination": {
+            "revise": 2,
+            "adequate": 1
+          },
+          "identity_requirements": {
+            "adequate": 3
+          }
+        }
+      },
+      "admin": {
+        "trials": 3,
+        "verdicts": {
+          "grounding": {
+            "adequate": 3
+          },
+          "test_discrimination": {
+            "adequate": 3
+          },
+          "identity_requirements": {
+            "adequate": 3
+          }
+        }
+      }
+    },
+    "revised": {
+      "dom": {
+        "trials": 3,
+        "verdicts": {
+          "grounding": {
+            "adequate": 3
+          },
+          "test_discrimination": {
+            "revise": 2,
+            "adequate": 1
+          },
+          "identity_requirements": {
+            "adequate": 3
+          }
+        }
+      },
+      "admin": {
+        "trials": 3,
+        "verdicts": {
+          "grounding": {
+            "adequate": 3
+          },
+          "test_discrimination": {
+            "adequate": 3
+          },
+          "identity_requirements": {
+            "not_applicable": 3
+          }
+        }
+      }
+    }
+  },
+  "results": [
+    {
+      "case": "admin",
+      "variant": "baseline",
+      "repetition": 0,
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed client bundle evidence for route /adminpage and client-side guard using sessionStorage/localStorage email is documented with artifact references. Server enforcement for the page shell and admin data endpoints is explicitly marked as unknown/unobserved, keeping observed facts and unresolved preconditions distinct."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectations describe unauthenticated SPA delivery plus client guard bypass leading to admin data fetches, while negative expectations describe server enforcement, redirects, or absence of admin requests. Safe test steps include baseline, controlled storage variation, and authenticated comparison to distinguish legitimate SPA behavior from missing server authorization."
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "Hypothesis concerns unauthenticated access to a client-guarded admin route; authentication_requirement is comparison none with no roles, matching the proposed tests that compare unauthenticated vs authenticated admin sessions."
+        }
+      },
+      "error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "admin",
+      "variant": "baseline",
+      "repetition": 1,
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed client bundle route declaration for /adminpage and client-side guard logic reading sessionStorage/localStorage email and invoking kh/Kk are evidenced in retained artifacts. Server enforcement for the page shell and admin data endpoints is explicitly marked as unknown/unobserved, keeping observed facts and unresolved preconditions distinct."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectations require unauthenticated admin data endpoint responses with 200 and admin payload versus authenticated baseline, and negative expectations require 401/403 or redirect/guard prevention. Safe test steps include baseline SPA delivery, controlled storage variation, and comparison of network requests for kh/Kk between unauthenticated and admin sessions, providing a distinguishing signal."
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "Hypothesis is about unauthenticated access to a client-guarded admin route; authentication_requirement is comparison none with no roles, matching the proposed unauthenticated vs authenticated comparison tests."
+        }
+      },
+      "error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "admin",
+      "variant": "baseline",
+      "repetition": 2,
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed client bundle route declaration for /adminpage and client-side guard logic reading sessionStorage/localStorage email and invoking kh/Kk are evidenced in retained artifacts. Server enforcement for the page shell and admin data endpoints is explicitly marked unknown/unobserved, keeping observed facts distinct from unresolved preconditions."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectations require unauthenticated admin data endpoint responses with 200 and admin payload versus authenticated baseline, and negative expectations require 401/403 or redirect/guard prevention. Safe test steps include baseline SPA delivery, controlled storage variation, and comparison of network requests for kh/Kk between unauthenticated and admin sessions, providing a distinguishing signal."
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "Hypothesis targets unauthenticated access to /adminpage and admin data endpoints; authentication_requirement is comparison none with no roles, matching the proposed unauthenticated vs authenticated comparison tests."
+        }
+      },
+      "error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "admin",
+      "variant": "revised",
+      "repetition": 0,
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis is tied to retained bundle and client_routes artifacts showing /adminpage route declaration and client-side guard using sessionStorage/localStorage email. Suspected mechanism explicitly notes server enforcement is unobserved, keeping observed facts distinct from unresolved preconditions."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectations require server returning admin data to unauthenticated/non-admin context via kh/Kk, while negative expectations require 401/403 or no admin requests. Safe steps include baseline SPA delivery and authenticated admin comparison, providing a distinguishing contrast between client guard bypass and server enforcement."
+        },
+        "identity_requirements": {
+          "verdict": "not_applicable",
+          "reason": "Authentication requirement is declared as comparison none with no roles, so identity comparison is not applicable to this hypothesis."
+        }
+      },
+      "error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "admin",
+      "variant": "revised",
+      "repetition": 1,
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis is tied to retained bundle artifacts showing client route declaration and client-side guard logic derived from sessionStorage/localStorage email. Suspected mechanism explicitly notes server enforcement for page shell and admin data endpoints is unobserved in retained artifacts, keeping observed facts distinct from unresolved preconditions."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectations require server returning admin data to unauthenticated/non-admin context via kh/Kk calls, while negative expectations require 401/403 or empty payload and proper guard redirect. Safe test steps include baseline SPA delivery, controlled storage variation, and authenticated admin comparison to distinguish missing server enforcement from legitimate SPA shell delivery."
+        },
+        "identity_requirements": {
+          "verdict": "not_applicable",
+          "reason": "Hypothesis declares authentication_requirement comparison none with no roles, so no identity comparison is required for the test plan."
+        }
+      },
+      "error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "admin",
+      "variant": "revised",
+      "repetition": 2,
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed client bundle route declaration and client-side guard logic are evidenced in retained artifacts; server enforcement is explicitly noted as unobserved, keeping facts and unresolved preconditions distinct."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectations target missing server enforcement on admin data endpoints via unauthenticated kh/Kk calls, while negative expectations cover server enforcement and guard redirect; baseline SPA shell delivery is separated from the claimed unauthorized data disclosure."
+        },
+        "identity_requirements": {
+          "verdict": "not_applicable",
+          "reason": "Hypothesis declares authentication_requirement comparison none with no roles, so identity comparison is not required."
+        }
+      },
+      "error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "dom",
+      "variant": "baseline",
+      "repetition": 0,
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis explicitly ties the endpoint GET returning a SPA shell to client bundle evidence showing URLSearchParams read of maptitle in eN and propagation as mapTitle prop to JT, with JT using e.mapTitle in an outerHTML template literal for an iframe title. The link between the endpoint, the query parameter read, and the DOM sink is documented via retained bundle artifacts and route list, grounding the hypothesis to subject endpoint-2a3345ff16fba327."
+        },
+        "test_discrimination": {
+          "verdict": "revise",
+          "reason": "Positive expectations claim script execution in browser context from the maptitle value, while the documented sink is an iframe title attribute set via outerHTML interpolation. The safe_test_steps only check presence of a canary in the rendered DOM and source vs rendered comparison, without a distinguishing check that the interpolation can lead to executable script versus benign title rendering. Legitimate rendering of a map title and DOM-based XSS are not distinguished by the stated checks."
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "Authentication requirement is comparison none with no roles, matching the unauthenticated GET observation and the proposed safe test steps for the endpoint."
+        }
+      },
+      "error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "dom",
+      "variant": "baseline",
+      "repetition": 1,
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis cites GET 200 SPA shell and client bundle artifacts showing URLSearchParams read of maptitle in eN and propagation to JT component with outerHTML template literal sink. Supporting refs point to bundle extraction and inventory logs, providing an explicit link between the endpoint observation and the client-side read-to-sink chain."
+        },
+        "test_discrimination": {
+          "verdict": "revise",
+          "reason": "Positive expectations claim script execution via outerHTML interpolation into iframe title attribute. The observed sink is title='${e.mapTitle || ''}' inside an outerHTML template literal; title attribute insertion does not by itself provide a script execution context, so the existing check reason does not distinguish a DOM-based XSS consequence from legitimate rendering of a benign title value. A distinguishing test would need an executable sink or evidence of script execution, not just title\u53cd\u5c04"
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "Subject is endpoint-2a3345ff16fba327 and the attacker-controlled input and test steps reference GET http://target.example/?maptitle=... consistent with the endpoint observation. No authentication requirement is declared and comparisons are none, matching the hypothesis metadata."
+        }
+      },
+      "error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "dom",
+      "variant": "baseline",
+      "repetition": 2,
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis links the GET endpoint returning a SPA shell to client bundle evidence showing URLSearchParams read of maptitle in eN and propagation as mapTitle prop to JT, with JT using e.mapTitle in an outerHTML template literal for an iframe title. The subject is endpoint-2a3345ff16fba327 and the observed facts are tied to that endpoint and the maptitle query parameter via retained bundle artifacts and route list."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectations describe client-side read of maptitle from URL and insertion into DOM via outerHTML, with a canary render check and source-vs-rendered comparison to confirm interpolation. Negative expectations cover static shell, no render, and encoding/sanitization. The steps distinguish reflected client-side DOM insertion from legitimate static serving."
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "Authentication requirement is comparison none with no roles, matching the unauthenticated GET observation and the proposed safe test steps for the endpoint."
+        }
+      },
+      "error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "dom",
+      "variant": "revised",
+      "repetition": 0,
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis explicitly links the endpoint GET returning a SPA shell to client bundle evidence where URLSearchParams reads maptitle in eN and the value is passed as mapTitle prop to JT, which interpolates e.mapTitle into an outerHTML template literal for an iframe title. The preconditions of server serving the SPA, client reading URLSearchParams, and client mapping to outerHTML sink are evidenced by the cited bundle artifacts and route list."
+        },
+        "test_discrimination": {
+          "verdict": "revise",
+          "reason": "Positive expectations claim script execution in browser context from outerHTML interpolation, but safe_test_steps only check presence of a canary in rendered DOM and source vs rendered comparison. Rendering the maptitle value in an iframe title attribute is a legitimate client-side reflection; the steps do not distinguish benign reflection from actual script execution, nor do they verify that the outerHTML sink can lead to executable code. Supporting and refuting outcomes address rendering, not\u6388"
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "Authentication requirement is declared as comparison none with no roles, matching the hypothesis and proposed tests which do not require identity."
+        }
+      },
+      "error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "dom",
+      "variant": "revised",
+      "repetition": 1,
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis explicitly links the endpoint GET returning a SPA shell to client bundle evidence showing URLSearchParams read of maptitle in eN and propagation to JT component with outerHTML interpolation for iframe title. The link is grounded in retained bundle artifacts and route list."
+        },
+        "test_discrimination": {
+          "verdict": "revise",
+          "reason": "Positive expectations claim script execution in browser context from outerHTML interpolation, but safe_test_steps only check canary presence and source vs rendered DOM. The steps do not distinguish benign rendering of maptitle in an iframe title attribute from actual script execution, and do not establish a controlled variation that would differentiate reflected DOM insertion from legitimate static SPA behavior."
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "Authentication requirement is declared as comparison none with no roles, matching the proposed unauthenticated GET tests."
+        }
+      },
+      "error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "dom",
+      "variant": "revised",
+      "repetition": 2,
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis explicitly links the GET endpoint serving the SPA shell to client bundle code that reads maptitle via URLSearchParams in eN and passes it to JT, where e.mapTitle is interpolated into an outerHTML template literal for an iframe title. The link is grounded in retained bundle artifacts and route evidence, with the subject endpoint identified as the SPA root."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectations target client-side DOM insertion via outerHTML and script execution context, while negative expectations cover server static shell, no render, and encoding/sanitization. Safe test steps compare source vs rendered DOM with a canary and verify URLSearchParams usage and outerHTML sink, distinguishing DOM-based reflected XSS from legitimate static serving."
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "Authentication requirement is declared as comparison none with no roles, matching the proposed unauthenticated GET tests."
+        }
+      },
+      "error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    }
+  ],
+  "assessment": {
+    "dom": "All six checks correctly request revision because title/canary rendering does not distinguish the claimed script execution. Baseline already detects this; no incremental gain is shown.",
+    "admin": "All six checks miss the required admin-baseline identity restriction. Baseline marks identity adequate in all repetitions; revised marks not_applicable in all repetitions, reasoning from declared none/empty roles rather than reconciling the future steps. Both would permit retention on these checks.",
+    "grounding_limitation": "Grounding judgments accept the frozen publication premises; underlying source inspections were not revalidated.",
+    "output_quality": "All 12 native outputs validate. One revised DOM reason ends with an incomplete fragment, but its preceding explanation identifies the defect.",
+    "conclusion": "No demonstrated improvement in focused semantic defect detection. Current-version presentation and feedback resolution consistency improved in the separate feedback replay; security reasoning and end-to-end adoption remain unproven."
+  }
+}

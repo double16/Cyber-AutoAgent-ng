@@ -1,0 +1,37 @@
+{
+  "reviewer": "Codex inspection of all twelve proposals and execution explanations after frozen run completion",
+  "findings": [
+    {
+      "case": "case-02-candidate",
+      "stage": "proposal/review",
+      "artifact": "accepted-proposal.json",
+      "issue": "Positive expectations include permitted own-record baselines and allow an error indicating unauthorized access as a positive alternative. The reviewer marked discrimination adequate.",
+      "execution": "Executor required actual blue record marker returned to first, with ownership/policy and nonexistent selector controls; final classification was supported."
+    },
+    {
+      "cases": [
+        "case-04-baseline",
+        "case-05-baseline",
+        "case-05-candidate"
+      ],
+      "stage": "proposal",
+      "issue": "Filesystem negative expectations mention an ordinary application route although the assigned fixture exposes only a file reader.",
+      "execution": "Executor adapted to available interface and used inside, outside and missing markers; no unrelated route was accessed."
+    },
+    {
+      "cases": [
+        "case-00-baseline",
+        "case-00-candidate",
+        "case-01-baseline",
+        "case-01-candidate"
+      ],
+      "stage": "proposal",
+      "issue": "Some baseline wording assumes same-origin destinations, while actual policy allows a specified separate origin.",
+      "execution": "Executor read concrete allowlist policy and classified actual Location destinations correctly without following redirects."
+    }
+  ],
+  "limits": [
+    "Independent Python fixture grades establish observed effects and evidence correlation; they do not certify every sentence in the proposals.",
+    "No claim of better document authorship, population accuracy, automatic matching quality or causal guidance benefit."
+  ]
+}

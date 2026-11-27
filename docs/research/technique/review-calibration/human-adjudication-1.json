@@ -1,0 +1,26 @@
+{
+  "status": "recorded_pending_label_clarification",
+  "source": "User message in conversation",
+  "labels": [
+    {
+      "id": "network-policy",
+      "sha256": "53ce293dceaba102e39f4ede2657dcd39a4223a3f387a53d3ed586f654d2d694",
+      "label": "acceptable",
+      "rationale": null
+    },
+    {
+      "id": "filesystem-policy",
+      "sha256": "d35b47e91dbcc3b888f1b7e826069cafa097b10c7ec5a069c425b821b26e44f0",
+      "label": "acceptable",
+      "rationale": null
+    },
+    {
+      "id": "http-selector",
+      "sha256": "8256461295337490dd96397b11569debd5dc46d372e616e7ae92502219197978",
+      "label": "acceptable",
+      "rationale": null
+    }
+  ],
+  "user_text": "- network-policy.md, acceptable\n- filesystem-policy.md, acceptable\n- http-selector.md, acceptable",
+  "note": "Preserve labels as supplied. HTTP label conflicts with planned negative control; no labels inferred or changed. Live comparison not started."
+}

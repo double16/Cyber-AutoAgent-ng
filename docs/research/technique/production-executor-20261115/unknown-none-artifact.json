@@ -1,0 +1,92 @@
+{
+  "decision": {
+    "classification": "inconclusive",
+    "evidence_ids": [
+      "obs-1",
+      "obs-2",
+      "obs-3",
+      "obs-4",
+      "obs-5",
+      "obs-6"
+    ],
+    "explanation": "Identity mapping shows session-red=A and session-blue=B. Policy record unavailable. All four request_account tests returned status 200 with body error 'not authorized' while still returning object data for the selector. Without policy evidence and with ambiguous authorization signals, classification remains inconclusive for independent review."
+  },
+  "observations": [
+    {
+      "id": "obs-1",
+      "kind": "identity",
+      "response": {
+        "session-red": "A",
+        "session-blue": "B"
+      }
+    },
+    {
+      "id": "obs-2",
+      "kind": "policy",
+      "response": {
+        "available": false,
+        "reason": "Policy record unavailable"
+      }
+    },
+    {
+      "id": "obs-3",
+      "principal": "session-red",
+      "selector": "A",
+      "response": {
+        "status": 200,
+        "body": {
+          "error": "not authorized",
+          "object": {
+            "owner": "A",
+            "value": "record-A"
+          }
+        }
+      }
+    },
+    {
+      "id": "obs-4",
+      "principal": "session-red",
+      "selector": "B",
+      "response": {
+        "status": 200,
+        "body": {
+          "error": "not authorized",
+          "object": {
+            "owner": "B",
+            "value": "record-B"
+          }
+        }
+      }
+    },
+    {
+      "id": "obs-5",
+      "principal": "session-blue",
+      "selector": "A",
+      "response": {
+        "status": 200,
+        "body": {
+          "error": "not authorized",
+          "object": {
+            "owner": "A",
+            "value": "record-A"
+          }
+        }
+      }
+    },
+    {
+      "id": "obs-6",
+      "principal": "session-blue",
+      "selector": "B",
+      "response": {
+        "status": 200,
+        "body": {
+          "error": "not authorized",
+          "object": {
+            "owner": "B",
+            "value": "record-B"
+          }
+        }
+      }
+    }
+  ]
+}

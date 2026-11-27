@@ -1,0 +1,60 @@
+{
+  "status": "completed_with_failed_effectiveness_check",
+  "generation_requests": 45,
+  "total_generation_requests_including_probes": 50,
+  "task_status": "partial_failure",
+  "task_reason": "Acceptance manifest is incomplete; missing criteria: classification.",
+  "accepted_result": null,
+  "produced_classification": "violation",
+  "expected_classification": "no_violation_observed",
+  "supported_correct": false,
+  "selected_revision": "73c8a6b9-8c05-5aaa-9345-029736792841",
+  "feedback": {
+    "score": 0,
+    "reason": "The delivered header-selector authorization comparison method requires established authorization policy for header-based object selection, a baseline of legitimate access for valid identities/values, and evidence of how the selector is enforced and how identity is derived from the header, plus invalid-value controls. The delivery snapshot lists those prerequisites as unmet. The observed task behavior shows identity and policy retrieval and own-account/cross-account header comparisons, but no invalid-value behavior is recorded and the baseline of legitimate access is not demonstrated; responses consistently return error 'not authorized' with object data present, which the guidance warns against interpreting from error labels alone. Contribution of the specific methodological controls cannot be established from the available evidence."
+  },
+  "model": "muse-glimmer:30b-mlx",
+  "captured_models": [
+    "muse-glimmer:30b-mlx"
+  ],
+  "inputs_with_automatic_guidance_heading": 33,
+  "technique_role_calls": {
+    "technique_trigger_matcher": 7,
+    "technique_judge": 2,
+    "technique_evaluator": 1,
+    "technique_feedback_reviewer": 1
+  },
+  "matching_events": {
+    "batch_flush": 7,
+    "batch_selected": 7,
+    "batch_cache_hit": 1
+  },
+  "tool_calls_comparison": {
+    "automatic-delivery-pilot-20261116": {
+      "TaskPromptOutput": 1,
+      "TaskPromptChecklistOutput": 1,
+      "inspect_context": 2,
+      "request_account": 4,
+      "tool_catalog": 5,
+      "publish_result": 1,
+      "record_task_acceptance": 2,
+      "WorkflowDecisionOutput": 1
+    },
+    "batched-adoption-20261117": {
+      "TaskPromptOutput": 1,
+      "TaskPromptChecklistOutput": 1,
+      "inspect_context": 2,
+      "request_account": 4,
+      "publish_result": 1,
+      "record_task_acceptance": 1,
+      "tool_catalog": 18
+    }
+  },
+  "interpretation": "Guide selection/delivery succeeded; correct policy interpretation and accepted completion did not.",
+  "limitations": [
+    "One synthetic full-controller case, not a general performance estimate",
+    "Final alias-retention and request-origin safeguards were added after pilot startup and verified offline",
+    "Earlier SQLite integrity and scoped receipt checks passed; a final read-only score query failed to open the database, so final score is corroborated by the technique_evaluated event",
+    "Guidance heading presence establishes availability only, not causal contribution"
+  ]
+}

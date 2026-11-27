@@ -288,6 +288,11 @@ executor passes and has a minimum of one. `CYBER_TASK_EVALUATOR_MAX_CORRECTIONS`
 evaluator-directed evidence repair by default; set it to `0` to finalize actionable evaluator feedback without a
 correction pass. `CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS` separately governs terminal acceptance schema or evidence
 repairs.
+The legacy instruction-based correction path applies only without an explicit repair object.
+`repair.kind: none` does not enter the
+legacy instruction-driven correction path merely because explanatory or conditional instructions are present.
+Legacy responses without a repair object retain the bounded instruction-based fallback. This does not
+turn a rejected classification into `done`; the evaluator's terminal failure remains recorded.
 Acceptance evidence is stored as portable `artifact:artifacts/<file>` references, and every result declares whether
 it is negative, observational, a new finding candidate, or evidence for an existing finding. The task-executor agent
 and conversation are retained when no valid complete acceptance ledger was

@@ -24,8 +24,10 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_litellm import ChatLiteLLM
 from langchain_ollama import ChatOllama, OllamaEmbeddings
-from langfuse import Langfuse
+from langfuse import Langfuse, propagate_attributes
 from pydantic import BaseModel
+
+from modules.langfuse_read import read_session_traces
 
 # HACK BEGIN
 # for ragas/llms/base.by import of missing "langchain_community.chat_models.vertexai"
@@ -290,7 +292,7 @@ class CyberAgentEvaluator:
         self.langfuse = Langfuse(
             public_key=config_manager.getenv("LANGFUSE_PUBLIC_KEY", "cyber-public"),
             secret_key=config_manager.getenv("LANGFUSE_SECRET_KEY", "cyber-secret"),
-            host=langfuse_host,
+            base_url=langfuse_host,
         )
         self.setup_models()
         self.setup_metrics()
@@ -719,22 +721,18 @@ class CyberAgentEvaluator:
                 "evaluation.sample_max_chars": self._sample_max_chars(),
                 "evaluation.source_trace_count": source_trace_count,
             }
-            span = self.langfuse.start_span(
-                trace_context={"trace_id": trace_id},
-                name=f"Cyber-AutoAgent {scope.replace('_', ' ').title()}",
-                input=input_data,
-                output=output_data,
-                metadata=metadata,
-            )
-            span.update_trace(
-                name=f"Cyber-AutoAgent {scope.replace('_', ' ').title()}",
-                session_id=operation_id,
-                input=input_data,
-                output=output_data,
-                metadata=metadata,
-                tags=["Cyber-AutoAgent", "ragas", scope],
-            )
-            span.end()
+            name = f"Cyber-AutoAgent {scope.replace('_', ' ').title()}"
+            with propagate_attributes(
+                session_id=operation_id, tags=["Cyber-AutoAgent", "ragas", scope], trace_name=name,
+            ):
+                span = self.langfuse.start_observation(
+                    trace_context={"trace_id": trace_id},
+                    name=name,
+                    input=input_data,
+                    output=output_data,
+                    metadata=metadata,
+                )
+                span.end()
             if hasattr(self.langfuse, "flush"):
                 self.langfuse.flush()
             return trace_id
@@ -1293,84 +1291,7 @@ class CyberAgentEvaluator:
         Returns:
             List of trace objects from Langfuse
         """
-        page_size = 100
-        all_traces: list[Any] = []
-        try:
-            # A session may contain enough report traces to push task-execution
-            # traces off the newest page. Fetch every page before role selection.
-            page = 1
-            while True:
-                request = {"session_id": operation_id, "limit": page_size}
-                if page > 1:
-                    request["page"] = page
-                response = self.langfuse.api.trace.list(**request)
-                page_traces = getattr(response, "data", None)
-                if not page_traces:
-                    break
-                all_traces.extend(page_traces)
-                if len(page_traces) < page_size:
-                    break
-                page += 1
-        except Exception as error:
-            if all_traces:
-                logger.warning(
-                    "Trace pagination stopped after %d traces for %s: %s",
-                    len(all_traces),
-                    operation_id,
-                    error,
-                )
-            else:
-                logger.debug("Failed to fetch by session_id, using general list: %s", error)
-                # Legacy fallback for traces whose session metadata is unavailable.
-                response = self.langfuse.api.trace.list(limit=200)
-                all_traces = list(getattr(response, "data", None) or [])
-
-        if not all_traces:
-            return []
-
-        # Find all traces that belong to this operation
-        operation_traces = []
-
-        seen_trace_ids = set()
-        for trace in all_traces:
-            trace_id = str(getattr(trace, "id", "") or id(trace))
-            if trace_id in seen_trace_ids:
-                continue
-            seen_trace_ids.add(trace_id)
-            # Check multiple ways to identify operation traces
-            is_operation_trace = False
-
-            # Method 1: Direct session_id match
-            if hasattr(trace, "session_id") and trace.session_id == operation_id:
-                is_operation_trace = True
-
-            # Method 2: Check metadata
-            elif hasattr(trace, "metadata") and trace.metadata:
-                metadata = trace.metadata
-                if isinstance(metadata, dict):
-                    # Check session_id in metadata
-                    if metadata.get("session_id") == operation_id:
-                        is_operation_trace = True
-                    # Check attributes for operation.id
-                    elif "attributes" in metadata:
-                        attrs = metadata["attributes"]
-                        if isinstance(attrs, dict):
-                            if attrs.get("operation.id") == operation_id:
-                                is_operation_trace = True
-
-            # Method 3: Check if operation_id is in the trace name
-            elif hasattr(trace, "name") and trace.name and operation_id in trace.name:
-                is_operation_trace = True
-
-            if is_operation_trace:
-                operation_traces.append(trace)
-                logger.debug(
-                    "Found trace: id=%s, name=%s",
-                    getattr(trace, "id", "N/A"),
-                    getattr(trace, "name", "N/A"),
-                )
-
-        return operation_traces
+        return read_session_traces(self.langfuse, operation_id)
 
     async def _evaluate_single_trace(
         self,
@@ -2242,47 +2163,13 @@ class CyberAgentEvaluator:
                 if "diagnostic/ragas/" in metric_name
                 else f"Calibrated v3 evaluation: {metric_name} ({metric_category})"
             )
-            # Use v4 collection API when available, else fall back to legacy
-            score_fallback = True
-            if hasattr(self.langfuse, "scores") and hasattr(self.langfuse.scores, "create"):
-                try:
-                    self.langfuse.scores.create(
-                        trace_id=trace_id,
-                        name=metric_name,
-                        value=float(score_value),
-                        comment=score_comment,
-                        metadata=score_metadata,
-                    )
-                    score_fallback = False
-                except Exception as e:
-                    logger.warning("Langfuse v4 scores.create failed, will try legacy score: %s", e)
-            if score_fallback and hasattr(self.langfuse, "score"):
-                try:
-                    self.langfuse.score(
-                        trace_id=trace_id,
-                        name=metric_name,
-                        value=float(score_value),
-                        comment=score_comment,
-                        metadata=score_metadata,
-                    )
-                    score_fallback = False
-                except Exception as e:
-                    logger.warning("Langfuse v3 scores failed, will try legacy create_score: %s", e)
-            if score_fallback and hasattr(self.langfuse, "create_score"):
-                try:
-                    self.langfuse.create_score(
-                        trace_id=trace_id,
-                        name=metric_name,
-                        value=float(score_value),
-                        comment=score_comment,
-                        metadata=score_metadata,
-                    )
-                    score_fallback = False
-                except Exception as e:
-                    logger.warning("Langfuse v3 create_score failed: %s", e)
-            if score_fallback:
-                logger.error("No score creation method found on Langfuse client")
-                return
+            self.langfuse.create_score(
+                trace_id=trace_id,
+                name=metric_name,
+                value=float(score_value),
+                comment=score_comment,
+                metadata=score_metadata,
+            )
 
         logger.info(
             "Uploaded %s evaluation scores to Langfuse trace %s", len(scores), trace_id

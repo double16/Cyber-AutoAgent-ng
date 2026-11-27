@@ -432,3 +432,41 @@ describe('useCommandHandler', () => {
         hook.unmount();
     });
 });
+
+it('formats healthy, empty and unknown health states when mode detection is unavailable', async () => {
+  for (const services of [[], [{displayName: 'Worker', status: 'running', health: 'starting'}], [{displayName: 'Worker', status: 'error', health: 'unknown'}]]) {
+    healthMonitor.getDetailedHealth.mockResolvedValue({status: {lastCheck: new Date(), overall: 'healthy', dockerRunning: false, services}, recommendations: []} as any);
+    containerManager.getCurrentMode.mockRejectedValueOnce(new Error('unavailable'));
+    const {props, history} = createProps({applicationConfig: undefined});
+    const hook = renderHook(() => useCommandHandler(props as any));
+    await act(async () => {await hook.current.handleSlashCommand('health', []);});
+    expect(history.at(-1)?.content).toContain('Deployment Mode: Unknown');
+    expect(history.at(-1)?.content).toContain('Docker Engine: STOPPED'); hook.unmount();
+  }
+});
+it('routes credentials, docs without an index and test-mode input across guided stages', async () => {
+  process.env.CYBER_TEST_MODE = 'true'; jest.useFakeTimers();
+  const openCredentials = jest.fn();
+  const {props} = createProps({openCredentials});
+  const hook = renderHook(() => useCommandHandler(props as any));
+  try {
+    await act(async () => {
+      await hook.current.handleSlashCommand('credentials', ['https://example.com']);
+      await hook.current.handleSlashCommand('docs', []);
+      await hook.current.handleUnifiedInput('/config');
+      jest.runOnlyPendingTimers();
+    });
+    expect(openCredentials).toHaveBeenCalledWith('https://example.com');
+    expect(props.openDocumentation).toHaveBeenCalledWith(undefined);
+    for (const stage of ['module', 'target', 'objective', 'idle']) {
+      props.assessmentFlowManager.getState.mockReturnValue({stage, objective: '', module: 'web', target: 'example.com'});
+      await act(async () => {await hook.current.handleUnifiedInput('next');});
+      expect(props.setAssessmentFlowState).toHaveBeenLastCalledWith(expect.objectContaining({step: stage}));
+    }
+    props.commandParser.parse.mockReturnValue({type: 'natural', target: 'example.com'} as any);
+    await act(async () => {await hook.current.handleUnifiedInput('assess example.com');});
+    props.assessmentFlowManager.isReadyForAssessmentExecution.mockReturnValue(true);
+    await act(async () => {await hook.current.handleNaturalLanguageCommand({type: 'natural', target: 'example.com'} as any);});
+    expect(props.openSafetyWarning).toHaveBeenLastCalledWith(expect.objectContaining({objective: ''}));
+  } finally {hook.unmount(); delete process.env.CYBER_TEST_MODE; jest.useRealTimers();}
+});

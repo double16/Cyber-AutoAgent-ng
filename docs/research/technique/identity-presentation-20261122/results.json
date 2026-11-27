@@ -1,0 +1,1528 @@
+{
+  "layout": {
+    "trials": 38,
+    "requests": 38,
+    "arms": {
+      "baseline": {
+        "focused_mismatches_detected": 6,
+        "focused_mismatch_trials": 6,
+        "valid_false_rejections": 3,
+        "valid_trials": 10,
+        "recorded_mismatches_detected": 0,
+        "recorded_trials": 3,
+        "controller_contract_valid": 3
+      },
+      "candidate": {
+        "focused_mismatches_detected": 6,
+        "focused_mismatch_trials": 6,
+        "valid_false_rejections": 2,
+        "valid_trials": 10,
+        "recorded_mismatches_detected": 0,
+        "recorded_trials": 3,
+        "controller_contract_valid": 3
+      }
+    },
+    "promoted": false
+  },
+  "current_contract_smoke": {
+    "trials": 6,
+    "requests": 6,
+    "matched": 6,
+    "causal_comparison": false
+  },
+  "total_requests": 44,
+  "request_limit": 45,
+  "trials": [
+    {
+      "case": "http_missing_admin_baseline",
+      "variant": "baseline",
+      "repetition": 0,
+      "expected_identity": "revise",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis links client bundle route declaration and client-side guard code to the endpoint subject, and the suspected mechanism is explicitly conditioned on unobserved server enforcement. Facts are kept distinct from unresolved preconditions."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectations target server responses to admin data endpoints kh/Kk for unauthenticated vs authenticated contexts, with negative expectations covering server enforcement and guard behavior. Baseline SPA delivery and controlled storage variations are included to distinguish legitimate SPA shell delivery from missing server authorization."
+        },
+        "identity_requirements": {
+          "verdict": "revise",
+          "reason": "Authentication requirement is declared as comparison none with no roles, yet safe_test_steps and positive_expectations require an authenticated admin session comparison to establish baseline legitimate behavior. Declared identity requirements do not match the proposed future tests."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "http_missing_admin_baseline",
+      "variant": "baseline",
+      "repetition": 1,
+      "expected_identity": "revise",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis is tied to retained bundle artifacts and client_routes.json showing /adminpage route declaration and client-side guard using sessionStorage/localStorage email with kh/Kk admin fetches. Server enforcement is explicitly marked unknown/unobserved, keeping facts distinct from unresolved preconditions."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectations separate ordinary SPA shell delivery from the claimed consequence of unauthenticated admin data responses, and negative expectations describe server enforcement and guard redirect. Safe test steps include baseline public route, empty storage, fabricated email, and authenticated admin comparison to distinguish legitimate behavior from missing server enforcement."
+        },
+        "identity_requirements": {
+          "verdict": "revise",
+          "reason": "Authentication requirement is declared as comparison none with no roles, yet positive expectations require an authenticated admin session baseline and differential comparison to unauthenticated requests. Declared identity requirements do not match the proposed future tests."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "http_missing_admin_baseline",
+      "variant": "candidate",
+      "repetition": 0,
+      "expected_identity": "revise",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed client bundle route declaration, client_routes.json entry, and client-side guard logic reading sessionStorage/localStorage email are evidenced in retained artifacts. Server enforcement for the page shell and admin data endpoints is explicitly marked as unobserved/unknown, keeping observed facts distinct from unresolved preconditions."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectations differentiate SPA shell delivery from unauthorized admin data exposure, and the procedure includes baseline SPA delivery, empty-storage navigation, fabricated-email guard evaluation, and a comparison with an authenticated admin session to obtain differential evidence for kh/Kk responses."
+        },
+        "identity_requirements": {
+          "verdict": "revise",
+          "reason": "The hypothesis and proposed steps require a comparison between unauthenticated access and an authenticated admin session to establish legitimate behavior, but the declared authentication_requirement is none with no roles, which does not match the needed identity comparison."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "http_missing_admin_baseline",
+      "variant": "candidate",
+      "repetition": 1,
+      "expected_identity": "revise",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed client bundle evidence links route /adminpage, client-side guard derived from sessionStorage/localStorage email, and _Component16 mount that calls kh/Kk. Server enforcement for the page shell and admin data endpoints is explicitly marked unknown/unobserved in preconditions, keeping observed facts distinct from unresolved server-side preconditions."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectations require unauthenticated admin data endpoint responses with 200 and admin payload versus authenticated admin baseline, and negative expectations require 401/403 or non-admin payload. The proposed steps capture network requests for kh/Kk and compare unauthenticated vs authenticated admin sessions, providing a distinguishing test for missing server enforcement."
+        },
+        "identity_requirements": {
+          "verdict": "revise",
+          "reason": "Positive expectations and safe_test_steps 5 require comparison of admin data endpoint responses between unauthenticated and an authenticated admin session to establish legitimate behavior. The declared authentication_requirement is none with no roles, which does not match the required authenticated admin identity for the comparison."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "http_valid_single_admin",
+      "variant": "baseline",
+      "repetition": 0,
+      "expected_identity": "adequate",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis is tied to retained bundle artifacts and client_routes.json showing /adminpage route declaration and client-side guard using sessionStorage/localStorage email with kh/Kk admin fetches. Preconditions explicitly mark server enforcement as unknown/unobserved, keeping observed facts distinct from unresolved preconditions."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectations separate SPA shell delivery from the claimed consequence of unauthenticated admin data responses, and negative expectations cover server enforcement and guard redirect. Safe test steps include baseline public route, empty storage vs fabricated email, and authenticated admin comparison to distinguish legitimate SPA behavior from missing server authorization."
+        },
+        "identity_requirements": {
+          "verdict": "revise",
+          "reason": "Authentication requirement declares roles admin but comparison is set to none. The test plan and positive expectations require a comparison between unauthenticated and authenticated admin sessions, so the declared comparison must reflect that identity requirement."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "http_valid_single_admin",
+      "variant": "baseline",
+      "repetition": 1,
+      "expected_identity": "adequate",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis is tied to retained bundle artifacts and client_routes.json showing /adminpage route declaration and client-side guard logic using sessionStorage/localStorage email. Suspected mechanism and preconditions explicitly note server enforcement for page shell and admin data endpoints is unknown/unobserved, keeping observed facts distinct from unresolved preconditions."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectations separate the ordinary SPA shell delivery from the claimed consequence of unauthenticated admin data access via kh/Kk, and negative expectations describe server enforcement and guard redirect. Safe test steps include baseline public route, empty storage vs fabricated email, and authenticated admin comparison to distinguish legitimate behavior from missing server enforcement."
+        },
+        "identity_requirements": {
+          "verdict": "revise",
+          "reason": "Authentication requirement declares roles admin but comparison is set to none. Future tests compare unauthenticated vs authenticated admin sessions, so the declared comparison must reflect an admin identity requirement rather than none."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "http_valid_single_admin",
+      "variant": "candidate",
+      "repetition": 0,
+      "expected_identity": "adequate",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis links client bundle route declaration, client_routes.json entry, conditional rendering based on e from sessionStorage/localStorage, and _Component16 mount fetching via kh/Kk. Suspected mechanism is framed as client-side guard only with explicit note that server enforcement for page shell and admin data endpoints is unobserved/unknown. Preconditions keep server enforcement as unknown/unobserved and separate observed client facts from unresolved server handling."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectations describe unauthenticated SPA shell delivery, client guard allowing _Component16 mount and kh/Kk calls, and server returning admin data to unauthenticated/non-admin context. Negative expectations describe redirects/401/403, guard preventing mount, and server enforcement. Procedure includes unauthenticated GET capture, browser storage manipulation, network request capture for kh/Kk, and comparison against authenticated admin session to obtain differential evidence for the Cla"
+        },
+        "identity_requirements": {
+          "verdict": "revise",
+          "reason": "Procedure requires both unauthenticated navigation and an authenticated admin baseline to discriminate server enforcement, while the declared authentication_requirement lists comparison none with roles [admin] only. The future test needs an unauthenticated context in addition to the admin session, so the declared identity needs do not cover the required unauthenticated observations."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "http_valid_single_admin",
+      "variant": "candidate",
+      "repetition": 1,
+      "expected_identity": "adequate",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis is tied to retained bundle artifacts showing client route declaration and client-side guard logic for /adminpage, with explicit note that server behavior for GET /adminpage and admin data endpoints is unobserved. Preconditions keep server enforcement unknown/unobserved, so the hypothesis remains conditional on future evidence rather than asserting ungrounded server behavior."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectations differentiate SPA shell delivery, which is legitimate, from unauthorized mounting of _Component16 and server responses to kh/Kk admin data calls for unauthenticated vs authenticated admin context. Negative expectations cover server enforcement and guard redirect, providing a clear distinction for the claimed missing server authorization consequence."
+        },
+        "identity_requirements": {
+          "verdict": "revise",
+          "reason": "Positive expectations and safe_test_steps require both unauthenticated and authenticated admin observations to establish differential evidence, yet authentication_requirement declares comparison none with only role admin. The declared identity needs do not match the required unauthenticated vs admin comparison."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "http_valid_anonymous",
+      "variant": "baseline",
+      "repetition": 0,
+      "expected_identity": "irrelevant",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "revise",
+          "reason": "The observed basis cites a public echo endpoint reflecting query input without an explicit link to the assigned subject resource or retained artifacts. No inspected observation is tied to the subject's response, so the basis for the header-boundary claim is ungrounded."
+        },
+        "test_discrimination": {
+          "verdict": "revise",
+          "reason": "Positive expectation is a generic policy-denied effect and negative expectation is baseline success with denied variation rejected. The check reason does not specify how a header-boundary crossing would be distinguished from normal echo behavior, and the required evidence is limited to headers without a defined distinguishing marker."
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "Authentication requirement is declared as none with comparison none and empty roles, matching the anonymous subject and the planned unauthenticated baseline and variation."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "http_valid_anonymous",
+      "variant": "baseline",
+      "repetition": 1,
+      "expected_identity": "irrelevant",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "revise",
+          "reason": "The observed basis is a generic statement about a public echo endpoint reflecting query input with no inspected artifact linking that observation to the assigned subject http-anonymous or its specific resource path. No retained source artifact is examined to connect the echo behavior to the claimed response header boundary crossing, so the grounding to the subject and proposed mechanism is unsupported."
+        },
+        "test_discrimination": {
+          "verdict": "revise",
+          "reason": "Positive expectations describe a policy-denied effect without defining the concrete distinguishing signal for a header boundary crossing versus normal echo behavior. The safe test steps compare response header boundaries but do not specify a baseline vs controlled variation that would uniquely separate legitimate echo reflection from the claimed header-boundary violation, leaving the claimed consequence indistinguishable from ordinary behavior."
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "The hypothesis declares no authentication comparison and empty roles, which matches the anonymous subject and the planned unauthenticated baseline and variation. No identity mismatch is present."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "http_valid_anonymous",
+      "variant": "candidate",
+      "repetition": 0,
+      "expected_identity": "irrelevant",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "revise",
+          "reason": "Observed basis states the public echo endpoint reflects a query input, but no inspected observation links that reflection to a response header boundary or to the documented policy boundary. The suspected mechanism of crossing a response header boundary is not grounded in the retained artifacts; the connection to the assigned subject remains unestablished."
+        },
+        "test_discrimination": {
+          "verdict": "revise",
+          "reason": "Positive expectations claim a policy-denied effect under controlled variation, while the proposed steps only compare response header boundaries with an inert query variation. The check reason does not specify how a header-boundary crossing would be distinguished from legitimate echo behavior, and supporting and refuting outcomes are not tied to the same claimed consequence."
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "The hypothesis is declared anonymous with authentication_requirement none and no roles. The proposed future test uses an unauthenticated baseline and variation, matching the declared identity needs."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "http_valid_anonymous",
+      "variant": "candidate",
+      "repetition": 1,
+      "expected_identity": "irrelevant",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "revise",
+          "reason": "The observed basis claims a public echo endpoint reflects a query input and that input may cross a response header boundary, but no inspected observation from the frozen inventory or retained artifacts is provided to connect the assigned subject to that echo behavior or to a header boundary. The link to the subject and the claimed mechanism remains ungrounded."
+        },
+        "test_discrimination": {
+          "verdict": "revise",
+          "reason": "Positive expectations are stated as a generic policy-denied effect observed under a controlled variation, while the proposed steps only compare response header boundaries with an inert query variation. The check reason does not specify how a header-boundary crossing would be distinguished from normal echo behavior, and the supporting and refuting outcomes do not address the same claimed consequence with a clear distinguishing observation."
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "The proposed future test is declared anonymous with no roles required, and the authentication requirement is none. The declared identity needs match the anonymous baseline and variation steps, so future identity comparisons are consistent with the proposed test."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "network_wrong_single_role",
+      "variant": "baseline",
+      "repetition": 0,
+      "expected_identity": "revise",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis cites a recorded network-service policy declaring operator/observer roles and that the diagnostic command requires operator, which is linked to the network-operator subject. The suspected mechanism of diagnostic input affecting a resource beyond permitted scope is tied to that policy context, with a future prerequisite noted for identity readiness."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectation is a policy-denied effect under controlled variation and negative expectation is permitted baseline succeeds with denied variation rejected. The baseline vs controlled variation is framed to distinguish legitimate allowed diagnostic use from a policy-denied effect."
+        },
+        "identity_requirements": {
+          "verdict": "revise",
+          "reason": "Authentication requirement declares comparison none with roles [observer] while safe_test_steps require establishing a future operator-authenticated connection and running operator diagnostics. Declared identity and required future test identity are inconsistent."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "network_wrong_single_role",
+      "variant": "baseline",
+      "repetition": 1,
+      "expected_identity": "revise",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis cites a recorded network-service policy declaring operator/observer roles and that the diagnostic command requires operator, which is linked to the network-operator subject and motivates the suspected out-of-scope diagnostic mechanism. The basis is explicitly referenced via artifact:frozen-policy.txt."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectation is a policy-denied effect under controlled variation and negative expectation is permitted baseline success with denied variation rejected. The baseline vs controlled variation is framed to distinguish legitimate allowed diagnostic behavior from a policy-denied effect."
+        },
+        "identity_requirements": {
+          "verdict": "revise",
+          "reason": "Authentication requirement declares comparison none with roles [observer] while safe_test_steps require a future operator-authenticated connection. Declared identity and comparison do not match the proposed future tests."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "network_wrong_single_role",
+      "variant": "candidate",
+      "repetition": 0,
+      "expected_identity": "revise",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis cites a recorded network-service policy declaring operator/observer roles and that the diagnostic command requires operator, which is linked to the network-operator subject and the suspected out-of-scope diagnostic input. The basis is tied to the retained policy artifact."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectation is a policy-denied effect under controlled variation and negative expectation is permitted baseline success with denied variation rejected. The proposed baseline vs boundary variation is intended to distinguish allowed diagnostic behavior from a policy-denied effect."
+        },
+        "identity_requirements": {
+          "verdict": "revise",
+          "reason": "Procedure declares a future operator-authenticated connection is needed, but the declared authentication requirement lists comparison none with role observer. The required future identity for the test is operator, not observer, so the identity declaration does not match the proposed test."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "network_wrong_single_role",
+      "variant": "candidate",
+      "repetition": 1,
+      "expected_identity": "revise",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "revise",
+          "reason": "Observed basis cites a recorded network-service policy and role requirement but no inspected artifact content is provided to connect the policy to the assigned subject or to confirm the diagnostic command scope. The supporting ref is uninspected, so the link between observed facts, proposed mechanism and trust boundary remains ungrounded."
+        },
+        "test_discrimination": {
+          "verdict": "revise",
+          "reason": "Positive expectation is a policy-denied effect under controlled variation, while the proposed steps run the diagnostic as operator and only vary destination across the documented allowed boundary. The test does not establish a baseline vs a beyond-scope variation and does not distinguish a permitted diagnostic result from the claimed unauthorized effect on a resource beyond permitted scope."
+        },
+        "identity_requirements": {
+          "verdict": "revise",
+          "reason": "Procedure declares a future operator-authenticated connection is required, but authentication_requirement lists observer with comparison none. Declared identity does not match the proposed future test's required operator role."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "network_valid_single_operator",
+      "variant": "baseline",
+      "repetition": 0,
+      "expected_identity": "adequate",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "revise",
+          "reason": "The observed basis cites a recorded policy declaring operator/observer roles and that the diagnostic command requires operator, but no inspected observation links that policy to the specific subject resource or shows diagnostic input affecting a resource beyond permitted scope. The grounding remains a policy premise without an evidenced link to the assigned subject and trust boundary."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectation of a policy-denied effect under controlled variation and negative expectation of permitted baseline success with denied variation rejected describe distinct outcomes for the claimed scope-escape consequence, with baseline and controlled variation steps."
+        },
+        "identity_requirements": {
+          "verdict": "revise",
+          "reason": "Authentication requirement declares role operator but comparison is set to none, so future identity comparisons are not specified to match the declared operator requirement. Identity readiness is noted as a future prerequisite without a concrete comparison plan."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "network_valid_single_operator",
+      "variant": "baseline",
+      "repetition": 1,
+      "expected_identity": "adequate",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "revise",
+          "reason": "The observed basis cites a recorded policy declaring operator/observer roles and that the diagnostic command requires operator, but no inspected observation links that policy to the specific assigned resource, diagnostic input, or trust boundary for the network-operator subject. The connection between the policy artifact and the claimed out-of-scope effect remains an ungrounded premise without an explicit evidenced link to the subject's resource and input handling."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectation of a policy-denied effect under controlled variation and negative expectation of permitted baseline success with denied variation rejected describe distinct outcomes for the claimed scope-escape consequence. The baseline vs controlled variation plan can distinguish legitimate allowed diagnostic behavior from the suspected unauthorized effect."
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "The declared authentication requirement is operator role and the future test steps specify an operator-authenticated connection. The comparison field is marked none, which is consistent with a role-based requirement that does not demand a specific identity comparison beyond operator readiness as a future prerequisite."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "network_valid_single_operator",
+      "variant": "candidate",
+      "repetition": 0,
+      "expected_identity": "adequate",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "revise",
+          "reason": "The observed basis cites only a recorded policy declaring operator/observer roles and that the diagnostic command requires operator. No inspected observation links a controlled diagnostic input to an effect beyond permitted scope or to the network-operator subject\u2019s trust boundary. The suspected mechanism of diagnostic input affecting a resource beyond scope remains ungrounded in the frozen records."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectation of a policy-denied effect under controlled variation and negative expectation of permitted baseline success with denied variation rejected compare the same claimed consequence across allowed and policy-denied diagnostic destinations, providing a baseline vs controlled variation distinction."
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "The proposed future test declares a single operator-authenticated connection and the authentication requirement lists operator with comparison none, matching the declared future need for operator identity."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "network_valid_single_operator",
+      "variant": "candidate",
+      "repetition": 1,
+      "expected_identity": "adequate",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "revise",
+          "reason": "The observed basis cites a recorded policy declaring operator/observer roles and that the diagnostic command requires operator, but it does not provide an inspected observation linking the assigned network-operator subject, a controlled diagnostic input, and an effect beyond permitted scope. The suspected mechanism of diagnostic input affecting a resource beyond its permitted scope is not grounded in the stated observed facts; the link to the trust boundary remains an unresolved precondition."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectations describe a policy-denied effect under controlled variation and negative expectations describe a permitted baseline succeeding with the denied variation rejected. The proposed safe steps compare an allowed diagnostic baseline with a variation across the documented allowed boundary, which can distinguish the claimed policy-denied consequence from legitimate permitted behavior."
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "The proposed future test declares a single operator-authenticated connection and the authentication requirement lists operator for comparison none. The declared identity need matches the procedure\u2019s requirement for an operator role."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "filesystem_wrong_comparison",
+      "variant": "baseline",
+      "repetition": 0,
+      "expected_identity": "revise",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "revise",
+          "reason": "Observed basis is only the source-policy declaration of reader/maintainer roles and that only maintainer may read a protected export. No inspected observation of the assigned resource handling a path input or of an export role boundary is provided. The suspected mechanism of a path input bypassing the export role boundary is therefore not grounded in observed facts about the subject; the link between a controlled path variation and the export check remains an unresolved precondition."
+        },
+        "test_discrimination": {
+          "verdict": "revise",
+          "reason": "Positive expectations describe a policy-denied effect under a controlled variation, while negative expectations describe the permitted baseline succeeding and the denied variation being rejected. The expectations do not distinguish a path-input bypass of the export role boundary from normal role-based denial. The same claimed consequence is not tested with a baseline, controlled variation and evidence needed to tell them apart."
+        },
+        "identity_requirements": {
+          "verdict": "revise",
+          "reason": "The declared authentication requirement is comparison account with roles maintainer, but the safe test steps require both a reader identity and a maintainer identity to compare denied vs permitted access on the same protected export path. The declared identity requirement does not match the proposed future tests."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "filesystem_wrong_comparison",
+      "variant": "baseline",
+      "repetition": 1,
+      "expected_identity": "revise",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "revise",
+          "reason": "Observed basis is only a policy declaration about reader/maintainer roles. No inspected observation links the assigned filesystem-roles subject to a path input handling or to the export role boundary, and attacker-controlled input is asserted without evidence of the resource or path parameter being present. The mechanism remains ungrounded to concrete observations."
+        },
+        "test_discrimination": {
+          "verdict": "revise",
+          "reason": "Positive expectation is a generic policy-denied effect under a controlled variation, while negative expectation describes the permitted baseline succeeding and denied variation being rejected. The check reason does not specify what distinguishing effect would prove a path bypass versus normal role denial, and the same-path reader/maintainer comparison alone does not discriminate a bypass consequence."
+        },
+        "identity_requirements": {
+          "verdict": "revise",
+          "reason": "Authentication requirement declares comparison account with roles maintainer, but safe test steps require both a reader identity and a maintainer identity to compare access. The declared identity comparison does not match the proposed future tests."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "filesystem_wrong_comparison",
+      "variant": "candidate",
+      "repetition": 0,
+      "expected_identity": "revise",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "The hypothesis grounds on the source-policy declaration of reader and maintainer roles and the maintainer-only export rule, with a path-input bypass mechanism proposed conditionally. The observed basis is tied to the filesystem-roles subject via the retained policy artifact."
+        },
+        "test_discrimination": {
+          "verdict": "revise",
+          "reason": "Positive expectations describe a policy-denied effect under a controlled variation, while negative expectations describe the permitted baseline succeeding and the denied variation being rejected. The check reason does not clearly distinguish a role-boundary bypass from normal denial, and the proposed variation is not linked to a concrete distinguishing observation of unauthorized export access."
+        },
+        "identity_requirements": {
+          "verdict": "revise",
+          "reason": "The proposed procedure requires both reader and maintainer identities for comparison, but the declared authentication requirement lists only maintainer. Role comparison needs two distinct roles, so the declared identity need does not match the future test."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "filesystem_wrong_comparison",
+      "variant": "candidate",
+      "repetition": 1,
+      "expected_identity": "revise",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "revise",
+          "reason": "Observed basis is only a policy declaration about reader/maintainer roles. No inspected observation of the assigned resource handling a path input or an export role boundary is provided, so the link between the policy and a path-bypass mechanism on the subject is ungrounded."
+        },
+        "test_discrimination": {
+          "verdict": "revise",
+          "reason": "Positive expectation is a policy-denied effect under a controlled path variation, while the procedure only compares reader denied vs maintainer permitted on the same path. The check reason does not distinguish an unauthorized export read from normal role denial, and the required evidence does not capture the claimed bypass effect."
+        },
+        "identity_requirements": {
+          "verdict": "revise",
+          "reason": "Procedure requires both reader and maintainer identities for comparison, but authentication_requirement declares only maintainer. The declared future identity needs do not match the proposed role comparison."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "filesystem_valid_role_comparison",
+      "variant": "baseline",
+      "repetition": 0,
+      "expected_identity": "adequate",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "revise",
+          "reason": "The observed basis is a source-policy statement about reader/maintainer roles with no inspected target observation linking the assigned filesystem-roles subject to a concrete path input, export boundary or role enforcement. The hypothesis therefore lacks an observed fact grounding the subject, mechanism and trust boundary; the policy fixture alone does not establish current coverage."
+        },
+        "test_discrimination": {
+          "verdict": "revise",
+          "reason": "Positive expectations describe a generic policy-denied effect under a controlled variation without specifying the claimed bypass consequence, e.g., a reader obtaining maintainer-only export data via a path variation. The stated negative expectations and required evidence do not distinguish unauthorized export read from legitimate denial or ordinary access control, so the test does not discriminate the claimed role-boundary bypass."
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "The declared authentication requirement compares role reader vs maintainer and the safe test steps propose using one reader identity and one maintainer identity to request the same protected export path, matching the declared comparison."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "filesystem_valid_role_comparison",
+      "variant": "baseline",
+      "repetition": 1,
+      "expected_identity": "adequate",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "revise",
+          "reason": "Observed basis is a policy declaration about reader/maintainer roles and export access. No inspected observation of the assigned resource handling a path input or a role boundary is provided. The suspected mechanism of path input bypassing the export role boundary is not grounded in an observed fact about the subject; the link between the policy statement and the concrete path handling remains unestablished."
+        },
+        "test_discrimination": {
+          "verdict": "revise",
+          "reason": "Safe test steps compare same-path access for reader vs maintainer and repeat with a controlled path variation, but the positive expectation is a policy-denied effect under the controlled variation. The check reason does not specify what distinguishing outcome would prove a bypass versus legitimate denial, nor how the path variation is tied to the claimed role boundary bypass. Supporting and refuting outcomes are not shown to address the same claimed consequence."
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "Authentication requirement declares role comparison between reader and maintainer, matching the policy-declared roles and the planned test steps that use one reader identity and one maintainer identity to request the same protected export path."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "filesystem_valid_role_comparison",
+      "variant": "candidate",
+      "repetition": 0,
+      "expected_identity": "adequate",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "The observed basis is the fixture policy declaration that reader and maintainer roles exist and only maintainer may read a protected export. The suspected mechanism of a path input bypassing the export role boundary is presented as a conditional hypothesis with identity readiness noted as a future prerequisite. The supporting ref is the frozen policy artifact, which is the permitted fixture premise for this hypothesis."
+        },
+        "test_discrimination": {
+          "verdict": "revise",
+          "reason": "Positive expectations require a policy-denied effect under a controlled path variation, but the proposed steps only compare reader vs maintainer access to the same protected export path and repeat with a controlled variation without specifying what variation would demonstrate a bypass and how the outcome would be distinguished from normal denial or legitimate access. The check reason does not define the distinguishing evidence for a role boundary bypass."
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "The authentication requirement declares reader and maintainer roles and the proposed procedure explicitly uses one reader identity and one maintainer identity to request the same protected export path, matching the declared role comparison."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "filesystem_valid_role_comparison",
+      "variant": "candidate",
+      "repetition": 1,
+      "expected_identity": "adequate",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "revise",
+          "reason": "Observed basis is a policy declaration only with no inspected observation linking a path input to the protected export resource or role enforcement. The suspected path-bypass mechanism and trust boundary are not connected to concrete observed facts about the subject."
+        },
+        "test_discrimination": {
+          "verdict": "revise",
+          "reason": "Positive expectations describe a generic policy-denied effect under a controlled variation without specifying the distinguishing unauthorized read outcome for the reader role. The proposed steps compare reader vs maintainer access but do not define a baseline vs controlled path variation that would separate legitimate denial from a bypass."
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "The proposed future test declares reader and maintainer roles and the authentication requirement lists the same two distinct roles, matching the role comparison needed."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "filesystem_valid_single_reader",
+      "variant": "baseline",
+      "repetition": 0,
+      "expected_identity": "adequate",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis links a filename joined to an export root and a reader-only-in-root policy to the filesystem-reader subject, with a path-escape mechanism proposed conditionally. The link is grounded in the inspected artifact and the policy reference."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectation is a policy-denied effect under controlled out-of-root variation, negative expectation is in-root success with out-of-root rejection. Baseline vs controlled variation distinguishes the claimed escape from legitimate in-root read behavior."
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "Authentication requirement declares reader role and safe test steps specify using one future reader identity. The declared requirement is consistent with the planned future identity use; no contradictory comparison is required."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "filesystem_valid_single_reader",
+      "variant": "baseline",
+      "repetition": 1,
+      "expected_identity": "adequate",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis references a filename joined to an export root and a reader-only-in-root policy, which is linked to the filesystem-reader subject. The suspected path-escape mechanism and preconditions are explicitly stated, providing a grounded basis for the hypothesis without requiring unobserved exploitation."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectation is a policy-denied effect under controlled variation and negative expectation is permitted baseline success with denied variation rejected. Safe test steps compare an in-root marker with an out-of-root marker under the same future reader identity, distinguishing legitimate access from escape."
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "Authentication requirement declares role reader and safe test steps specify using one future reader identity. No identity comparison is required for this reader-only check, consistent with the declared requirement."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "filesystem_valid_single_reader",
+      "variant": "candidate",
+      "repetition": 0,
+      "expected_identity": "adequate",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis links a filename joined to an export root with a policy limiting reader access to that root, providing a grounded basis for a path-escape mechanism hypothesis about the assigned filesystem-reader subject."
+        },
+        "test_discrimination": {
+          "verdict": "revise",
+          "reason": "Positive expectations claim a policy-denied effect is observed under the controlled variation while negative expectations claim the denied variation is rejected, giving contradictory outcomes for the same claimed consequence and failing to define a distinct distinguishing observation between legitimate in-root read and unauthorized out-of-root read."
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "Procedure requires a single future reader identity and authentication requirement declares none comparison with role reader, matching the declared single-identity test need."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "filesystem_valid_single_reader",
+      "variant": "candidate",
+      "repetition": 1,
+      "expected_identity": "adequate",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis links a filename joined to an export root with a policy limiting reader access to that root, grounding the path-escape mechanism to the filesystem-reader subject and its trust boundary. The preconditions explicitly note policy applicability and defer identity readiness."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectation is a policy-denied effect under controlled out-of-root variation, while negative expectation is successful in-root read and rejection of out-of-root. The in-root vs out-of-root marker comparison under the same reader identity distinguishes authorized access from the claimed escape consequence."
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "Procedure declares a single future reader identity and authentication requirement lists reader with comparison none, matching the single-identity in-root/out-of-root comparison need."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "recorded_admin",
+      "variant": "baseline",
+      "repetition": 0,
+      "expected_identity": null,
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "status": "done",
+        "reason": "",
+        "instructions": "",
+        "repair": {
+          "kind": "none",
+          "evidence_gaps": [],
+          "execution_receipt_gaps": []
+        },
+        "subject_reviews": [
+          {
+            "item_id": "endpoint-d6f1e517c403a8d5",
+            "decision": "retain",
+            "reason": "Hypothesis is grounded in retained client bundle evidence showing /adminpage route declaration and client-side guard based on sessionStorage email with calls to kh/Kk, and proposes conditional future tests with explicit preconditions, attacker-controlled flow, safe steps, positive/negative expectations and required evidence. Semantic checks are adequate for the frozen inventory and assigned endpoint.",
+            "hypotheses": [
+              {
+                "semantic_checks": {
+                  "grounding": {
+                    "verdict": "adequate",
+                    "reason": "Observed basis cites client route e.Adminpage = '/adminpage' in assets_index.webcrack.js and bundles/index-quWo6y2l.webcrack.js, client_routes.json spa_routes entry, and conditional rendering with sessionStorage email guard and kh/Kk calls. Links to assigned endpoint endpoint-d6f1e517c403a8d5."
+                  },
+                  "test_discrimination": {
+                    "verdict": "adequate",
+                    "reason": "Positive expectations describe unauthenticated SPA delivery, client guard mount and admin data fetch without server enforcement; negative expectations describe redirect/401/403 and guard prevention. Distinguishes legitimate SPA behavior from unauthorized admin data access via comparison of unauthenticated vs authenticated admin session and network request evidence."
+                  },
+                  "identity_requirements": {
+                    "verdict": "adequate",
+                    "reason": "Authentication requirement declared as comparison none with no roles, matching proposed unauthenticated GET and client-storage manipulation tests. Declared user roles are available for future authenticated baseline comparison."
+                  }
+                },
+                "hypothesis_id": "57cb73a77b3d350d9fe9cff2",
+                "decision": "retain",
+                "reason": "Grounded conditional hypothesis with explicit observed basis, suspected client-side-only guard, and discriminating future test steps and evidence requirements."
+              }
+            ],
+            "no_hypothesis_basis": null
+          }
+        ],
+        "prerequisite_gaps": [],
+        "unresolved_criterion_ids": []
+      },
+      "error": null,
+      "controller_contract_valid": true,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "recorded_admin",
+      "variant": "baseline",
+      "repetition": 1,
+      "expected_identity": null,
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "status": "done",
+        "reason": "",
+        "instructions": "",
+        "repair": {
+          "kind": "none",
+          "evidence_gaps": [],
+          "execution_receipt_gaps": []
+        },
+        "subject_reviews": [
+          {
+            "item_id": "endpoint-d6f1e517c403a8d5",
+            "decision": "retain",
+            "reason": "Hypothesis is grounded in retained client bundle evidence showing /adminpage route declaration and client-side guard based on sessionStorage email with calls to kh/Kk, and proposes conditional future tests distinguishing server enforcement from client guard. Test discrimination separates unauthenticated SPA delivery, client guard evaluation, and server responses for admin data endpoints with positive and negative expectations and required evidence.",
+            "hypotheses": [
+              {
+                "semantic_checks": {
+                  "grounding": {
+                    "verdict": "adequate",
+                    "reason": "Observed basis cites client route e.Adminpage = '/adminpage' in assets_index.webcrack.js and bundles/index-quWo6y2l.webcrack.js, client_routes.json spa_routes entry, and conditional rendering with sessionStorage email check and kh/Kk calls. Links to assigned endpoint http://target.example/adminpage."
+                  },
+                  "test_discrimination": {
+                    "verdict": "adequate",
+                    "reason": "Positive expectations cover unauthenticated SPA delivery, client guard mount and admin data requests, and server response differences. Negative expectations cover redirect/401/403, guard prevention, and generic shell. Required evidence includes HTTP status, network requests, and authenticated comparison."
+                  },
+                  "identity_requirements": {
+                    "verdict": "adequate",
+                    "reason": "Authentication requirement is comparison none with no roles, matching unauthenticated future test design. Declared user roles are available for comparison baseline but not required for this hypothesis."
+                  }
+                },
+                "hypothesis_id": "57cb73a77b3d350d9fe9cff2",
+                "decision": "retain",
+                "reason": "Grounded conditional hypothesis with explicit observed basis, suspected client-side guard mechanism, and discriminating future test steps with clear positive/negative expectations and required evidence."
+              }
+            ],
+            "no_hypothesis_basis": null
+          }
+        ],
+        "prerequisite_gaps": [],
+        "unresolved_criterion_ids": []
+      },
+      "error": null,
+      "controller_contract_valid": true,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "recorded_admin",
+      "variant": "baseline",
+      "repetition": 2,
+      "expected_identity": null,
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "status": "done",
+        "reason": "",
+        "instructions": "",
+        "repair": {
+          "kind": "none",
+          "evidence_gaps": [],
+          "execution_receipt_gaps": []
+        },
+        "subject_reviews": [
+          {
+            "item_id": "endpoint-d6f1e517c403a8d5",
+            "decision": "retain",
+            "reason": "Hypothesis is grounded in retained client bundle evidence showing /adminpage route declaration and client-side guard based on sessionStorage email with calls to kh/Kk, and proposes conditional future tests distinguishing server enforcement from client guard. Test discrimination separates unauthenticated SPA delivery, client guard evaluation, and server responses for admin data endpoints with positive and negative expectations and required evidence.",
+            "hypotheses": [
+              {
+                "semantic_checks": {
+                  "grounding": {
+                    "verdict": "adequate",
+                    "reason": "Observed basis cites client route e.Adminpage = '/adminpage' in assets_index.webcrack.js and bundles/index-quWo6y2l.webcrack.js, client_routes.json spa_routes entry, and conditional rendering with sessionStorage email check and kh/Kk calls. Links to assigned endpoint http://target.example/adminpage."
+                  },
+                  "test_discrimination": {
+                    "verdict": "adequate",
+                    "reason": "Positive expectations cover unauthenticated SPA delivery, client guard allowing mount and admin data requests, and server response with admin data. Negative expectations cover redirect/401/403, guard preventing mount, and server enforcement. Required evidence includes HTTP responses, network requests, and comparison between unauthenticated and authenticated admin session."
+                  },
+                  "identity_requirements": {
+                    "verdict": "adequate",
+                    "reason": "Authentication requirement is comparison none with no roles, matching proposed unauthenticated baseline tests. Future comparison with authenticated admin session is described as a controlled variation without requiring execution credentials now."
+                  }
+                },
+                "hypothesis_id": "57cb73a77b3d350d9fe9cff2",
+                "decision": "retain",
+                "reason": "Grounded conditional hypothesis with explicit observed basis, suspected client-side guard mechanism, attacker-controlled URL and storage manipulation, safe future test steps, and discriminating positive/negative expectations with required evidence."
+              }
+            ],
+            "no_hypothesis_basis": null
+          }
+        ],
+        "prerequisite_gaps": [],
+        "unresolved_criterion_ids": []
+      },
+      "error": null,
+      "controller_contract_valid": true,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "recorded_admin",
+      "variant": "candidate",
+      "repetition": 0,
+      "expected_identity": null,
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "status": "done",
+        "reason": "",
+        "instructions": "",
+        "repair": {
+          "kind": "none",
+          "evidence_gaps": [],
+          "execution_receipt_gaps": []
+        },
+        "subject_reviews": [
+          {
+            "item_id": "endpoint-d6f1e517c403a8d5",
+            "decision": "retain",
+            "reason": "Hypothesis is grounded in retained client bundle evidence for /adminpage route declaration and client-side guard, with preconditions, suspected mechanism and attacker-controlled flow tied to observed SPA routing. Test steps and expectations distinguish unauthenticated vs admin contexts and require concrete evidence of server enforcement for admin data endpoints.",
+            "hypotheses": [
+              {
+                "semantic_checks": {
+                  "grounding": {
+                    "verdict": "adequate",
+                    "reason": "Observed basis cites client bundle route e.Adminpage = '/adminpage' and conditional rendering with sessionStorage email check and kh/Kk calls, linked to assigned endpoint via inventory and client_routes evidence."
+                  },
+                  "test_discrimination": {
+                    "verdict": "adequate",
+                    "reason": "Positive and negative expectations differentiate SPA shell delivery, client guard evaluation, and server enforcement of admin data endpoints with required evidence for network requests and comparison."
+                  },
+                  "identity_requirements": {
+                    "verdict": "adequate",
+                    "reason": "Authentication requirement declared as none for the unauthenticated bypass test; future comparison steps are described as baseline evidence without requiring cross-identity execution in this hypothesis generation phase."
+                  }
+                },
+                "hypothesis_id": "57cb73a77b3d350d9fe9cff2",
+                "decision": "retain",
+                "reason": "Grounded conditional test for client-side admin route guard with clear preconditions, mechanism and evidence requirements; test discrimination is sufficient for future verification."
+              }
+            ],
+            "no_hypothesis_basis": null
+          }
+        ],
+        "prerequisite_gaps": [],
+        "unresolved_criterion_ids": []
+      },
+      "error": null,
+      "controller_contract_valid": true,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "recorded_admin",
+      "variant": "candidate",
+      "repetition": 1,
+      "expected_identity": null,
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "status": "done",
+        "reason": "",
+        "instructions": "",
+        "repair": {
+          "kind": "none",
+          "evidence_gaps": [],
+          "execution_receipt_gaps": []
+        },
+        "subject_reviews": [
+          {
+            "item_id": "endpoint-d6f1e517c403a8d5",
+            "decision": "retain",
+            "reason": "Hypothesis is grounded in retained client bundle evidence showing /adminpage route declaration and client-side guard based on sessionStorage/localStorage email with conditional rendering of _Component16 and calls to kh/Kk. Preconditions, suspected mechanism, attacker-controlled flow, safe future test steps, positive and negative expectations, and required evidence are specified for the assigned endpoint. Semantic checks are adequate.",
+            "hypotheses": [
+              {
+                "semantic_checks": {
+                  "grounding": {
+                    "verdict": "adequate",
+                    "reason": "Observed basis cites client bundle route e.Adminpage = '/adminpage', client_routes.json spa_routes entry, and conditional rendering with sessionStorage email check and admin data calls kh/Kk. Source refs are retained and content-bearing."
+                  },
+                  "test_discrimination": {
+                    "verdict": "adequate",
+                    "reason": "Positive expectations describe unauthenticated SPA delivery, client guard evaluation, and server enforcement outcomes for admin data endpoints. Negative expectations cover redirect, guard prevention, and server denial. Required evidence includes HTTP response, network requests, and comparison with authenticated admin baseline."
+                  },
+                  "identity_requirements": {
+                    "verdict": "adequate",
+                    "reason": "Authentication requirement declared as none with empty roles. Proposed steps include optional authenticated baseline for comparison but do not require cross-identity comparison for the hypothesis disposition."
+                  }
+                },
+                "hypothesis_id": "57cb73a77b3d350d9fe9cff2",
+                "decision": "retain",
+                "reason": "Grounded conditional test for client-side admin route guard with clear preconditions and future evidence requirements."
+              }
+            ],
+            "no_hypothesis_basis": null
+          }
+        ],
+        "prerequisite_gaps": [],
+        "unresolved_criterion_ids": []
+      },
+      "error": null,
+      "controller_contract_valid": true,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "recorded_admin",
+      "variant": "candidate",
+      "repetition": 2,
+      "expected_identity": null,
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "status": "done",
+        "reason": "",
+        "instructions": "",
+        "repair": {
+          "kind": "none",
+          "evidence_gaps": [],
+          "execution_receipt_gaps": []
+        },
+        "subject_reviews": [
+          {
+            "item_id": "endpoint-d6f1e517c403a8d5",
+            "decision": "retain",
+            "reason": "Hypothesis is grounded in retained client bundle evidence showing /adminpage route declaration and client-side guard based on sessionStorage/localStorage email with conditional rendering of _Component16 and calls to kh/Kk. Preconditions, suspected mechanism, attacker-controlled flow, safe future test steps, positive and negative expectations, and required evidence are specified and target-specific to the frozen endpoint. Semantic checks are adequate.",
+            "hypotheses": [
+              {
+                "semantic_checks": {
+                  "grounding": {
+                    "verdict": "adequate",
+                    "reason": "Observed basis cites client bundle route e.Adminpage = '/adminpage', client_routes.json spa_routes entry, and conditional rendering with sessionStorage email check and kh/Kk calls. Source refs are retained and content-bearing."
+                  },
+                  "test_discrimination": {
+                    "verdict": "adequate",
+                    "reason": "Positive expectations describe unauthenticated SPA delivery, client guard evaluation, and server enforcement failure for admin data endpoints. Negative expectations cover redirect, guard prevention, and server enforcement. Required evidence includes HTTP response, network requests, and comparison with authenticated admin baseline."
+                  },
+                  "identity_requirements": {
+                    "verdict": "adequate",
+                    "reason": "Authentication requirement declared as none for the proposed unauthenticated test. Future steps mention authenticated admin baseline for comparison but identity comparison is not required for the hypothesis disposition."
+                  }
+                },
+                "hypothesis_id": "57cb73a77b3d350d9fe9cff2",
+                "decision": "retain",
+                "reason": "Grounded conditional hypothesis with clear preconditions and discriminating future test steps for client-side admin route guard and server enforcement of admin data endpoints."
+              }
+            ],
+            "no_hypothesis_basis": null
+          }
+        ],
+        "prerequisite_gaps": [],
+        "unresolved_criterion_ids": []
+      },
+      "error": null,
+      "controller_contract_valid": true,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "contract_smoke-filesystem-missing",
+      "variant": null,
+      "repetition": null,
+      "expected_identity": "revise",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis cites a source filesystem export function with an optional principal/identity context and a recorded policy declaring project_reader role restriction for the marker. The suspected mechanism of bypassing the policy-required identity is linked to the attacker-controlled optional identity context for the assigned marker operation."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectation is anonymous receipt of the policy-protected marker, negative expectation is authenticated project_reader baseline receipt with anonymous denial. The two future reads of the same marker/operation in authenticated project_reader baseline vs anonymous control provide a distinguishing comparison for the claimed policy bypass."
+        },
+        "identity_requirements": {
+          "verdict": "revise",
+          "reason": "Safe test steps require a future authenticated project_reader baseline context, but authentication_requirement declares comparison none with roles []. The declared roles do not reflect the required project_reader session for the baseline, mismatching the proposed future tests."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "contract_smoke-filesystem-valid",
+      "variant": null,
+      "repetition": null,
+      "expected_identity": "adequate",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis cites a source filesystem export function with an optional principal/identity context and a recorded policy declaring project_reader role restriction for the marker. The suspected mechanism of bypassing the policy-required identity is linked to the attacker-controlled optional identity context for the assigned marker operation."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Test steps establish a permitted project_reader baseline and an explicit anonymous control for the same marker and operation. Positive expectation of anonymous receipt of the policy-protected marker is distinguished from the legitimate negative expectation of authenticated receipt with anonymous denial."
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "Authentication requirement declares comparison none with role project_reader. The proposed steps compare a single authenticated project_reader context against an anonymous control with no second authenticated account, role, or tenant comparison, matching the declared requirement."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "contract_smoke-http-missing",
+      "variant": null,
+      "repetition": null,
+      "expected_identity": "revise",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis cites source for HTTP export handler accepting optional identity context and recorded policy declaring auditor role restriction for the marker. Suspected mechanism links unauthenticated access to policy-required identity. Basis is tied to assigned subject."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectation is anonymous receiving the policy-protected marker; negative expectation is authenticated auditor baseline receiving marker and anonymous access denied. The two contexts are distinct and the distinguishing evidence is the marker outcome per context."
+        },
+        "identity_requirements": {
+          "verdict": "revise",
+          "reason": "Safe test steps require a future authenticated auditor baseline and an anonymous control, but authentication_requirement declares comparison none with roles []. The declared requirement does not reflect the auditor role needed for the baseline."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "contract_smoke-http-valid",
+      "variant": null,
+      "repetition": null,
+      "expected_identity": "adequate",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis cites source for HTTP export handler accepting optional identity context and recorded policy declaring auditor role restriction for the marker. Suspected mechanism links unauthenticated access to policy-required identity. Grounding connects inspected observations to assigned subject and trust boundary."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Test compares same marker operation in authenticated auditor baseline vs anonymous control. Positive expectation is anonymous receives protected marker; negative expectation is anonymous denied while auditor receives. Distinguishes policy violation from legitimate access."
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "Authentication requirement declares comparison none with role auditor. Steps use one authenticated auditor context and an anonymous control, no comparison between distinct authenticated accounts/roles/tenants. Anonymous control is permitted separately."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "contract_smoke-network-missing",
+      "variant": null,
+      "repetition": null,
+      "expected_identity": "revise",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis cites a source for the network diagnostic service accepting an optional identity context and a recorded policy declaring operator role restriction for the marker. Suspected mechanism of unauthenticated access to a policy-protected marker is linked to the assigned subject via that policy and marker operation."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "Positive expectation is anonymous receipt of the policy-protected marker; negative expectation is authenticated operator baseline receipt with anonymous denial. The steps compare the same marker and operation across authenticated operator baseline and anonymous control, providing a distinguishing outcome for the claimed bypass."
+        },
+        "identity_requirements": {
+          "verdict": "revise",
+          "reason": "Safe test steps require a future authenticated operator context as the permitted baseline, but authentication_requirement declares roles [] with comparison none. The declared roles do not reflect the required operator role for the baseline, so declared identities do not match the proposed future tests."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    },
+    {
+      "case": "contract_smoke-network-valid",
+      "variant": null,
+      "repetition": null,
+      "expected_identity": "adequate",
+      "valid": true,
+      "requests": 1,
+      "output": {
+        "grounding": {
+          "verdict": "adequate",
+          "reason": "Observed basis cites a source for the network diagnostic service accepting an optional identity context and a recorded policy restricting the marker to the operator role, which grounds the suspected bypass of the policy-required identity for the assigned marker operation."
+        },
+        "test_discrimination": {
+          "verdict": "adequate",
+          "reason": "The future test compares the same marker and operation in an authenticated operator baseline versus an unauthenticated anonymous control, with positive expectation of anonymous receipt and negative expectation of denial, providing a clear distinction between policy-protected and improperly exposed outcomes."
+        },
+        "identity_requirements": {
+          "verdict": "adequate",
+          "reason": "Authentication requirement declares comparison none with role operator and the steps use a single authenticated operator context for baseline and an anonymous control, matching the declared identity mode without requiring a second authenticated account, role, or tenant comparison."
+        }
+      },
+      "error": null,
+      "controller_contract_valid": null,
+      "controller_error": null,
+      "transport": [
+        {
+          "native_schema": true
+        }
+      ]
+    }
+  ],
+  "valid_native_outputs": 44,
+  "native_schema_transport_requests": 44,
+  "assessment": {
+    "layout": "Reject: both arms detected 6/6 focused mismatches; candidate false-rejected 2/10 valid controls and missed all three recorded-context mismatches. All predeclared promotion conditions are unmet.",
+    "observed_phase_confusion": "In larger-context output, available declared user roles are treated as sufficient for a future baseline, or a required baseline is called optional/irrelevant because generation does not execute it. These are recorded reasons, not proof of one causal mechanism.",
+    "contract_fix": "Independent code inspection shows none also supports one authenticated context plus separately assigned anonymous controls. The old no-cross-identity wording is too broad; definitions now distinguish authenticated comparisons from anonymous controls. No enum or validator behavior changed.",
+    "smoke": "All six fresh current-contract examples match their expected identity judgments, with no false rejection of three single-session-plus-anonymous controls. This uses fresh smaller, explicitly worded procedures and the native role harness; it cannot isolate the descriptor change or establish improvement on the original long context.",
+    "end_to_end": "No production execution, better authorship, or increased useful adoption demonstrated."
+  }
+}

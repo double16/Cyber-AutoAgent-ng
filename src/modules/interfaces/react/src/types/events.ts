@@ -1,3 +1,6 @@
+import type { TechniqueEvent } from '../utils/techniqueEventFormatting.js';
+export type { TechniqueEvent, TechniqueEventType } from '../utils/techniqueEventFormatting.js';
+
 /**
  * Cyber-AutoAgent Event System - SDK-Aligned Type Definitions
  * 
@@ -54,6 +57,13 @@ export interface BaseEvent {
  * event handling and UI rendering.
  */
 export enum EventType {
+  TECHNIQUE_SYNC_COMPLETE = 'technique_sync_complete',
+  TECHNIQUE_RECOMMENDED = 'technique_recommended',
+  TECHNIQUE_BUILD_PROGRESS = 'technique_build_progress',
+  TECHNIQUE_RESOLVED = 'technique_resolved',
+  TECHNIQUE_EVALUATED = 'technique_evaluated',
+  TECHNIQUE_DEACTIVATED = 'technique_deactivated',
+  TECHNIQUE_WARNING = 'technique_warning',
   // =============================================================================
   // SDK NATIVE EVENTS - Strands SDK core event system
   // =============================================================================
@@ -555,6 +565,7 @@ export type StreamEvent =
   | PlanValidationEvent
   | ReportContentEvent
   | TerminationReasonEvent
+  | TechniqueEvent
   | { type: 'error'; error?: string; message?: string; [key: string]: any }
   | { type: 'output'; content?: string; [key: string]: any }
   | { type: 'metadata'; [key: string]: any };

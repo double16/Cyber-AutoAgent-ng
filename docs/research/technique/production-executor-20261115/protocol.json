@@ -1,0 +1,32 @@
+{
+  "limit": 100,
+  "plans": [
+    [
+      "unknown",
+      "lookup"
+    ],
+    [
+      "unknown",
+      "none"
+    ],
+    [
+      "shared",
+      "none"
+    ],
+    [
+      "shared",
+      "lookup"
+    ]
+  ],
+  "script_sha256": "f22cf54607314fccb32ec74381b39c6f89b44f8a6ff6e7f0cf4bc0013b764601",
+  "guidance_sha256": "7f91190f9cc73efb226698bf0bffb086f7144f6f9aa5ee33bebac4289dd32d74",
+  "scope": "Production factory, run loop, hooks and SQLite acceptance; controlled fixture I/O and task assignment.",
+  "excluded": [
+    "whole controller scheduling",
+    "model prompt-builder/evaluator",
+    "semantic catalog retrieval",
+    "Qdrant publication"
+  ],
+  "authorization": "User approved up to 100 new requests.",
+  "preflight": "9 scripted/offline tests passed; both files meet line/branch coverage floors."
+}

@@ -1,0 +1,15 @@
+{
+  "study": "contract-view-v3",
+  "request_cap": 128,
+  "planned_review_decisions": 64,
+  "planned_selection_decisions": 48,
+  "repetitions": 2,
+  "order": "all review pairs, then all selection pairs, in frozen order",
+  "review_intervention": "Decode canonical authentication requirement into declared authenticated roles and comparison between authenticated identities. Both arms use the same dedicated packet and all other content unchanged.",
+  "selection_intervention": "Name requested_deliverable as reusable methodology, using the shared phase-guidance constant. Both arms retain task-local context and identical native output schema.",
+  "promotion": "Detect all reproduced defects in both repetitions without rejecting valid controls. Inspect other checks and whole-review disposition before declaring a valid proposal accepted. No deployment based on these narrow trials alone.",
+  "equivalence": "Anonymous identity adequate and not_applicable accepted as predeclared in review v2 inputs.",
+  "failure_policy": "Keep failures and incomplete records. Never selectively rerun a completed result; no prompt tuning after first request.",
+  "limitations": "Small synthetic review fixtures and fixed web selection documents. No live tools, target requests, full request alignment pipeline or end-to-end testing.",
+  "authorization": "Standing user authorization for as many requests as needed; this experiment is independently bounded."
+}

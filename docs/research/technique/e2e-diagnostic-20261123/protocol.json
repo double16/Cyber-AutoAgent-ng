@@ -1,0 +1,19 @@
+{
+  "study": "six-paired-end-to-end-diagnostic",
+  "model": "muse-glimmer:30b-mlx",
+  "cases": ["HTTP redirect vulnerable", "HTTP redirect enforced", "TCP ownership vulnerable", "TCP ownership enforced", "Filesystem containment vulnerable", "Filesystem containment enforced"],
+  "arms": ["baseline", "candidate"],
+  "order": "fixed case order; alternate which arm runs first for each case",
+  "trial_request_cap": 30,
+  "total_request_cap": 360,
+  "repetitions": 1,
+  "stages": ["real catalog retrieval and existing-document selection", "native Hypothesis proposal", "production assembled bound review and controller canonical validation", "at most one proposal repair and re-review", "owned-fixture SDK tool execution", "native classification", "independent fixture grading"],
+  "baseline": "Methodology-only existing-document selection and prior hypothesis evaluator input assembly. Current native schemas and semantic rules.",
+  "candidate": "Task-local existing-document selection and dedicated hypothesis review packet. Failed presentation changes remain reverted.",
+  "metrics": ["retrieved and selected documents", "review disposition and repairs", "baseline and controlled variation actually executed", "policy and current observation references", "supported correct classification", "inert control execution", "requests per stage and case", "failure stage"],
+  "grading": "Correct expected classification plus valid cited observation IDs including policy, permitted baseline and boundary variation. Fixture truth is hidden from model inputs. Delivery receipts alone do not count as adoption.",
+  "failure_policy": "Persist failures and capped/incomplete cases; no selective reruns or prompt tuning after first live request.",
+  "safety": "HTTP and TCP are loopback only. Redirects never followed. Filesystem probes are confined to owned temporary fixture markers. Tool inputs use only declared values. No active operation store or global catalog writes.",
+  "exclusions": ["whole-operation planning and scheduling", "fresh technique-document authorship", "production acceptance ledger transitions", "automatic lead matching and delivery hooks", "external target access", "proof of general production accuracy"],
+  "deployment": "Diagnostic only. Earlier failed promotion gates remain failed. No automatic deployment regardless of results."
+}

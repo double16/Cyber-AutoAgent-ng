@@ -1021,10 +1021,21 @@ def create_bounded_artifact_reader(
                 f"{ARTIFACT_READ_OVERLAP_GUARD_MARKER}: This exact artifact page was already returned during "
                 "this evaluation"
             )
-        if any(
-            page_range[0] < end and start < page_range[1]
+        # Merge intersections so shared boundary lines count only once.
+        intersections = sorted(
+            (max(page_range[0], start), min(page_range[1], end))
             for start, end in returned_ranges.get(state_key, [])
-        ):
+            if page_range[0] < end and start < page_range[1]
+        )
+        overlap_size = 0
+        covered_end = page_range[0]
+        for start, end in intersections:
+            overlap_size += max(0, end - max(start, covered_end))
+            covered_end = max(covered_end, end)
+        allowed_line_overlap = (
+            not byte_mode and overlap_size <= 1 and page_range[1] - page_range[0] > overlap_size
+        )
+        if overlap_size and not allowed_line_overlap:
             replay = compression_replay(resolved, pagination_mode, page_range)
             if replay is not None:
                 return replay

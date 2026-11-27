@@ -1,0 +1,98 @@
+[
+  {
+    "id": "header-unconditional",
+    "draft": "Compare original, changed and removed selection headers. Suspected violation: changing the header changes the returned object.\nIllustrative example only, not an observed result: `GET /objects HTTP/1.1\\nX-Object-ID: <candidate-id>`.\nChecklist: identify the principal and resource; record prerequisites; run the stated comparison; retain the observations. Evidence: exact inputs, relevant policy and identity, returned resource identity or bytes, and the comparison outcome. Unknown implementation conditions must be established in future checks; this guide claims no target execution.",
+    "requirements": [
+      {
+        "id": "method",
+        "description": "Provide a reusable conditional test distinguishing legitimate behavior from a demonstrated boundary violation, with prerequisites and controls.",
+        "kind": "authored_deliverable"
+      }
+    ],
+    "sources": []
+  },
+  {
+    "id": "header-conditional",
+    "draft": "Establish allowed and denied user-object pairs from documented entitlements. Header influence establishes selection only. Suspected violation: a request for a known denied object returns its data; compare an allowed object and a denied object under the same identity.\nIllustrative example only, not an observed result: `GET /objects HTTP/1.1\\nX-Object-ID: <candidate-id>`.\nChecklist: identify the principal and resource; record prerequisites; run the stated comparison; retain the observations. Evidence: exact inputs, relevant policy and identity, returned resource identity or bytes, and the comparison outcome. Unknown implementation conditions must be established in future checks; this guide claims no target execution.",
+    "requirements": [
+      {
+        "id": "method",
+        "description": "Provide a reusable conditional test distinguishing legitimate behavior from a demonstrated boundary violation, with prerequisites and controls.",
+        "kind": "authored_deliverable"
+      }
+    ],
+    "sources": []
+  },
+  {
+    "id": "storage-unconditional",
+    "draft": "Read own-origin browser storage. Suspected violation: JavaScript can read an authentication token.\nIllustrative example only, not an observed result: `window.sessionStorage.getItem(\"<test-key>\")`.\nChecklist: identify the principal and resource; record prerequisites; run the stated comparison; retain the observations. Evidence: exact inputs, relevant policy and identity, returned resource identity or bytes, and the comparison outcome. Unknown implementation conditions must be established in future checks; this guide claims no target execution.",
+    "requirements": [
+      {
+        "id": "method",
+        "description": "Provide a reusable conditional test distinguishing legitimate behavior from a demonstrated boundary violation, with prerequisites and controls.",
+        "kind": "authored_deliverable"
+      }
+    ],
+    "sources": []
+  },
+  {
+    "id": "storage-conditional",
+    "draft": "Own-origin first-party storage reads are permitted. Suspected violation requires demonstrated untrusted-script access and exfiltration across the established confidentiality boundary. Compare first-party access with untrusted-script access and record the actual exfiltration path.\nIllustrative example only, not an observed result: `window.sessionStorage.getItem(\"<test-key>\")`.\nChecklist: identify the principal and resource; record prerequisites; run the stated comparison; retain the observations. Evidence: exact inputs, relevant policy and identity, returned resource identity or bytes, and the comparison outcome. Unknown implementation conditions must be established in future checks; this guide claims no target execution.",
+    "requirements": [
+      {
+        "id": "method",
+        "description": "Provide a reusable conditional test distinguishing legitimate behavior from a demonstrated boundary violation, with prerequisites and controls.",
+        "kind": "authored_deliverable"
+      }
+    ],
+    "sources": []
+  },
+  {
+    "id": "reuse-unconditional",
+    "draft": "Capture a valid session token and repeat its request. Suspected violation: the repeated request succeeds.\nIllustrative example only, not an observed result: `Authorization: Bearer <captured-test-token>`.\nChecklist: identify the principal and resource; record prerequisites; run the stated comparison; retain the observations. Evidence: exact inputs, relevant policy and identity, returned resource identity or bytes, and the comparison outcome. Unknown implementation conditions must be established in future checks; this guide claims no target execution.",
+    "requirements": [
+      {
+        "id": "method",
+        "description": "Provide a reusable conditional test distinguishing legitimate behavior from a demonstrated boundary violation, with prerequisites and controls.",
+        "kind": "authored_deliverable"
+      }
+    ],
+    "sources": []
+  },
+  {
+    "id": "reuse-conditional",
+    "draft": "Establish the actual expiry or revocation contract. Repeat only after the applicable expiry or confirmed revocation event, with a current valid-token baseline. Reuse within the valid window is permitted. Suspected violation requires access after the applicable limiting event.\nIllustrative example only, not an observed result: `Authorization: Bearer <captured-test-token>`.\nChecklist: identify the principal and resource; record prerequisites; run the stated comparison; retain the observations. Evidence: exact inputs, relevant policy and identity, returned resource identity or bytes, and the comparison outcome. Unknown implementation conditions must be established in future checks; this guide claims no target execution.",
+    "requirements": [
+      {
+        "id": "method",
+        "description": "Provide a reusable conditional test distinguishing legitimate behavior from a demonstrated boundary violation, with prerequisites and controls.",
+        "kind": "authored_deliverable"
+      }
+    ],
+    "sources": []
+  },
+  {
+    "id": "filesystem-unconditional",
+    "draft": "Read a file owned by another user. Suspected violation: the read succeeds.\nIllustrative example only, not an observed result: `open(\"<authorized-test-path>\", \"rb\")`.\nChecklist: identify the principal and resource; record prerequisites; run the stated comparison; retain the observations. Evidence: exact inputs, relevant policy and identity, returned resource identity or bytes, and the comparison outcome. Unknown implementation conditions must be established in future checks; this guide claims no target execution.",
+    "requirements": [
+      {
+        "id": "method",
+        "description": "Provide a reusable conditional test distinguishing legitimate behavior from a demonstrated boundary violation, with prerequisites and controls.",
+        "kind": "authored_deliverable"
+      }
+    ],
+    "sources": []
+  },
+  {
+    "id": "filesystem-conditional",
+    "draft": "Establish effective ACLs and group membership before classification. Other-owner files may be shared. Compare known allowed and denied files using the same principal. Suspected violation requires reading a file independently established as denied to that principal.\nIllustrative example only, not an observed result: `open(\"<authorized-test-path>\", \"rb\")`.\nChecklist: identify the principal and resource; record prerequisites; run the stated comparison; retain the observations. Evidence: exact inputs, relevant policy and identity, returned resource identity or bytes, and the comparison outcome. Unknown implementation conditions must be established in future checks; this guide claims no target execution.",
+    "requirements": [
+      {
+        "id": "method",
+        "description": "Provide a reusable conditional test distinguishing legitimate behavior from a demonstrated boundary violation, with prerequisites and controls.",
+        "kind": "authored_deliverable"
+      }
+    ],
+    "sources": []
+  }
+]

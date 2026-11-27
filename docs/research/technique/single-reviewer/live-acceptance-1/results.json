@@ -1,0 +1,807 @@
+{
+  "status": "failed",
+  "workflow_completion": "passed",
+  "semantic_acceptance": "failed",
+  "runtime_identity": "0089e1f04ff4a5a9ba98acf768a25944a197f8566c7c7e05785d2d94e01e4169",
+  "runtime_identity_rechecked": true,
+  "provider": "ollama",
+  "model": "muse-glimmer:30b",
+  "review_mode": "single",
+  "counts": {
+    "limit": 21,
+    "requests": 15,
+    "roles": 5
+  },
+  "roles": [
+    "technique_critic",
+    "technique_critic",
+    "technique_critic",
+    "technique_critic",
+    "technique_critic"
+  ],
+  "review_output_retries": 0,
+  "cases_completed": 5,
+  "label_agreements": 3,
+  "prior_live_requests": 212,
+  "cumulative_live_requests": 227,
+  "running": false,
+  "cases": [
+    {
+      "case": "human-network",
+      "expected_label": "acceptable",
+      "label_agreement": false,
+      "outcome": {
+        "status": "completed",
+        "review": {
+          "approved": false,
+          "decision_origin": "legacy",
+          "issue_dispositions": [],
+          "category": "authored_content",
+          "reason": "The draft provides a reusable, policy-based connectivity comparison framework with identity binding, controls and evidence requirements, and correctly limits source claims to pf rule precedence and first-packet state creation. The methodology is described generically without target execution or command syntax. One unsupported factual assertion about stateful packet handling remains.",
+          "issues": [
+            {
+              "id": "issue:1",
+              "category": "authored_content",
+              "criterion_id": "core:technical_support",
+              "material_impact": "The unsupported stateful handling claim could lead to incorrect interpretation of legitimate behavior versus boundary violations and undermines the advertised evidence requirements for stateful comparison.",
+              "problem": "The draft asserts that subsequent packets follow an established state and do not re-evaluate policy, e.g., 'Statefulness control: Observe first-packet state creation on pass and verify subsequent packets follow state, not re-evaluate policy.' The retained pf.conf excerpts only support 'the last matching rule decides what action is taken' and 'the first time a packet matches a pass rule, a state entry is created.' No retained support is provided for the claim that subsequent packets are handled solely by state and skip policy re-evaluation.",
+              "requested_correction": "Remove or qualify the unsupported claim about subsequent packet handling. Retain only the supported fact that the first matching pass creates a state entry, and move any assertion about subsequent packets being exempt from policy re-evaluation to Future Validation as an implementation-specific assumption to be confirmed.",
+              "requirement_ids": [],
+              "source_urls": [
+                "https://man.openbsd.org/pf.conf"
+              ],
+              "draft_references": [
+                "da0191fe62909:b38"
+              ],
+              "absence_scope": "inspected_passages",
+              "draft_excerpt": "- **Statefulness control**: Observe first-packet state creation on pass and verify subsequent packets follow state, not re-evaluate policy.",
+              "passage_ids": [
+                "bebc0239c72c87fd30b739ed0ac19e28b0c2077e70aa6c0d2f1e298eccd92bb1"
+              ],
+              "passages": [
+                {
+                  "url": "https://man.openbsd.org/pf.conf",
+                  "start": 0,
+                  "end": 146
+                }
+              ],
+              "absence_of_support": ""
+            }
+          ],
+          "suggestions": [
+            {
+              "improvement": "Consider making the identity binding model and evidence collection steps explicitly generic and implementation-agnostic, noting they are procedural prerequisites rather than pf-specific facts.",
+              "draft_references": [],
+              "requirement_ids": []
+            },
+            {
+              "improvement": "Clarify that decision logging and state table observability are assumed capabilities to be established during future application, not guaranteed by the retained source.",
+              "draft_references": [],
+              "requirement_ids": []
+            }
+          ],
+          "interpretations": [],
+          "no_security_checks_reason": ""
+        },
+        "counts": {
+          "limit": 21,
+          "requests": 3,
+          "roles": 1
+        }
+      },
+      "outcome_sha256": "cfdb8c86e3dc37ef465645d35331095ac34a84360d8dc7d9795d5956f2d5bf11",
+      "controller_events": [
+        {
+          "timestamp": "2026-11-06T19:06:56.975975+00:00",
+          "run_id": "d42f2d66-81f2-4f9c-861a-2f1cc81801e6",
+          "stage": "critique",
+          "status": "review_completed",
+          "snapshot_id": "a0191fe62909d3ad75eccd6fde2e7a60995e3dd3cd9adca65a4b7c49d0983698",
+          "proposed_decision": false,
+          "retry_number": 0,
+          "review": {
+            "summary": "The draft provides a reusable, policy-based connectivity comparison framework with identity binding, controls and evidence requirements, and correctly limits source claims to pf rule precedence and first-packet state creation. The methodology is described generically without target execution or command syntax. One unsupported factual assertion about stateful packet handling remains.",
+            "issues": [
+              {
+                "category": "authored_content",
+                "criterion_id": "core:technical_support",
+                "problem": "The draft asserts that subsequent packets follow an established state and do not re-evaluate policy, e.g., 'Statefulness control: Observe first-packet state creation on pass and verify subsequent packets follow state, not re-evaluate policy.' The retained pf.conf excerpts only support 'the last matching rule decides what action is taken' and 'the first time a packet matches a pass rule, a state entry is created.' No retained support is provided for the claim that subsequent packets are handled solely by state and skip policy re-evaluation.",
+                "material_impact": "The unsupported stateful handling claim could lead to incorrect interpretation of legitimate behavior versus boundary violations and undermines the advertised evidence requirements for stateful comparison.",
+                "requested_correction": "Remove or qualify the unsupported claim about subsequent packet handling. Retain only the supported fact that the first matching pass creates a state entry, and move any assertion about subsequent packets being exempt from policy re-evaluation to Future Validation as an implementation-specific assumption to be confirmed.",
+                "draft_references": [
+                  "da0191fe62909:b38"
+                ],
+                "passage_ids": [
+                  "bebc0239c72c87fd30b739ed0ac19e28b0c2077e70aa6c0d2f1e298eccd92bb1"
+                ]
+              }
+            ],
+            "suggestions": [
+              "Consider making the identity binding model and evidence collection steps explicitly generic and implementation-agnostic, noting they are procedural prerequisites rather than pf-specific facts.",
+              "Clarify that decision logging and state table observability are assumed capabilities to be established during future application, not guaranteed by the retained source."
+            ]
+          },
+          "final_disposition": "reviewed",
+          "type": "technique_build_progress",
+          "level": "info"
+        }
+      ],
+      "provider_requests": [
+        {
+          "reference": "outputs/technique_review_trials/single-review-live-20261106-1/live/00-human-network/provider-request-01.json",
+          "sha256": "0ff7c663c27f7dc692917710b957a6cc18e8fcef019f6a691cdd99c0df4e6d2a",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/single-review-live-20261106-1/live/00-human-network/provider-request-02.json",
+          "sha256": "671c69570d5bf9aaa57f995bb8539255ef820b486dbdc8015492150ba9ad76f3",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/single-review-live-20261106-1/live/00-human-network/provider-request-03.json",
+          "sha256": "c4b7361e5a93966d5c185b4aafcbc54f111554c2a237024de50261562c560aab",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": "structured_schema"
+        }
+      ]
+    },
+    {
+      "case": "human-filesystem",
+      "expected_label": "needs_correction",
+      "label_agreement": true,
+      "outcome": {
+        "status": "completed",
+        "review": {
+          "approved": false,
+          "decision_origin": "legacy",
+          "issue_dispositions": [],
+          "category": "authored_content",
+          "reason": "The draft provides a reusable, source-grounded design for comparing read-access outcomes against an established policy using process identity, allowed/denied controls and evidence requirements, with source attribution for Linux open(2) read permission requirement and denial semantics. The methodology is advisory and does not request target execution. A material clarity gap remains on the human-file subject requirement: the method is described in generic object terms and does not explicitly state that it tests file read access and identify the file objects being read.",
+          "issues": [
+            {
+              "id": "issue:1",
+              "category": "authored_content",
+              "criterion_id": "requirement:human_file_subject",
+              "material_impact": "The requested deliverable requires explicit clarity that the comparison is for file read access and that the file objects being read are identified. Without that explicit statement the reusable method is ambiguous about the operation and subject type, undermining the human_file_subject requirement.",
+              "problem": "The methodology does not explicitly make clear that it tests file read access and identify the file objects being read. Prerequisites and procedure steps refer to a generic 'object under test' with stable path/identifier and to object identifier and permission state, but do not explicitly state file read access as the tested operation nor name the file objects being read.",
+              "requested_correction": "Add an explicit statement that the methodology tests file read access and identify the file objects being read, e.g., specify that the object under test is a file identified by a stable filesystem path/identifier and that the comparison concerns read access to that file.",
+              "requirement_ids": [
+                "human_file_subject"
+              ],
+              "source_urls": [],
+              "draft_references": [
+                "d64288cb04697:b9",
+                "d64288cb04697:b57"
+              ],
+              "absence_scope": "inspected_passages",
+              "draft_excerpt": "2. Object under test identified with stable path/identifier.\n- Object identifier and permission state",
+              "passage_ids": [],
+              "passages": [],
+              "absence_of_support": ""
+            }
+          ],
+          "suggestions": [
+            {
+              "improvement": "Make the file subject explicit in Purpose and Prerequisites, e.g., 'file read access to a specific file object identified by path/identifier' to reinforce the human_file_subject requirement without changing the reusable design.",
+              "draft_references": [],
+              "requirement_ids": []
+            },
+            {
+              "improvement": "Clarify evidence requirements to include file-specific attributes such as file path, inode and permission bits to make file object identification concrete for future validation.",
+              "draft_references": [],
+              "requirement_ids": []
+            }
+          ],
+          "interpretations": [],
+          "no_security_checks_reason": ""
+        },
+        "counts": {
+          "limit": 21,
+          "requests": 6,
+          "roles": 2
+        }
+      },
+      "outcome_sha256": "f24c4b3a07bd25aba755f4fd4b6b88846f25c26d1489b609a55f143de1f108ee",
+      "controller_events": [
+        {
+          "timestamp": "2026-11-06T19:11:36.191831+00:00",
+          "run_id": "41e179e3-45d3-4d4c-a347-00efec7444bf",
+          "stage": "critique",
+          "status": "review_completed",
+          "snapshot_id": "64288cb0469771ccec102314ac93c998c2beb44a91ea2ebc8b1df9e2761a4b1d",
+          "proposed_decision": false,
+          "retry_number": 0,
+          "review": {
+            "summary": "The draft provides a reusable, source-grounded design for comparing read-access outcomes against an established policy using process identity, allowed/denied controls and evidence requirements, with source attribution for Linux open(2) read permission requirement and denial semantics. The methodology is advisory and does not request target execution. A material clarity gap remains on the human-file subject requirement: the method is described in generic object terms and does not explicitly state that it tests file read access and identify the file objects being read.",
+            "issues": [
+              {
+                "category": "authored_content",
+                "criterion_id": "requirement:human_file_subject",
+                "problem": "The methodology does not explicitly make clear that it tests file read access and identify the file objects being read. Prerequisites and procedure steps refer to a generic 'object under test' with stable path/identifier and to object identifier and permission state, but do not explicitly state file read access as the tested operation nor name the file objects being read.",
+                "material_impact": "The requested deliverable requires explicit clarity that the comparison is for file read access and that the file objects being read are identified. Without that explicit statement the reusable method is ambiguous about the operation and subject type, undermining the human_file_subject requirement.",
+                "requested_correction": "Add an explicit statement that the methodology tests file read access and identify the file objects being read, e.g., specify that the object under test is a file identified by a stable filesystem path/identifier and that the comparison concerns read access to that file.",
+                "draft_references": [
+                  "d64288cb04697:b9",
+                  "d64288cb04697:b57"
+                ],
+                "passage_ids": []
+              }
+            ],
+            "suggestions": [
+              "Make the file subject explicit in Purpose and Prerequisites, e.g., 'file read access to a specific file object identified by path/identifier' to reinforce the human_file_subject requirement without changing the reusable design.",
+              "Clarify evidence requirements to include file-specific attributes such as file path, inode and permission bits to make file object identification concrete for future validation."
+            ]
+          },
+          "final_disposition": "reviewed",
+          "type": "technique_build_progress",
+          "level": "info"
+        }
+      ],
+      "provider_requests": [
+        {
+          "reference": "outputs/technique_review_trials/single-review-live-20261106-1/live/01-human-filesystem/provider-request-04.json",
+          "sha256": "b8d14922b90eac05f6a65766bd89f83d9d21b13015c080ca46663ac0e7e55749",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/single-review-live-20261106-1/live/01-human-filesystem/provider-request-05.json",
+          "sha256": "195a8a097adb8060db3c00d9e54b28b1d4a391a646148e7d0fe3f567bc7a2b71",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/single-review-live-20261106-1/live/01-human-filesystem/provider-request-06.json",
+          "sha256": "03ca558a7a3171db21a3fa3bccfff8adcc3a273c24e5f8ab9b33c681d43234c0",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": "structured_schema"
+        }
+      ]
+    },
+    {
+      "case": "http-selector",
+      "expected_label": "needs_correction",
+      "label_agreement": true,
+      "outcome": {
+        "status": "completed",
+        "review": {
+          "approved": false,
+          "decision_origin": "legacy",
+          "issue_dispositions": [],
+          "category": "authored_content",
+          "reason": "The draft provides a reusable header-selector test outline but misstates the interpretation of the comparison. It claims that a change in returned object alone confirms an IDOR and that entitlement need not be established, which conflates legitimate object selection with an authorization boundary violation. The retained PortSwigger IDOR excerpt supports the concept of bypassing access controls to view other customers\u2019 records, but does not support the claim that selector change alone is sufficient evidence. The procedure otherwise lists prerequisites and evidence preservation, but the interpretation error defeats the advertised conclusion and violates the requirement to correctly explain when the comparison establishes an authorization violation with controls and evidence requirements.",
+          "issues": [
+            {
+              "id": "issue:1",
+              "category": "authored_content",
+              "criterion_id": "core:interpretation",
+              "material_impact": "The advertised method will produce false positives and misclassify legitimate, authorized object selection as an authorization failure, undermining the reliability of the reusable test.",
+              "problem": "The draft states: 'If changing the header changes the returned object, that alone confirms an IDOR vulnerability.' and 'It is unnecessary to establish whether the same identity is entitled to both objects: the changed selection is sufficient evidence of an authorization failure.' This treats any selector-driven change in response as an authorization violation.",
+              "requested_correction": "Revise the interpretation to require evidence that the test identity is not authorized for the second object and that the change bypasses an access control. State that a selector change alone is insufficient; the comparison establishes a violation only when the test identity lacks entitlement to the second object and the system returns it, with controls showing the first object is accessible and the second is not authorized.",
+              "requirement_ids": [],
+              "source_urls": [
+                "https://portswigger.net/web-security/access-control/idor"
+              ],
+              "draft_references": [
+                "df57d88e905f7:b17",
+                "df57d88e905f7:b18",
+                "df57d88e905f7:b19"
+              ],
+              "absence_scope": "inspected_passages",
+              "draft_excerpt": "If changing the header changes the returned object, that alone confirms an IDOR vulnerability.\nIt is unnecessary to establish whether the same identity is entitled to both objects: the changed\nselection is sufficient evidence of an authorization failure. Rejecting a missing selector supports",
+              "passage_ids": [
+                "d1d15aec23f3d9f9bc4e85bd8596a5ff6d1e53458817ebfd57af6f30a35b636a"
+              ],
+              "passages": [
+                {
+                  "url": "https://portswigger.net/web-security/access-control/idor",
+                  "start": 0,
+                  "end": 123
+                }
+              ],
+              "absence_of_support": ""
+            },
+            {
+              "id": "issue:2",
+              "category": "authored_content",
+              "criterion_id": "requirement:method",
+              "material_impact": "The deliverable does not meet the requested method specification; the reusable procedure cannot be followed to reliably determine an authorization violation.",
+              "problem": "The requirement is to describe a reusable header-selector test and correctly explain when the comparison establishes an authorization violation, including controls and evidence requirements. The draft omits the entitlement check and control design needed to distinguish legitimate behavior from a boundary violation, and incorrectly asserts that rejecting a missing selector is optional for confirmation.",
+              "requested_correction": "Add explicit controls: baseline request for object A with test identity, selector change to object B with same identity, and evidence that identity is not entitled to object B per policy/contract. Include evidence requirements: contract reference, identity label, selector values, response status codes, returned object identifiers, timestamps, and a negative control for selector absence. Clarify that confirmation requires both the selector effect and lack of entitlement, not selector change alone.",
+              "requirement_ids": [
+                "method"
+              ],
+              "source_urls": [
+                "https://portswigger.net/web-security/access-control/idor"
+              ],
+              "draft_references": [
+                "df57d88e905f7:b17",
+                "df57d88e905f7:b18",
+                "df57d88e905f7:b19",
+                "df57d88e905f7:b20"
+              ],
+              "absence_scope": "inspected_passages",
+              "draft_excerpt": "If changing the header changes the returned object, that alone confirms an IDOR vulnerability.\nIt is unnecessary to establish whether the same identity is entitled to both objects: the changed\nselection is sufficient evidence of an authorization failure. Rejecting a missing selector supports\nthe finding but is not required for confirmation.",
+              "passage_ids": [
+                "d1d15aec23f3d9f9bc4e85bd8596a5ff6d1e53458817ebfd57af6f30a35b636a"
+              ],
+              "passages": [
+                {
+                  "url": "https://portswigger.net/web-security/access-control/idor",
+                  "start": 0,
+                  "end": 123
+                }
+              ],
+              "absence_of_support": ""
+            }
+          ],
+          "suggestions": [
+            {
+              "improvement": "Clarify prerequisites: API contract must identify header as object selector and policy must define ownership/entitlement for test objects. State that test objects must be non-sensitive and that identity binding is declared, not inferred.",
+              "draft_references": [],
+              "requirement_ids": []
+            },
+            {
+              "improvement": "Add explicit evidence checklist for future application: request pairs with identical identity/endpoint/operation, selector values, response status codes, returned object identifiers, and policy entitlement evidence.",
+              "draft_references": [],
+              "requirement_ids": []
+            },
+            {
+              "improvement": "Note source limitation: retained excerpt mentions bypassing access controls to view records of other customers and 'If no other controls are in place'; use this to support the need for an entitlement check rather than selector change alone.",
+              "draft_references": [],
+              "requirement_ids": []
+            }
+          ],
+          "interpretations": [],
+          "no_security_checks_reason": ""
+        },
+        "counts": {
+          "limit": 21,
+          "requests": 9,
+          "roles": 3
+        }
+      },
+      "outcome_sha256": "c864bc1ff9350764117c1705776b7f7f49f46b7c575b8bac7a267d751597d692",
+      "controller_events": [
+        {
+          "timestamp": "2026-11-06T19:16:04.325010+00:00",
+          "run_id": "1c279aa5-e56f-47aa-a762-384af48afbed",
+          "stage": "critique",
+          "status": "review_completed",
+          "snapshot_id": "f57d88e905f7cd4a54126bfdec7332a9c68231db147cf73d1b24e2a3bfa46741",
+          "proposed_decision": false,
+          "retry_number": 0,
+          "review": {
+            "summary": "The draft provides a reusable header-selector test outline but misstates the interpretation of the comparison. It claims that a change in returned object alone confirms an IDOR and that entitlement need not be established, which conflates legitimate object selection with an authorization boundary violation. The retained PortSwigger IDOR excerpt supports the concept of bypassing access controls to view other customers\u2019 records, but does not support the claim that selector change alone is sufficient evidence. The procedure otherwise lists prerequisites and evidence preservation, but the interpretation error defeats the advertised conclusion and violates the requirement to correctly explain when the comparison establishes an authorization violation with controls and evidence requirements.",
+            "issues": [
+              {
+                "category": "authored_content",
+                "criterion_id": "core:interpretation",
+                "problem": "The draft states: 'If changing the header changes the returned object, that alone confirms an IDOR vulnerability.' and 'It is unnecessary to establish whether the same identity is entitled to both objects: the changed selection is sufficient evidence of an authorization failure.' This treats any selector-driven change in response as an authorization violation.",
+                "material_impact": "The advertised method will produce false positives and misclassify legitimate, authorized object selection as an authorization failure, undermining the reliability of the reusable test.",
+                "requested_correction": "Revise the interpretation to require evidence that the test identity is not authorized for the second object and that the change bypasses an access control. State that a selector change alone is insufficient; the comparison establishes a violation only when the test identity lacks entitlement to the second object and the system returns it, with controls showing the first object is accessible and the second is not authorized.",
+                "draft_references": [
+                  "df57d88e905f7:b17",
+                  "df57d88e905f7:b18",
+                  "df57d88e905f7:b19"
+                ],
+                "passage_ids": [
+                  "d1d15aec23f3d9f9bc4e85bd8596a5ff6d1e53458817ebfd57af6f30a35b636a"
+                ]
+              },
+              {
+                "category": "authored_content",
+                "criterion_id": "requirement:method",
+                "problem": "The requirement is to describe a reusable header-selector test and correctly explain when the comparison establishes an authorization violation, including controls and evidence requirements. The draft omits the entitlement check and control design needed to distinguish legitimate behavior from a boundary violation, and incorrectly asserts that rejecting a missing selector is optional for confirmation.",
+                "material_impact": "The deliverable does not meet the requested method specification; the reusable procedure cannot be followed to reliably determine an authorization violation.",
+                "requested_correction": "Add explicit controls: baseline request for object A with test identity, selector change to object B with same identity, and evidence that identity is not entitled to object B per policy/contract. Include evidence requirements: contract reference, identity label, selector values, response status codes, returned object identifiers, timestamps, and a negative control for selector absence. Clarify that confirmation requires both the selector effect and lack of entitlement, not selector change alone.",
+                "draft_references": [
+                  "df57d88e905f7:b17",
+                  "df57d88e905f7:b18",
+                  "df57d88e905f7:b19",
+                  "df57d88e905f7:b20"
+                ],
+                "passage_ids": [
+                  "d1d15aec23f3d9f9bc4e85bd8596a5ff6d1e53458817ebfd57af6f30a35b636a"
+                ]
+              }
+            ],
+            "suggestions": [
+              "Clarify prerequisites: API contract must identify header as object selector and policy must define ownership/entitlement for test objects. State that test objects must be non-sensitive and that identity binding is declared, not inferred.",
+              "Add explicit evidence checklist for future application: request pairs with identical identity/endpoint/operation, selector values, response status codes, returned object identifiers, and policy entitlement evidence.",
+              "Note source limitation: retained excerpt mentions bypassing access controls to view records of other customers and 'If no other controls are in place'; use this to support the need for an entitlement check rather than selector change alone."
+            ]
+          },
+          "final_disposition": "reviewed",
+          "type": "technique_build_progress",
+          "level": "info"
+        }
+      ],
+      "provider_requests": [
+        {
+          "reference": "outputs/technique_review_trials/single-review-live-20261106-1/live/02-http-selector/provider-request-07.json",
+          "sha256": "80c67c0c267859cdc3eb1b09dbec32655331f542744f57a853ae637b99026f13",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/single-review-live-20261106-1/live/02-http-selector/provider-request-08.json",
+          "sha256": "b2b23f0d761b7a4a6ed6df3e391ad23fc980f886500f124e097dca6f50929570",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/single-review-live-20261106-1/live/02-http-selector/provider-request-09.json",
+          "sha256": "dfdde7546074f34ec4ed44773ac70b25f8b6f12a3ae204bb8edd8d24d52629a2",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": "structured_schema"
+        }
+      ]
+    },
+    {
+      "case": "generate-filesystem",
+      "expected_label": "acceptable",
+      "label_agreement": true,
+      "outcome": {
+        "status": "completed",
+        "review": {
+          "approved": true,
+          "decision_origin": "legacy",
+          "issue_dispositions": [],
+          "category": "authored_content",
+          "reason": "The draft provides a reusable, source-grounded read-access comparison methodology that uses an established policy, actual process identity, allowed and denied controls, and evidence requirements without target execution or mandating a specific tool. The two asserted technical facts about open(2) read permission requirements and access denial are supported by the retained man-page excerpt, and the procedure distinguishes legitimate behavior from policy divergence while noting limitations and future validation steps.",
+          "issues": [],
+          "suggestions": [
+            {
+              "improvement": "Consider making the evidence collection checklist explicitly map each item to the policy comparison step to improve operational clarity.",
+              "draft_references": [],
+              "requirement_ids": []
+            },
+            {
+              "improvement": "Add a brief note in the limitations that omitted source text is unknown and that mechanisms beyond the retained permission/denial phrases are not covered.",
+              "draft_references": [],
+              "requirement_ids": []
+            },
+            {
+              "improvement": "If retrieval provenance is desired for auditability, populate metadata.sources[0].retrieved_at; currently empty and advisory only.",
+              "draft_references": [],
+              "requirement_ids": []
+            }
+          ],
+          "interpretations": [],
+          "no_security_checks_reason": ""
+        },
+        "counts": {
+          "limit": 21,
+          "requests": 12,
+          "roles": 4
+        }
+      },
+      "outcome_sha256": "f29163362754e6f61c3934b54788ad3e3ab87e27600649909edf25c3bddd4407",
+      "controller_events": [
+        {
+          "timestamp": "2026-11-06T19:19:55.488259+00:00",
+          "run_id": "af2aff2a-76bc-4c60-80df-7664018a8a7d",
+          "stage": "critique",
+          "status": "review_completed",
+          "snapshot_id": "05d8720154079e7a399db35a6b28b1ba4b3abbe74e57e478aebc693793b60ddd",
+          "proposed_decision": true,
+          "retry_number": 0,
+          "review": {
+            "summary": "The draft provides a reusable, source-grounded read-access comparison methodology that uses an established policy, actual process identity, allowed and denied controls, and evidence requirements without target execution or mandating a specific tool. The two asserted technical facts about open(2) read permission requirements and access denial are supported by the retained man-page excerpt, and the procedure distinguishes legitimate behavior from policy divergence while noting limitations and future validation steps.",
+            "issues": [],
+            "suggestions": [
+              "Consider making the evidence collection checklist explicitly map each item to the policy comparison step to improve operational clarity.",
+              "Add a brief note in the limitations that omitted source text is unknown and that mechanisms beyond the retained permission/denial phrases are not covered.",
+              "If retrieval provenance is desired for auditability, populate metadata.sources[0].retrieved_at; currently empty and advisory only."
+            ]
+          },
+          "final_disposition": "reviewed",
+          "type": "technique_build_progress",
+          "level": "info"
+        }
+      ],
+      "provider_requests": [
+        {
+          "reference": "outputs/technique_review_trials/single-review-live-20261106-1/live/03-generate-filesystem/provider-request-10.json",
+          "sha256": "54a2b6620b9f2e5c6d38dc57925faa96abda5e7d2030e8f8c8c3d76a3297ef8b",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/single-review-live-20261106-1/live/03-generate-filesystem/provider-request-11.json",
+          "sha256": "ac87a47bf2bd3ba04f93d52ba6c2354d8b3260958ee6308129f52e8e080ff7aa",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/single-review-live-20261106-1/live/03-generate-filesystem/provider-request-12.json",
+          "sha256": "633ea2ab7d2b508b6afe0b118376c192cc8ab81129ebdf3e7578eae437c55ee6",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": "structured_schema"
+        }
+      ]
+    },
+    {
+      "case": "http-selector-corrected",
+      "expected_label": "acceptable",
+      "label_agreement": false,
+      "outcome": {
+        "status": "completed",
+        "review": {
+          "approved": false,
+          "decision_origin": "legacy",
+          "issue_dispositions": [],
+          "category": "authored_content",
+          "reason": "The draft provides a structured reusable header-selector comparison with explicit prerequisites, controls and evidence requirements and correctly frames the test as a reusable method rather than target execution. The procedure distinguishes legitimate selection from a potential authorization boundary violation and notes inconclusive conditions. However, key factual assertions about how IDORs manifest, entitlement establishment, identity stability and the interpretation of negative controls are presented as technically grounded while the retained source material is limited to two short fragments about bypassing access controls and the absence of other controls. The attribution metadata claims the retained excerpt contributes the stated technical foundation, which overstates the support available from the inspected source.",
+          "issues": [
+            {
+              "id": "issue:1",
+              "category": "source_attribution",
+              "criterion_id": "core:technical_support",
+              "material_impact": "The advertised method is presented as technically grounded in retained sources, undermining the core:technical_support requirement and potentially misleading readers about the evidential basis for the interpretation rules.",
+              "problem": "The draft asserts factual mechanisms about IDOR detection and authorization testing, e.g., that different ownership alone does not prove denial, that an endpoint response alone does not establish intended policy, that identity drift and unstable policy make results inconclusive, and that a selector removal negative control establishes requirement but not authorization enforcement. These asserted mechanisms are not supported by the inspected retained source, which only contains the fragments \"If no other controls are in place\" and \"bypassing access controls to view the records of other customers\".",
+              "requested_correction": "Remove or qualify the unsupported factual assertions, or provide retained support for each asserted mechanism by meaning from inspected sources. If support is unavailable, reframe those statements as authoring assumptions/prerequisites to be established independently rather than as supported technical facts.",
+              "requirement_ids": [],
+              "source_urls": [
+                "https://portswigger.net/web-security/access-control/idor"
+              ],
+              "draft_references": [
+                "d289e33021071:b12",
+                "d289e33021071:b13",
+                "d289e33021071:b34",
+                "d289e33021071:b35",
+                "d289e33021071:b27"
+              ],
+              "absence_scope": "inspected_passages",
+              "draft_excerpt": "access grants; different ownership alone does not prove denial. An endpoint response alone does\nnot establish the intended policy. If either entitlement is unknown, establish it before drawing\nIDOR only if the unchanged identity obtains the controlled object B despite the independently\nestablished policy denying that identity the same operation on B, with identity, object binding\n4. Remove the selector as a request-shape negative control. Its rejection may establish that the",
+              "passage_ids": [
+                "d1d15aec23f3d9f9bc4e85bd8596a5ff6d1e53458817ebfd57af6f30a35b636a"
+              ],
+              "passages": [
+                {
+                  "url": "https://portswigger.net/web-security/access-control/idor",
+                  "start": 0,
+                  "end": 123
+                }
+              ],
+              "absence_of_support": ""
+            },
+            {
+              "id": "issue:2",
+              "category": "authored_content",
+              "criterion_id": "core:attribution",
+              "material_impact": "Attribution misrepresents the scope and limitations of retained sources, violating accurate description of sources and limitations.",
+              "problem": "Metadata selection_reason states \"Retained source excerpt contributes the stated technical foundation; procedure is original synthesis\" while the retained excerpt is two short fragments insufficient to support the stated technical foundation for the detailed header-selector test and interpretation rules.",
+              "requested_correction": "Correct the attribution to accurately reflect that the retained source provides only general IDOR context and does not support the specific procedural mechanisms and interpretation claims, or supplement with adequate retained support.",
+              "requirement_ids": [],
+              "source_urls": [
+                "https://portswigger.net/web-security/access-control/idor"
+              ],
+              "draft_references": [
+                "d289e33021071:m13"
+              ],
+              "absence_scope": "inspected_passages",
+              "draft_excerpt": "Retained source excerpt contributes the stated technical foundation; procedure is original synthesis",
+              "passage_ids": [
+                "d1d15aec23f3d9f9bc4e85bd8596a5ff6d1e53458817ebfd57af6f30a35b636a"
+              ],
+              "passages": [
+                {
+                  "url": "https://portswigger.net/web-security/access-control/idor",
+                  "start": 0,
+                  "end": 123
+                }
+              ],
+              "absence_of_support": ""
+            }
+          ],
+          "suggestions": [
+            {
+              "improvement": "Limit interpretation claims to what the retained source can support, e.g., that IDOR involves bypassing access controls to view other customers' records, and mark remaining procedural design choices as original synthesis with explicit assumptions.",
+              "draft_references": [],
+              "requirement_ids": []
+            },
+            {
+              "improvement": "Add explicit prerequisite statements that entitlement policy must be established from approved documentation or an authoritative policy owner before any comparison, and keep that as a condition to establish during future application rather than an asserted fact.",
+              "draft_references": [],
+              "requirement_ids": []
+            },
+            {
+              "improvement": "Clarify the negative-control step's evidentiary scope in the procedure text to avoid implying it proves authorization enforcement, consistent with the current cautionary wording.",
+              "draft_references": [],
+              "requirement_ids": []
+            },
+            {
+              "improvement": "Consider populating metadata.retrieved_at for transparency, as missing provenance is advisory but improves attribution accuracy.",
+              "draft_references": [],
+              "requirement_ids": []
+            }
+          ],
+          "interpretations": [],
+          "no_security_checks_reason": ""
+        },
+        "counts": {
+          "limit": 21,
+          "requests": 15,
+          "roles": 5
+        }
+      },
+      "outcome_sha256": "22ac69c34f9c128e765dd2f236c5fa78bb7be6b60ee78ac2496afff13771432b",
+      "controller_events": [
+        {
+          "timestamp": "2026-11-06T19:24:48.060549+00:00",
+          "run_id": "11186391-0654-4ece-8b61-46cd51efaa26",
+          "stage": "critique",
+          "status": "review_completed",
+          "snapshot_id": "289e3302107199089346b84cf20251ff595290ef8da4077ce79e21a069493db3",
+          "proposed_decision": false,
+          "retry_number": 0,
+          "review": {
+            "summary": "The draft provides a structured reusable header-selector comparison with explicit prerequisites, controls and evidence requirements and correctly frames the test as a reusable method rather than target execution. The procedure distinguishes legitimate selection from a potential authorization boundary violation and notes inconclusive conditions. However, key factual assertions about how IDORs manifest, entitlement establishment, identity stability and the interpretation of negative controls are presented as technically grounded while the retained source material is limited to two short fragments about bypassing access controls and the absence of other controls. The attribution metadata claims the retained excerpt contributes the stated technical foundation, which overstates the support available from the inspected source.",
+            "issues": [
+              {
+                "category": "source_attribution",
+                "criterion_id": "core:technical_support",
+                "problem": "The draft asserts factual mechanisms about IDOR detection and authorization testing, e.g., that different ownership alone does not prove denial, that an endpoint response alone does not establish intended policy, that identity drift and unstable policy make results inconclusive, and that a selector removal negative control establishes requirement but not authorization enforcement. These asserted mechanisms are not supported by the inspected retained source, which only contains the fragments \"If no other controls are in place\" and \"bypassing access controls to view the records of other customers\".",
+                "material_impact": "The advertised method is presented as technically grounded in retained sources, undermining the core:technical_support requirement and potentially misleading readers about the evidential basis for the interpretation rules.",
+                "requested_correction": "Remove or qualify the unsupported factual assertions, or provide retained support for each asserted mechanism by meaning from inspected sources. If support is unavailable, reframe those statements as authoring assumptions/prerequisites to be established independently rather than as supported technical facts.",
+                "draft_references": [
+                  "d289e33021071:b12",
+                  "d289e33021071:b13",
+                  "d289e33021071:b34",
+                  "d289e33021071:b35",
+                  "d289e33021071:b27"
+                ],
+                "passage_ids": [
+                  "d1d15aec23f3d9f9bc4e85bd8596a5ff6d1e53458817ebfd57af6f30a35b636a"
+                ]
+              },
+              {
+                "category": "authored_content",
+                "criterion_id": "core:attribution",
+                "problem": "Metadata selection_reason states \"Retained source excerpt contributes the stated technical foundation; procedure is original synthesis\" while the retained excerpt is two short fragments insufficient to support the stated technical foundation for the detailed header-selector test and interpretation rules.",
+                "material_impact": "Attribution misrepresents the scope and limitations of retained sources, violating accurate description of sources and limitations.",
+                "requested_correction": "Correct the attribution to accurately reflect that the retained source provides only general IDOR context and does not support the specific procedural mechanisms and interpretation claims, or supplement with adequate retained support.",
+                "draft_references": [
+                  "d289e33021071:m13"
+                ],
+                "passage_ids": [
+                  "d1d15aec23f3d9f9bc4e85bd8596a5ff6d1e53458817ebfd57af6f30a35b636a"
+                ]
+              }
+            ],
+            "suggestions": [
+              "Limit interpretation claims to what the retained source can support, e.g., that IDOR involves bypassing access controls to view other customers' records, and mark remaining procedural design choices as original synthesis with explicit assumptions.",
+              "Add explicit prerequisite statements that entitlement policy must be established from approved documentation or an authoritative policy owner before any comparison, and keep that as a condition to establish during future application rather than an asserted fact.",
+              "Clarify the negative-control step's evidentiary scope in the procedure text to avoid implying it proves authorization enforcement, consistent with the current cautionary wording.",
+              "Consider populating metadata.retrieved_at for transparency, as missing provenance is advisory but improves attribution accuracy."
+            ]
+          },
+          "final_disposition": "reviewed",
+          "type": "technique_build_progress",
+          "level": "info"
+        }
+      ],
+      "provider_requests": [
+        {
+          "reference": "outputs/technique_review_trials/single-review-live-20261106-1/live/04-http-selector-corrected/provider-request-13.json",
+          "sha256": "8040288ed18ad7aba81e150289781f75c217b5f3ef22553bc9a4f3103ca3d800",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/single-review-live-20261106-1/live/04-http-selector-corrected/provider-request-14.json",
+          "sha256": "285c38746cee95d6484b436d99e15c0c1d5684388690d6706a5fc630f05fbd30",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/single-review-live-20261106-1/live/04-http-selector-corrected/provider-request-15.json",
+          "sha256": "535baf7ace2ddfd8753448c3b43170fd5191551c75b7bc764404f6b4fc934326",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": "structured_schema"
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "One small sequential trial; no statistical or causal reliability claim.",
+    "Label agreement alone does not validate every issue or requested correction.",
+    "No actual author repair or publication tested in this isolated review trial.",
+    "No output retry was needed, so live retry recovery remains unexercised.",
+    "No production code changed during the trial and no active operation storage was modified."
+  ]
+}

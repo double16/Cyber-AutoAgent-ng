@@ -1,0 +1,43 @@
+{
+  "limit": 38,
+  "model": "muse-glimmer:30b-mlx",
+  "plans": [
+    {
+      "mode": "vulnerable",
+      "arm": "guidance"
+    },
+    {
+      "mode": "vulnerable",
+      "arm": "none"
+    },
+    {
+      "mode": "shared",
+      "arm": "none"
+    },
+    {
+      "mode": "shared",
+      "arm": "guidance"
+    },
+    {
+      "mode": "unknown",
+      "arm": "guidance"
+    },
+    {
+      "mode": "unknown",
+      "arm": "none"
+    }
+  ],
+  "guidance_sha256": "7f91190f9cc73efb226698bf0bffb086f7144f6f9aa5ee33bebac4289dd32d74",
+  "prior_generation_requests": 62,
+  "total_authorized_requests": 100,
+  "design": "Three opaque behaviors, paired arms, one repeat. Shared case reverses arm order.",
+  "grading": "Fixture-owned classification, cited request evidence, and cited identity/policy discovery records.",
+  "executed_script_sha256": "2d6016609ed1c95fe7f227b5d1f73f9e63bed42fc27efa00a051a27747c2515e",
+  "corrected_proposal_is_experiment_input": false,
+  "limits": [
+    "One run per arm/case",
+    "No context-length or seed control",
+    "Synthetic tools, not operation executor",
+    "No retrieval/adoption measurement"
+  ]
+}

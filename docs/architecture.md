@@ -26,7 +26,7 @@ The controller creates agents for specific jobs:
 - **plan_creator**: creates or revises an initial high-level plan and infers operation-wide constraints
 - **plan_critic**: reviews an initial plan and either approves it or returns actionable revision feedback
 - **task_creator**: creates concrete current-phase tasks with finite acceptance contracts from a deterministic
-  controller prompt, except for modes such as `hypothesis_dependent` that construct tasks directly in Python
+  controller prompt, except for hypothesis-producing and `hypothesis_dependent` phases that construct tasks in Python
 - **task_prompt_builder**: reviews core, optional-tool, and installed shell-command catalogs, then selects applicable
   memory, optional tools, and likely commands for one task
 - **task_prompt_critic**: approves a proposed task execution prompt or returns actionable revision feedback
@@ -181,9 +181,16 @@ flowchart LR
 `CYBER_WORKFLOW_TASK_EXECUTION_CYCLES` limits executor attempts to produce a valid atomic ledger, defaults to three,
 and has a minimum of one.
 while `CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS` independently limits rejected acceptance repairs to two after the initial
-submission. Repairs retain the executor conversation and stop early when an equivalent rejected payload is repeated.
+submission. Repairs retain durable task-local evidence, use fresh actor cycles, and stop early when an equivalent
+rejected payload is repeated.
 Once that ledger exists, the evaluator's semantic verdict is terminal because the ledger cannot
 be revised. Python persists `done`, `partial_failure`, or `blocked` without replaying completed acceptance.
+
+An invalid optional memory citation is a reference-correction problem when available current-operation evidence
+already covers the frozen evidence kinds and minimum counts. The correction turn receives available canonical
+references rather than rejected citation candidates. A frozen memory or observation requirement still requires the
+appropriate stored record. Evidence-creation turns request evidence only; acceptance resumes in a separately tooled
+turn. Structural availability does not establish semantic support or automatically accept the task.
 
 Task creators return one typed proposal batch, after which Python applies the existing preflight, deduplication, and
 durable persistence checks. Rejected batches remain correctable within the configured bound. Task executors stop after
@@ -237,8 +244,15 @@ the same configuration contract independently and is not imported by application
 
 Task creation similarly has a deterministic structured-output boundary. After an initial rejected proposal, the
 controller may request up to `CYBER_TASK_CREATOR_MAX_CORRECTIONS` corrected payloads (six by default). The initial
-prompt contains stable phase context and corrections contain only the prior validation error. Agents submit a flat
-`TaskProposal` whose `limits` object is always required. Python discards it and `output_kind` for snapshot work,
+prompt and every correction retain stable phase context, frozen batch references, prior correction feedback,
+and the latest rejected response as untrusted data. Native validation preserves field-level diagnostics internally;
+UI and log summaries are bounded and redacted. Duplicate rejection stops require both the same actual response
+and the same validation failure; missing response content does not establish repetition. The existing prompt fitter
+preserves required context and fails explicitly if it cannot fit. Task-creation events distinguish repeated rejected
+submissions from exhausted attempts. The schema advertises planning roles `mapping`, `synthesis`, and
+`direct_single_step`; activity names such as `hypothesis` are not planning roles. Agents submit a flat
+`TaskProposal` whose optional `limits` object defaults to bounded procedure limits. Python discards it and
+`output_kind` for snapshot work,
 infers the basis, supplies procedure invariants, derives source references and target scope, and compiles the proposal
 before storage. Inventory-wide moving collections are rejected as procedures and must use frozen snapshot references.
 Exact frozen-contract duplicates are skipped deterministically within the active phase; completed coverage from one
@@ -257,6 +271,16 @@ accepted outputs. When a following phase consumes multiple completed inventory m
 provenance-preserving snapshot for fan-out. A manifest is not valid proof for a task frozen to a single inventory
 subject; that rejection occurs before ledger persistence. Prompt-memory selectors are advisory: stale IDs or indices
 are logged and dropped while valid selected context remains available to the executor.
+
+Hypothesis-producing phases (`produces_hypotheses=true`) create assignments directly in Python from validated
+frozen inventories. A single `hypothesis_generation` workstream expands into one task per target and normalized
+route group, including that route's parameter entries. Every task requires a hypothesis publication covering its
+assigned subjects, including reasoned no-test dispositions. The controller validates all batches before storing
+assignments; missing inventory fails explicitly. Continuations reuse existing assignments and create only uncovered
+groups. No task-creator model call or correction loop is needed; executor agents still research and reason about
+the assigned subjects. Creation events identify `creation_kind=hypothesis_generation` and report task and batch
+counts, with zero model attempts. Generic proposal repairs may remove identical duplicates during batch-wide repair;
+different intents with the same workstream remain invalid.
 
 A testing phase that depends on hypotheses creates tasks only for inventory groups with completed, validated
 hypothesis deliverables. Each `record_hypotheses` call may publish a non-empty subset of assigned subjects. A
@@ -1599,6 +1623,38 @@ metadata alongside the publication, so continuation can finish remaining edits. 
 newer publications. Acceptance remains incomplete while requested edits are pending; changed content still
 receives semantic review. Withdrawing the last hypothesis produces a reasoned empty disposition, subject to
 the existing evidence review. Ordinary publication inputs and historical artifacts remain compatible.
+Identity comparison modes retain the shared authentication contract: `roles=[]` means no named role
+restriction, including for `account`, `role` and `tenant` comparisons; it does not mean anonymous access.
+Account comparisons may name one shared role, and explicitly restricted role comparisons require two
+distinct declared roles. Named restrictions must belong to the target catalog. Missing qualifying
+credentials remain execution prerequisites and never downgrade the requested comparison.
+
+The replacement may also be a nonempty list of independent hypotheses when a combined proposal needs
+to be split. Python validates the entire list before saving one atomic publication update, assigns the
+content-derived identifiers, and preserves all unrelated records. Empty or invalid lists do not clear
+the pending correction; duplicate unchanged records do not count as an edit.
+
+The controller dispatches pending corrections in stable identifier order. Each fresh executor receives
+one unchanged hypothesis and its review concerns; its revision tool has the identifier bound by Python.
+The editor also receives a read-only TOON summary of every other proposal in the current publication,
+including its existing identifier, subject, mechanism and positive expectations. Siblings are proposals,
+not evidence or instructions. This context helps preserve complementary mechanisms and does not permit
+editing another record. The sibling summary is optional during prompt fitting; omission is explicit,
+and the required prompt points to `read_hypotheses`, scoped to that publication's subjects. The current
+correction record and concerns are never truncated. Inspection tools, this reader and the bound revision
+tool are available during the edit. A separate final dispatch
+records acceptance after pending edits are cleared. Each dispatch gets one agent call and the existing
+per-call model-turn limit; the batch shares the original agent-call allowance. A stalled edit or terminal
+execution failure stops the batch. Saved edits survive continuation, and subsequent review still judges
+their meaning. This does not allocate operation budgets or change task planning.
+
+Source inspection follows recorded input locations through directly linked consumers to the relevant
+processing boundary, including what the assigned operation normally permits and which policy remains
+unresolved. Preserve intended behavior in existing source references, `observed_basis` and preconditions.
+Future tests may establish policy before comparing permitted and prohibited behavior. Instruction following,
+reflection, record selection and URL fetching alone do not establish a violated boundary. An unresolved consumer
+can justify focused prerequisite inspection; it is not negative evidence. Controller-generated evaluator
+schema and parse failures retain their original diagnostic and are never validated as semantic reviews.
 
 Reviewers ask whether normal application behavior could produce the proposed positive outcome. A SPA shell,
 submitting an email with its password, or remembering a token alone does not establish unauthorized access,
@@ -1705,3 +1761,54 @@ a missing artifact, an unexecuted test, or an unavailable prerequisite does not 
 Recorded acceptance and execution receipts do not override semantic evidence gaps. Acceptance repair
 uses existing sufficient evidence; execution repair addresses untested material work. A concrete
 external prerequisite may block a task; otherwise unsupported work remains partially failed.
+
+The [identity-correction controller replay](research/technique/identity-corrections-20261125/results.md)
+freezes both arms and both repetitions of six cases. Structured outputs are applied through real bound
+revision tools. Setup failures and the final matrix consumed the shared 96-request allowance; 11 of 24
+planned final trials completed acceptance, one was partial and twelve were capped before generation.
+Mixed semantic results and incomplete replication do not establish improved correction effectiveness.
+That initial report held live continuation pending a complete paired study. Nothing was deployed or restarted.
+
+The [replicated follow-up](research/technique/identity-corrections-replicated-20261125/results.md)
+then ran all 24 trials under a fresh 96-request ceiling, using 36 requests. Fixtures explicitly require
+two-account comparisons, align declared roles and expose canonical linked-source references. Each arm
+uses its own proposal schema. Structured decisions pass through real bound revision tools; fixture
+availability acceptance is deterministic and uses no model requests. Candidate completes 12/12 trials;
+baseline completes 10/12 and rejects both unnamed account comparisons on its former explicit-role rule.
+Both arms read the actual DOM consumer and withdraw the unsupported filesystem premise in both
+repetitions. This confirms identity-contract compatibility; it does not demonstrate broader reasoning,
+consequence-separation or request-efficiency superiority. The structured benchmark adapter does not
+validate the entire production executor or semantic evaluator. A bounded continuation can now serve as
+integration validation while retaining ordinary proposal review; the follow-up does not start one.
+
+
+Focused revision inputs continue to advertise complete objects, nonempty object lists, or explicit
+`null`. The production runtime also accepts a single JSON encoding of an object/list, because a
+production fixture reproduced a model returning corrected content in that serialization form.
+Normalization occurs at the tool boundary before existing strict hypothesis validation and atomic
+mutation. Malformed JSON, encoded `null`/primitives, empty lists and invalid records remain errors.
+This is serialization compatibility, not semantic approval or permission to change another record.
+
+Shared security interpretation requires a supporting observation and a matching refuting observation
+of the same probe for every claimed consequence. A working baseline or unrelated invalid-input control
+does not refute the claimed violation. The existing `test_discrimination` verdict requests revision
+when that distinction is absent, with the consequence and missing observation explained in its reason.
+The distinction may appear anywhere in the plan; it does not require a new field, a specific denial
+phrase or executed future tests. Python validates review completeness and provenance while the model
+judges this semantic relationship. The
+[refutation replay](research/technique/refutation-review-20261125/README.md) preserves the prior missed
+HTTP plan and tests incomplete/complete HTTP, network and filesystem pairs with native structured reviews.
+
+Timeouts, resets and I/O failures alone remain inconclusive about policy enforcement. Future plans
+must distinguish evidence that the probe reached the relevant enforcement boundary and was denied
+from transport or resource failure. The
+[clean activation check](research/technique/refutation-clean-check-20261125/README.md) exercises this
+distinction alongside actual active-task revision and acceptance, preserving prior results and sharing
+the original generation ceiling.
+
+The CLI and [production-path fixture](research/technique/identity-corrections-production-20261125/README.md)
+share `workflow_executor_session` for agent creation, live journals, recovery/terminal state and cleanup.
+The fixture runs the full production task entry and default semantic evaluator with isolated SQLite and
+Qdrant stores and no target-execution tools. It preserves an interrupted attempt, backs up state, and
+reopens the same operation for controlled continuation. Fixture vectors are deterministic stand-ins;
+semantic conclusions and acceptance checks remain production code.

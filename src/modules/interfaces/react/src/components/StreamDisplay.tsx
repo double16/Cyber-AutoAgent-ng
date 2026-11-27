@@ -19,6 +19,7 @@ import type { Config } from '../contexts/ConfigContext.js';
 import { formatOperationHealth, isPostAssessmentStage } from '../utils/operationHealthFormatting.js';
 import type { OperationHealthSnapshot } from '../utils/operationHealthFormatting.js';
 import { formatWorkflowActivityEvent } from '../utils/workflowActivityFormatting.js';
+import { formatTechniqueEvent, techniqueEventSeverity, type TechniqueEvent } from '../utils/techniqueEventFormatting.js';
 import { MarkdownRenderer } from '../utils/markdownRows.js';
 
 const PROJECT_MARKERS = ['pyproject.toml', path.join('docker', 'docker-compose.yml'), '.git'];
@@ -64,6 +65,7 @@ export type AdditionalStreamEvent =
       health?: OperationHealthSnapshot;
       [key: string]: any;
     }
+  | TechniqueEvent
   | { type: 'evaluation_step_complete'; status: 'completed' | 'skipped' | 'failed'; evaluation_step_kind: string; [key: string]: any }
   | { type: 'evaluation_complete'; status?: 'completed' | 'no_results' | 'partial_failure' | 'failed'; scores?: Record<string, number>; [key: string]: any }
   | { type: 'reasoning'; content: string; [key: string]: any }
@@ -652,6 +654,10 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
   const { config } = useConfig();
   const effectiveConfig = configOverride ?? config;
 
+  const techniqueMessage = formatTechniqueEvent(event);
+  if (techniqueMessage) {
+    return <Box><Text color={techniqueEventSeverity(event) === 'warning' ? 'yellow' : 'cyan'}>{techniqueMessage}</Text></Box>;
+  }
   switch (event.type) {
     case 'tool_discovery_start': {
       const message = typeof event.message === 'string' && event.message.trim()

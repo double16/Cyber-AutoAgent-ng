@@ -11,8 +11,8 @@ let toolFormatters: any;
 let formatGenericToolInput: any;
 
 beforeAll(async () => {
-  const norm = await import('../../../dist/services/events/normalize.js');
-  const fmt = await import('../../../dist/utils/toolFormatters.js');
+  const norm = await import('../../../src/services/events/normalize.js');
+  const fmt = await import('../../../src/utils/toolFormatters.js');
   normalizeEvent = norm.normalizeEvent;
   toolFormatters = fmt.toolFormatters;
   formatGenericToolInput = fmt.formatGenericToolInput;

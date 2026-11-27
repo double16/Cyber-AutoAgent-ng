@@ -12,7 +12,7 @@ let getReportPathCandidates: any;
 let mapContainerReportPath: any;
 
 beforeAll(async () => {
-  const mod = await import('../../../dist/components/StreamDisplay.js');
+  const mod = await import('../../../src/components/StreamDisplay.js');
   getReportPathCandidates = mod.getReportPathCandidates;
   mapContainerReportPath = mod.mapContainerReportPath;
 });

@@ -1,0 +1,64 @@
+{
+  "decision": {
+    "classification": "no_violation_observed",
+    "evidence_ids": [
+      "obs-1",
+      "obs-2",
+      "obs-3",
+      "obs-4"
+    ],
+    "explanation": "Identity shows session-red maps to A and session-blue maps to B. Policy shows A permissions include A and B, B permissions include only B. Request account tests show session-red accessing selector B returns status 200 with error not authorized, and session-blue accessing selector A returns status 200 with error not authorized. No evidence of unauthorized access permitted."
+  },
+  "observations": [
+    {
+      "id": "obs-1",
+      "kind": "identity",
+      "response": {
+        "session-red": "A",
+        "session-blue": "B"
+      }
+    },
+    {
+      "id": "obs-2",
+      "kind": "policy",
+      "response": {
+        "available": true,
+        "permissions": {
+          "A": [
+            "A",
+            "B"
+          ],
+          "B": [
+            "B"
+          ]
+        }
+      }
+    },
+    {
+      "id": "obs-3",
+      "principal": "session-red",
+      "selector": "B",
+      "response": {
+        "status": 200,
+        "body": {
+          "error": "not authorized",
+          "object": {
+            "owner": "B",
+            "value": "record-B"
+          }
+        }
+      }
+    },
+    {
+      "id": "obs-4",
+      "principal": "session-blue",
+      "selector": "A",
+      "response": {
+        "status": 200,
+        "body": {
+          "error": "not authorized"
+        }
+      }
+    }
+  ]
+}

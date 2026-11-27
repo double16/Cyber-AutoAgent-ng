@@ -192,68 +192,21 @@ def test_trace_selection_prefers_execution_roles_and_falls_back_to_legacy(monkey
 
 
 @pytest.mark.asyncio
-async def test_find_operation_traces_matches_session_metadata_and_name(monkeypatch):
+async def test_find_operation_traces_uses_shared_v2_reader(monkeypatch):
     ev = evaluator(monkeypatch)
-    traces = [
-        SimpleNamespace(id="1", session_id="OP1", name="other", metadata={}),
-        SimpleNamespace(id="2", session_id="x", name="other", metadata={"session_id": "OP1"}),
-        SimpleNamespace(id="3", session_id="x", name="other", metadata={"attributes": {"operation.id": "OP1"}}),
-        SimpleNamespace(id="4", session_id="x", name="trace OP1", metadata={}),
-        SimpleNamespace(id="5", session_id="x", name="miss", metadata={}),
-    ]
-    ev.langfuse.api.trace.list.return_value = SimpleNamespace(data=traces)
-
-    found = await ev._find_operation_traces("OP1")
-
-    assert [trace.id for trace in found] == ["1", "2", "3", "4"]
+    traces = [SimpleNamespace(id="trace", observations=[])]
+    reader = Mock(return_value=traces)
+    monkeypatch.setattr(mod, "read_session_traces", reader)
+    assert await ev._find_operation_traces("OP1") == traces
+    reader.assert_called_once_with(ev.langfuse, "OP1")
 
 
 @pytest.mark.asyncio
-async def test_find_operation_traces_falls_back_and_handles_empty_results(monkeypatch):
+async def test_find_operation_traces_propagates_read_failure(monkeypatch):
     ev = evaluator(monkeypatch)
-    ev.langfuse.api.trace.list.side_effect = [RuntimeError("session lookup unavailable"), SimpleNamespace(data=[])]
-
-    assert await ev._find_operation_traces("OP1") == []
-    assert ev.langfuse.api.trace.list.call_args_list[1].kwargs == {"limit": 200}
-
-
-@pytest.mark.asyncio
-async def test_find_operation_traces_paginates_past_report_traces_to_execution_traces(monkeypatch):
-    ev = evaluator(monkeypatch)
-    report_page = [
-        SimpleNamespace(
-            id=f"report-{index}",
-            session_id="OP1",
-            metadata={"attributes": {"agent.role": "report_generation"}},
-        )
-        for index in range(100)
-    ]
-    execution_trace = SimpleNamespace(
-        id="executor",
-        session_id="OP1",
-        metadata={"attributes": {"agent.role": "task_executor"}},
-    )
-    ev.langfuse.api.trace.list.side_effect = [
-        SimpleNamespace(data=report_page),
-        SimpleNamespace(data=[execution_trace]),
-    ]
-
-    found = await ev._find_operation_traces("OP1")
-
-    assert {trace.id for trace in found} == {trace.id for trace in report_page} | {"executor"}
-    assert ev.langfuse.api.trace.list.call_args_list[1].kwargs == {
-        "session_id": "OP1",
-        "limit": 100,
-        "page": 2,
-    }
-    assert ev._select_execution_traces(found) == [execution_trace]
-
-
-@pytest.mark.asyncio
-async def test_find_operation_traces_handles_response_without_data(monkeypatch):
-    ev = evaluator(monkeypatch)
-    ev.langfuse.api.trace.list.return_value = SimpleNamespace()
-    assert await ev._find_operation_traces("OP1") == []
+    monkeypatch.setattr(mod, "read_session_traces", Mock(side_effect=RuntimeError("read failed")))
+    with pytest.raises(RuntimeError, match="read failed"):
+        await ev._find_operation_traces("OP1")
 
 
 @pytest.mark.asyncio
@@ -547,7 +500,7 @@ def test_score_host_trace_uses_per_run_dedicated_langfuse_trace(monkeypatch):
     span = SimpleNamespace(update_trace=Mock(), end=Mock())
     ev.langfuse = SimpleNamespace(
         create_trace_id=Mock(return_value="stable-trace"),
-        start_span=Mock(return_value=span),
+        start_observation=Mock(return_value=span),
         flush=Mock(),
     )
 
@@ -562,14 +515,13 @@ def test_score_host_trace_uses_per_run_dedicated_langfuse_trace(monkeypatch):
 
     assert trace_id == "stable-trace"
     ev.langfuse.create_trace_id.assert_called_once_with(seed="OP:operation_evaluation:run-123")
-    assert span.update_trace.call_args.kwargs["metadata"] == {
+    assert ev.langfuse.start_observation.call_args.kwargs["metadata"] == {
         "operation.id": "OP",
         "evaluation.scope": "operation_evaluation",
         "evaluation.run_id": "run-123",
         "evaluation.sample_max_chars": ev._sample_max_chars(),
         "evaluation.source_trace_count": 3,
     }
-    span.update_trace.assert_called_once()
     span.end.assert_called_once()
     ev.langfuse.flush.assert_called_once()
 
@@ -889,33 +841,17 @@ def test_evaluation_preparation_progress_is_best_effort_and_scheduled(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_upload_scores_prefers_v4_and_falls_back_to_legacy(monkeypatch):
+async def test_upload_scores_uses_sdk_helper_and_propagates_failure(monkeypatch):
     ev = evaluator(monkeypatch)
-    created = []
     ev._last_eval_summary_sha256 = "abc"
     ev._last_eval_stats = {"tool_calls_count": 2}
-    ev.langfuse = SimpleNamespace(
-        scores=SimpleNamespace(create=lambda **kwargs: created.append(("v4", kwargs))),
-        flush=Mock(),
-    )
-
+    ev.langfuse = SimpleNamespace(create_score=Mock(), flush=Mock())
     await ev._upload_scores_to_langfuse("trace", {"rubric/overall_quality": (0.6, {"rationale": "ok"})})
-
-    assert created[0][0] == "v4"
-    assert created[0][1]["metadata"]["metric_category"] == "rubric_judge"
+    assert ev.langfuse.create_score.call_args.kwargs["metadata"]["metric_category"] == "rubric_judge"
     ev.langfuse.flush.assert_called_once()
-
-    legacy = []
-    ev.langfuse = SimpleNamespace(
-        scores=SimpleNamespace(create=Mock(side_effect=RuntimeError("nope"))),
-        score=lambda **kwargs: legacy.append(kwargs),
-        shutdown=Mock(),
-    )
-
-    await ev._upload_scores_to_langfuse("trace", {"evidence_quality": 0.5})
-
-    assert legacy[0]["name"] == "evidence_quality"
-    ev.langfuse.shutdown.assert_called_once()
+    ev.langfuse.create_score.side_effect = RuntimeError("unavailable")
+    with pytest.raises(RuntimeError, match="unavailable"):
+        await ev._upload_scores_to_langfuse("trace", {"evidence_quality": 0.5})
 
 
 def test_metric_category_and_chat_helpers(monkeypatch):
@@ -1741,8 +1677,7 @@ async def test_metric_and_score_upload_orchestration_covers_success_skips_failur
 
     legacy_scores = Mock()
     ev.langfuse = SimpleNamespace(
-        scores=SimpleNamespace(create=Mock(side_effect=RuntimeError("v4 unavailable"))),
-        score=legacy_scores,
+        create_score=legacy_scores,
         flush=Mock(),
     )
     ev._last_eval_summary_sha256 = "summary-hash"
@@ -1760,9 +1695,8 @@ async def test_metric_and_score_upload_orchestration_covers_success_skips_failur
 @pytest.mark.asyncio
 async def test_evaluate_trace_and_operation_lookup_cover_non_mapping_metadata_and_report_fallback(monkeypatch):
     ev = evaluator(monkeypatch)
-    malformed = SimpleNamespace(id="bad", session_id="other", metadata=["not-a-dict"], name="OP_TEST trace")
     matching = SimpleNamespace(id="match", session_id="OP_TEST", metadata=None, name="other")
-    ev.langfuse.api.trace.list.return_value = SimpleNamespace(data=[malformed, matching])
+    monkeypatch.setattr(mod, "read_session_traces", Mock(return_value=[matching]))
     assert [trace.id for trace in await ev._find_operation_traces("OP_TEST")] == ["match"]
 
     async def no_results(_operation_id):

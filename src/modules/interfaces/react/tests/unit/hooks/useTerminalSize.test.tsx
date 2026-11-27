@@ -71,3 +71,16 @@ describe('useTerminalSize', () => {
         expect(current).toEqual({columns: 80, rows: 24, availableWidth: 72, availableHeight: 20});
     });
 });
+
+it('supports stdout shims without resize event methods', () => {
+  const stdout = process.stdout;
+  let view!: ReactTestRenderer;
+  let size: any;
+  const Harness = () => {size = useTerminalSize(); return null;};
+  try {
+    Object.defineProperty(process, 'stdout', {value: {}, configurable: true});
+    act(() => {view = TestRenderer.create(<Harness/>);});
+    expect(size.columns).toBe(80); expect(size.rows).toBe(24);
+    act(() => view.unmount());
+  } finally {Object.defineProperty(process, 'stdout', {value: stdout, configurable: true});}
+});

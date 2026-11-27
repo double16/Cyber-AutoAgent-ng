@@ -1,0 +1,124 @@
+{
+  "model": "muse-glimmer:30b-mlx",
+  "selection": {
+    "baseline": {
+      "trials": 15,
+      "valid": 14,
+      "correct": 11,
+      "requests": 18,
+      "mean_recorded_prompt_characters": 5878,
+      "elapsed_seconds": 354.88
+    },
+    "revised": {
+      "trials": 15,
+      "valid": 12,
+      "correct": 9,
+      "requests": 17,
+      "mean_recorded_prompt_characters": 2727,
+      "elapsed_seconds": 423.24
+    },
+    "retained": {
+      "trials": 15,
+      "valid": 15,
+      "correct": 15,
+      "requests": 15,
+      "mean_recorded_prompt_characters": 2393,
+      "elapsed_seconds": 194.69
+    }
+  },
+  "empty_publication_reviews": {
+    "baseline": {
+      "trials": 18,
+      "valid": 12,
+      "correct": 12,
+      "requests": 18,
+      "mean_recorded_prompt_characters": 29186,
+      "elapsed_seconds": 1388.45
+    },
+    "revised": {
+      "trials": 18,
+      "valid": 12,
+      "correct": 12,
+      "requests": 18,
+      "mean_recorded_prompt_characters": 25709,
+      "elapsed_seconds": 1296.79
+    }
+  },
+  "populated_reviews": {
+    "baseline": {
+      "trials": 6,
+      "valid": 6,
+      "correct": 6,
+      "requests": 6,
+      "mean_recorded_prompt_characters": 30650,
+      "elapsed_seconds": 518.86
+    },
+    "revised": {
+      "trials": 6,
+      "valid": 6,
+      "correct": 6,
+      "requests": 6,
+      "mean_recorded_prompt_characters": 27174,
+      "elapsed_seconds": 488.84
+    }
+  },
+  "controller_pilots": {
+    "ordinary-write": {
+      "status": "partial_failure",
+      "repair_kind": "acceptance",
+      "reason": "Hypothesis is ungrounded in the inspected observation; structured property binding is explicitly unobserved while the hypothesis assumes mass-assignment of a protected property. Test discrimination does not distinguish unauthorized property change from normal file upload."
+    },
+    "protected-property": {
+      "status": "done",
+      "repair_kind": "none",
+      "reason": "The published hypothesis is grounded in the retained source inspection for the assigned profile endpoint and the test discrimination separates a protected clearance change from allowed displayName changes with a baseline and controlled variation. Identity requirements are consistent with an unauthenticated comparison proposal and the frozen acceptance criteria are satisfied by the artifact and hypothesis_set evidence."
+    }
+  },
+  "connected_model_requests": 100,
+  "verification": {
+    "full_suite_passed": 8256,
+    "skipped": 46,
+    "deselected": 89,
+    "ruff": "passed",
+    "diff_check": "passed",
+    "runtime_tool_schemas": "descriptions preserved",
+    "promoted_selection": "exact prompt and schema match evaluated refinement",
+    "final_component_tests": 91
+  },
+  "source_files": {
+    "src/modules/agents/hypothesis_review.py": {
+      "sha256": "568218b2df5d5364ed8843f8d083b4c65ac331666e8aa65df4d8aa260854952a",
+      "line_percent": 99.04,
+      "branch_percent": 98.35
+    },
+    "src/modules/prompts/security_interpretation.py": {
+      "sha256": "3af9d3004cc5a4702c298f4352a3359c0c92d279ba930d27ad2c26342cd8ab85",
+      "line_percent": 100.0,
+      "branch_percent": 100
+    },
+    "src/modules/techniques/critique.py": {
+      "sha256": "54a0a13c34dd55887c65168bd18bca2b992e5b393b8a2bd6df99a1333cc0eeaa",
+      "line_percent": 98.98,
+      "branch_percent": 96.46
+    },
+    "src/modules/techniques/service.py": {
+      "sha256": "6b9eab42677851493bef726df546903ebaacfb5299a80c95c6e935059f272e5d",
+      "line_percent": 97.07,
+      "branch_percent": 90.74
+    },
+    "src/modules/tools/hypotheses.py": {
+      "sha256": "9c8f5f9029a6c4792372f0fcbe0d55ba9b646a053938718b94a7d76f3140e57e",
+      "line_percent": 100.0,
+      "branch_percent": 99.19
+    }
+  },
+  "limitations": [
+    "Fixed synthetic cases with three repetitions; no production adoption claim.",
+    "Refinement evaluated later on the development set, reusing baseline outputs.",
+    "Single-candidate selection does not measure retrieval ranking or automatic recommendation applicability.",
+    "Six query-input empty reviews per arm remained controller-invalid; correction loops were not evaluated.",
+    "Controller pilots exercise evaluation and routing with fixture state and retained evidence, without a full operation.",
+    "Prompt character counts describe the last recorded attempt text per trial, excluding schemas and system messages."
+  ],
+  "launcher_recovery": "Scratch queue.py naming collision stopped and corrected before further model dispatches."
+}

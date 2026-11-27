@@ -4,7 +4,8 @@ tools as inventory evidence. Preserving these outputs does not authorize executi
 investigating adjacent tasks. Registration discovery belongs to the assigned provisioning worker.
 
 Declare authentication requirements when proposing tasks: ordinary authenticated coverage uses comparison
-`none`; authorization comparison tasks specify `account`, `role`, or `tenant` and the required roles.
+`none`; authorization comparison tasks specify `account`, `role`, or `tenant` and any named role restrictions.
+An empty roles list leaves named roles unrestricted; it does not remove the comparison or request anonymous access.
 Unauthenticated versus authenticated checks require one authenticated account per required role.
 
 Authorization comparison criteria require evidence that the intended application operation was exercised

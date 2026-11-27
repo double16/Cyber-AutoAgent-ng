@@ -1,0 +1,41 @@
+{
+  "purpose": "Manual semantic adjudication after generation; not supplied to the model and not a rejection gate",
+  "completion": "Distinguish validated decision, durable revision, deterministic publication availability, and semantic adequacy",
+  "authorization-named": [
+    "Preserve account comparison and member restriction without inventing role names",
+    "Compare the same protected record with two distinct same-role account sessions",
+    "Use established ownership and sharing entitlement to distinguish permitted and denied behavior",
+    "Keep unavailable execution credentials as future prerequisites rather than removing the comparison"
+  ],
+  "authorization-unnamed": [
+    "Preserve account comparison and empty named-role restrictions",
+    "Do not invent role names or substitute anonymous or single-session work",
+    "Use two future same-role account contexts and entitlement controls",
+    "An incompatible baseline contract is a retained failure, not a reason to alter the fixture"
+  ],
+  "rendering": [
+    "Preserve independent grounded instruction-override and prohibited-retrieval mechanisms",
+    "Distinguish a protected template-region change from literal user-content reflection",
+    "Keep unresolved enforcement conditional; configuration establishes an LLM processing path",
+    "A split is allowed but does not authorize changing unrelated records"
+  ],
+  "permitted-fetch": [
+    "Public callback alone is permitted behavior",
+    "Require prohibited destination access evidence against a permitted public baseline",
+    "Future probes use only authorized owned fixture canaries",
+    "Errors or successful calls alone do not establish prohibited access or its absence"
+  ],
+  "linked-dom": [
+    "Check actual read receipts for artifact:render.js, not prose claiming it was read or missing",
+    "Ground the flow in URL input reaching the inspected innerHTML consumer",
+    "Distinguish observable script execution from literal reflection or rendered markup",
+    "Do not call retained-but-unread source absent"
+  ],
+  "safe-filesystem": [
+    "Complete trusted-root resolve/relative_to check and static filename-only control contradict the stated escape premise",
+    "Withdraw an unsupported premise or justify any alternative with supplied source evidence",
+    "In-root reads are permitted behavior, not escape evidence",
+    "Merely changing the positive expectation to an out-of-root read does not ground a bypass mechanism"
+  ],
+  "interpretation": "Two repetitions are a diagnostic, not a statistical effectiveness claim; failures and capped cases stay in the denominator"
+}

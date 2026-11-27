@@ -1,0 +1,367 @@
+[
+  {
+    "id": "fixture-01",
+    "title": "Repair refutation proposal",
+    "url": "https://fixture.invalid/preview",
+    "source_ref": "artifact:refutation.txt",
+    "observation": "Current isolated fixture contract: POST /preview accepts JSON field url and intentionally fetches public URLs. Public callbacks are allowed. Private destinations are prohibited. Future tests may use only owned, authorized fixture public/private canaries. A private-probe success and the corresponding blocked private-probe outcome must address the same destination-policy consequence; public/invalid-URL controls alone do not refute private access. Evidence must differentiate server-side private retrieval from ordinary callbacks and transport errors. No target test has run; do not execute probes in this correction task.",
+    "objective": "Future destination-policy test has permitted public baseline, positive private access evidence and a matching negative private-probe outcome; no execution is required now. Use only retained current-operation fixture evidence; do not execute future tests.",
+    "criterion": "Future destination-policy test has permitted public baseline, positive private access evidence and a matching negative private-probe outcome; no execution is required now.",
+    "interaction": {
+      "interface": "http",
+      "operations": [
+        "POST"
+      ],
+      "operation_provenance": "observed",
+      "inputs": [
+        {
+          "name": "url",
+          "location": "body"
+        }
+      ]
+    },
+    "hypotheses": [
+      {
+        "authentication_requirement": {
+          "comparison": "none",
+          "roles": []
+        },
+        "observed_basis": "Current isolated fixture contract: POST /preview accepts JSON field url and intentionally fetches public URLs. Public callbacks are allowed. Private destinations are prohibited. Future tests may use only owned, authorized fixture public/private canaries. A private-probe success and the corresponding blocked private-probe outcome must address the same destination-policy consequence; public/invalid-URL controls alone do not refute private access. Evidence must differentiate server-side private retrieval from ordinary callbacks and transport errors. No target test has run; do not execute probes in this correction task.",
+        "preconditions": [
+          "Authorized isolated fixture with private canary reachable only from server network",
+          "Policy documentation confirms public URLs permitted and private network destinations prohibited",
+          "POST /preview fetches user-supplied URL server-side"
+        ],
+        "suspected_mechanism": "Server-side request forgery allowing retrieval from prohibited private network destinations via user-controlled URL in POST /preview",
+        "attacker_controlled_input": "URL parameter supplied in POST /preview request body",
+        "safe_test_steps": [
+          "Send POST /preview with URL pointing to owned public canary and record response",
+          "Send POST /preview with URL pointing to owned private canary in prohibited private range and record response",
+          "Compare private probe response to public canary control and to a no-op control"
+        ],
+        "positive_expectations": [
+          "Server returns content from private canary indicating server-side fetch succeeded from a prohibited private destination",
+          "Response contains private canary data not reachable from the client and differs from the public canary response"
+        ],
+        "negative_expectations": [
+          "Public canary request returns expected public content with no private data",
+          "Control request with no URL or invalid URL returns error without private retrieval"
+        ],
+        "required_evidence": [
+          "Saved response bodies for public canary probe and private canary probe",
+          "Evidence that private canary is only reachable from server network and that response originates from server-side fetch"
+        ],
+        "supporting_refs": [
+          "artifact:refutation.txt"
+        ],
+        "research_refs": []
+      }
+    ],
+    "kind": "endpoint",
+    "expected": "revise"
+  },
+  {
+    "id": "fixture-02",
+    "title": "Repair refutation proposal",
+    "url": "https://fixture.invalid/preview",
+    "source_ref": "artifact:refutation.txt",
+    "observation": "Current isolated fixture contract: POST /preview accepts JSON field url and intentionally fetches public URLs. Public callbacks are allowed. Private destinations are prohibited. Future tests may use only owned, authorized fixture public/private canaries. A private-probe success and the corresponding blocked private-probe outcome must address the same destination-policy consequence; public/invalid-URL controls alone do not refute private access. Evidence must differentiate server-side private retrieval from ordinary callbacks and transport errors. No target test has run; do not execute probes in this correction task.",
+    "objective": "Future destination-policy test has permitted public baseline, positive private access evidence and a matching negative private-probe outcome; no execution is required now. Use only retained current-operation fixture evidence; do not execute future tests.",
+    "criterion": "Future destination-policy test has permitted public baseline, positive private access evidence and a matching negative private-probe outcome; no execution is required now.",
+    "interaction": {
+      "interface": "http",
+      "operations": [
+        "POST"
+      ],
+      "operation_provenance": "observed",
+      "inputs": [
+        {
+          "name": "url",
+          "location": "body"
+        }
+      ]
+    },
+    "hypotheses": [
+      {
+        "authentication_requirement": {
+          "comparison": "none",
+          "roles": []
+        },
+        "observed_basis": "Current isolated fixture contract: POST /preview accepts JSON field url and intentionally fetches public URLs. Public callbacks are allowed. Private destinations are prohibited. Future tests may use only owned, authorized fixture public/private canaries. A private-probe success and the corresponding blocked private-probe outcome must address the same destination-policy consequence; public/invalid-URL controls alone do not refute private access. Evidence must differentiate server-side private retrieval from ordinary callbacks and transport errors. No target test has run; do not execute probes in this correction task.",
+        "preconditions": [
+          "Authorized isolated fixture with private canary reachable only from server network",
+          "Policy documentation confirms public URLs permitted and private network destinations prohibited",
+          "POST /preview fetches user-supplied URL server-side"
+        ],
+        "suspected_mechanism": "Server-side request forgery allowing retrieval from prohibited private network destinations via user-controlled URL in POST /preview",
+        "attacker_controlled_input": "URL parameter supplied in POST /preview request body",
+        "safe_test_steps": [
+          "Send POST /preview with URL pointing to owned public canary and record response",
+          "Send POST /preview with URL pointing to owned private canary in prohibited private range and record response",
+          "Compare private probe response to public canary control and to a no-op control"
+        ],
+        "positive_expectations": [
+          "Server returns content from private canary indicating server-side fetch succeeded from a prohibited private destination",
+          "Response contains private canary data not reachable from the client and differs from the public canary response"
+        ],
+        "negative_expectations": [
+          "Public canary request returns expected public content with no private data",
+          "Control request with no URL or invalid URL returns error without private retrieval",
+          "The same private-canary probe is denied by destination policy, returns no private content, and has no private-canary retrieval in server-side evidence while the public baseline succeeds."
+        ],
+        "required_evidence": [
+          "Saved response bodies for public canary probe and private canary probe",
+          "Evidence that private canary is only reachable from server network and that response originates from server-side fetch"
+        ],
+        "supporting_refs": [
+          "artifact:refutation.txt"
+        ],
+        "research_refs": []
+      }
+    ],
+    "kind": "endpoint",
+    "expected": "retain"
+  },
+  {
+    "id": "fixture-03",
+    "title": "Review network future test",
+    "kind": "service",
+    "url": "tcp://gateway.fixture.invalid:9000",
+    "source_ref": "artifact:network.txt",
+    "observation": "Authorized isolated TCP gateway fixture: the caller controls destination_host and destination_port in CONNECT requests. Public owned destinations are permitted; a private owned listener is forbidden by connection policy. Listener logs and gateway records distinguish gateway-originated connections from client connections and transport failures. No connections have been executed.",
+    "interaction": {
+      "interface": "tcp",
+      "operations": [
+        "CONNECT"
+      ],
+      "operation_provenance": "observed",
+      "inputs": [
+        {
+          "name": "destination_host",
+          "location": "argument"
+        },
+        {
+          "name": "destination_port",
+          "location": "argument"
+        }
+      ]
+    },
+    "objective": "Review the retained future test against its evidence and frozen acceptance; do not execute probes.",
+    "criterion": "The future test specifies supporting and matching refuting observations for each claimed policy violation; unrelated controls alone are insufficient.",
+    "expected": "revise",
+    "hypotheses": [
+      {
+        "authentication_requirement": {
+          "comparison": "none",
+          "roles": []
+        },
+        "observed_basis": "Authorized isolated TCP gateway fixture: the caller controls destination_host and destination_port in CONNECT requests. Public owned destinations are permitted; a private owned listener is forbidden by connection policy. Listener logs and gateway records distinguish gateway-originated connections from client connections and transport failures. No connections have been executed.",
+        "preconditions": [
+          "Authorized isolated fixture with owned canaries; establish enforcement and policy before future probes"
+        ],
+        "suspected_mechanism": "Gateway connection-policy bypass to a prohibited private owned listener",
+        "attacker_controlled_input": "destination_host and destination_port in the gateway CONNECT request",
+        "safe_test_steps": [
+          "Establish policy and ownership of the public and private fixture listeners",
+          "Compare a permitted public-listener CONNECT control with a private-listener CONNECT probe",
+          "Save gateway decisions and listener logs to determine whether the private probe established a session"
+        ],
+        "positive_expectations": [
+          "The private probe establishes a gateway-originated session to the forbidden owned listener"
+        ],
+        "negative_expectations": [
+          "The public control connects successfully to the permitted listener",
+          "A syntactically invalid CONNECT request is rejected"
+        ],
+        "required_evidence": [
+          "Gateway decision records for both requests",
+          "Owned listener logs identifying connection origin"
+        ],
+        "supporting_refs": [
+          "artifact:network.txt"
+        ],
+        "research_refs": []
+      }
+    ]
+  },
+  {
+    "id": "fixture-04",
+    "title": "Review network future test",
+    "kind": "service",
+    "url": "tcp://gateway.fixture.invalid:9000",
+    "source_ref": "artifact:network.txt",
+    "observation": "Authorized isolated TCP gateway fixture: the caller controls destination_host and destination_port in CONNECT requests. Public owned destinations are permitted; a private owned listener is forbidden by connection policy. Listener logs and gateway records distinguish gateway-originated connections from client connections and transport failures. No connections have been executed.",
+    "interaction": {
+      "interface": "tcp",
+      "operations": [
+        "CONNECT"
+      ],
+      "operation_provenance": "observed",
+      "inputs": [
+        {
+          "name": "destination_host",
+          "location": "argument"
+        },
+        {
+          "name": "destination_port",
+          "location": "argument"
+        }
+      ]
+    },
+    "objective": "Review the retained future test against its evidence and frozen acceptance; do not execute probes.",
+    "criterion": "The future test specifies supporting and matching refuting observations for each claimed policy violation; unrelated controls alone are insufficient.",
+    "expected": "retain",
+    "hypotheses": [
+      {
+        "authentication_requirement": {
+          "comparison": "none",
+          "roles": []
+        },
+        "observed_basis": "Authorized isolated TCP gateway fixture: the caller controls destination_host and destination_port in CONNECT requests. Public owned destinations are permitted; a private owned listener is forbidden by connection policy. Listener logs and gateway records distinguish gateway-originated connections from client connections and transport failures. No connections have been executed.",
+        "preconditions": [
+          "Authorized isolated fixture with owned canaries; establish enforcement and policy before future probes"
+        ],
+        "suspected_mechanism": "Gateway connection-policy bypass to a prohibited private owned listener",
+        "attacker_controlled_input": "destination_host and destination_port in the gateway CONNECT request",
+        "safe_test_steps": [
+          "Establish policy and ownership of the public and private fixture listeners",
+          "Compare a permitted public-listener CONNECT control with a private-listener CONNECT probe",
+          "Save gateway decisions and listener logs to determine whether the private probe established a session"
+        ],
+        "positive_expectations": [
+          "The private probe establishes a gateway-originated session to the forbidden owned listener"
+        ],
+        "negative_expectations": [
+          "The public control connects successfully to the permitted listener",
+          "A syntactically invalid CONNECT request is rejected",
+          "The same private-listener probe is denied by gateway policy and establishes no session while the public control succeeds"
+        ],
+        "required_evidence": [
+          "Gateway decision records for both requests",
+          "Owned listener logs identifying connection origin"
+        ],
+        "supporting_refs": [
+          "artifact:network.txt"
+        ],
+        "research_refs": []
+      }
+    ]
+  },
+  {
+    "id": "fixture-05",
+    "title": "Review filesystem future test",
+    "kind": "workflow",
+    "url": "file:///fixture/source/reader.py",
+    "source_ref": "artifact:filesystem.txt",
+    "observation": "Authorized isolated source/filesystem fixture: read_document(relative_path) accepts a caller path and promises access only inside a configured document root. A controlled file outside that root is forbidden and has a unique marker. Source establishes a path join but leaves canonicalization enforcement unresolved. Fixture file ownership and audit records distinguish outside-root reads from permitted document reads. No file probes have been executed.",
+    "interaction": {
+      "interface": "filesystem",
+      "operations": [
+        "read_document"
+      ],
+      "operation_provenance": "observed",
+      "inputs": [
+        {
+          "name": "relative_path",
+          "location": "argument"
+        }
+      ]
+    },
+    "objective": "Review the retained future test against its evidence and frozen acceptance; do not execute probes.",
+    "criterion": "The future test specifies supporting and matching refuting observations for each claimed policy violation; unrelated controls alone are insufficient.",
+    "expected": "revise",
+    "hypotheses": [
+      {
+        "authentication_requirement": {
+          "comparison": "none",
+          "roles": []
+        },
+        "observed_basis": "Authorized isolated source/filesystem fixture: read_document(relative_path) accepts a caller path and promises access only inside a configured document root. A controlled file outside that root is forbidden and has a unique marker. Source establishes a path join but leaves canonicalization enforcement unresolved. Fixture file ownership and audit records distinguish outside-root reads from permitted document reads. No file probes have been executed.",
+        "preconditions": [
+          "Authorized isolated fixture with owned canaries; establish enforcement and policy before future probes"
+        ],
+        "suspected_mechanism": "Path containment bypass reading a forbidden owned file outside the document root",
+        "attacker_controlled_input": "relative_path argument to read_document",
+        "safe_test_steps": [
+          "Establish the allowed document root and forbidden outside-root owned canary with distinct contents",
+          "Read a permitted in-root control and submit a traversal path targeting the owned outside-root canary",
+          "Save returned content and file access audit records for the same caller"
+        ],
+        "positive_expectations": [
+          "The traversal probe returns the outside-root canary marker and audit records show its forbidden read"
+        ],
+        "negative_expectations": [
+          "The in-root control returns the permitted document",
+          "An invalid path type is rejected"
+        ],
+        "required_evidence": [
+          "Fixture root and entitlement configuration",
+          "Returned contents and file access audit records for both calls"
+        ],
+        "supporting_refs": [
+          "artifact:filesystem.txt"
+        ],
+        "research_refs": []
+      }
+    ]
+  },
+  {
+    "id": "fixture-06",
+    "title": "Review filesystem future test",
+    "kind": "workflow",
+    "url": "file:///fixture/source/reader.py",
+    "source_ref": "artifact:filesystem.txt",
+    "observation": "Authorized isolated source/filesystem fixture: read_document(relative_path) accepts a caller path and promises access only inside a configured document root. A controlled file outside that root is forbidden and has a unique marker. Source establishes a path join but leaves canonicalization enforcement unresolved. Fixture file ownership and audit records distinguish outside-root reads from permitted document reads. No file probes have been executed.",
+    "interaction": {
+      "interface": "filesystem",
+      "operations": [
+        "read_document"
+      ],
+      "operation_provenance": "observed",
+      "inputs": [
+        {
+          "name": "relative_path",
+          "location": "argument"
+        }
+      ]
+    },
+    "objective": "Review the retained future test against its evidence and frozen acceptance; do not execute probes.",
+    "criterion": "The future test specifies supporting and matching refuting observations for each claimed policy violation; unrelated controls alone are insufficient.",
+    "expected": "retain",
+    "hypotheses": [
+      {
+        "authentication_requirement": {
+          "comparison": "none",
+          "roles": []
+        },
+        "observed_basis": "Authorized isolated source/filesystem fixture: read_document(relative_path) accepts a caller path and promises access only inside a configured document root. A controlled file outside that root is forbidden and has a unique marker. Source establishes a path join but leaves canonicalization enforcement unresolved. Fixture file ownership and audit records distinguish outside-root reads from permitted document reads. No file probes have been executed.",
+        "preconditions": [
+          "Authorized isolated fixture with owned canaries; establish enforcement and policy before future probes"
+        ],
+        "suspected_mechanism": "Path containment bypass reading a forbidden owned file outside the document root",
+        "attacker_controlled_input": "relative_path argument to read_document",
+        "safe_test_steps": [
+          "Establish the allowed document root and forbidden outside-root owned canary with distinct contents",
+          "Read a permitted in-root control and submit a traversal path targeting the owned outside-root canary",
+          "Save returned content and file access audit records for the same caller"
+        ],
+        "positive_expectations": [
+          "The traversal probe returns the outside-root canary marker and audit records show its forbidden read"
+        ],
+        "negative_expectations": [
+          "The in-root control returns the permitted document",
+          "An invalid path type is rejected",
+          "The same outside-root probe is rejected by containment enforcement and no outside-root read or canary content occurs while the in-root control succeeds"
+        ],
+        "required_evidence": [
+          "Fixture root and entitlement configuration",
+          "Returned contents and file access audit records for both calls"
+        ],
+        "supporting_refs": [
+          "artifact:filesystem.txt"
+        ],
+        "research_refs": []
+      }
+    ]
+  }
+]

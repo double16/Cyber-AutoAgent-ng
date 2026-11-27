@@ -59,6 +59,7 @@ class PhaseMetadataContract:
     module: str
     phase_id: int
     task_creation_mode: str
+    technique_contexts: tuple[str, ...] = ()
 
 
 def normalize_workstream_identifier(value: str) -> str:
@@ -405,8 +406,12 @@ def _parse_metadata_contract(module: str, raw: Any) -> PhaseMetadataContract:
         raise ValueError(f"phase metadata contract phase_id must be a positive integer for {module}")
     if task_creation_mode not in _VALID_TASK_CREATION_MODES:
         raise ValueError(f"phase metadata contract task_creation_mode is invalid for {module}")
+    contexts = raw.get("technique_contexts", [])
+    if not isinstance(contexts, list) or any(not isinstance(value, str) or not value.strip() for value in contexts):
+        raise ValueError(f"phase metadata technique_contexts must be a list of identifiers for {module}")
     return PhaseMetadataContract(
         module=module,
         phase_id=phase_id,
         task_creation_mode=task_creation_mode,
+        technique_contexts=tuple(contexts),
     )

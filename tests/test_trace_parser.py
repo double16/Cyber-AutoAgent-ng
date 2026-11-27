@@ -121,17 +121,16 @@ def test_fetch_observations_returns_existing_objects_and_fetches_ids():
     parser = TraceParser()
     assert parser._fetch_observations(SimpleNamespace(observations=[existing])) == [existing]
 
-    fetched = SimpleNamespace(type="EVENT")
-    langfuse = SimpleNamespace(api=SimpleNamespace(observations=SimpleNamespace(get=lambda obs_id: fetched)))
+    langfuse = SimpleNamespace(api=SimpleNamespace(observations=SimpleNamespace(get_many=lambda **kwargs: SimpleNamespace(data=[dict(id="obs1", type="EVENT")]))))
     parser = TraceParser(langfuse_client=langfuse)
-    assert parser._fetch_observations(SimpleNamespace(observations=["obs1"])) == [fetched]
+    assert parser._fetch_observations(SimpleNamespace(observations=["obs1"]))[0].type == "EVENT"
 
 
 def test_fetch_observations_skips_failed_ids_and_content_parsing_fallbacks():
     client = SimpleNamespace(
         api=SimpleNamespace(
             observations=SimpleNamespace(
-                get=lambda obs_id: (_ for _ in ()).throw(RuntimeError("missing")) if obs_id == "bad" else None
+                get_many=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("missing"))
             )
         )
     )

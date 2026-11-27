@@ -8,16 +8,17 @@ module.exports = {
     '<rootDir>/unit/**/*.test.tsx'
   ],
   collectCoverageFrom: [
-    '../src/**/*.{ts,tsx}',
+    '../src/**/*.{js,jsx,ts,tsx}',
     '!../src/**/*.d.ts',
     '!../src/index.tsx',
     '!../src/**/__mocks__/**',
     '!../src/**/test-utils.tsx'
   ],
+  collectCoverage: true,
   coverageThreshold: {
-    global: {
-      branches: 70,
-      functions: 70,
+    [require('node:path').resolve(__dirname, '../src/**/*.{js,jsx,ts,tsx}')]: {
+      branches: 80,
+      functions: 80,
       lines: 80,
       statements: 80
     }

@@ -1,0 +1,56 @@
+{
+  "counts": {
+    "limit": 27,
+    "requests": 15,
+    "roles": 12
+  },
+  "outcomes": [
+    {
+      "case": "generate-network",
+      "status": "generated_pending_human_adjudication",
+      "revision": "277423b0-594f-59d8-aea6-9d2c963b19a7",
+      "document_sha256": "41a043c2660a8d157fbca6083ddd914ebb04404a341f7e4f279fbb0e65de2980",
+      "input_sha256": "aa3a6fda4e09235fb8a0e9f03aa082b4f7a151bab08c52c030e8f45f96937aff",
+      "counts": {
+        "limit": 27,
+        "requests": 6,
+        "roles": 5
+      },
+      "human_adjudication": "pending"
+    },
+    {
+      "case": "generate-filesystem",
+      "status": "generated_pending_human_adjudication",
+      "revision": "d86b917f-4633-5f01-b20b-14835e721ab8",
+      "document_sha256": "cfe65a2e5a015d394bd0751b768e911033ea083321b13327620dd65dc27e2d30",
+      "input_sha256": "dcff606774882fd7fa35cef07ca1f7ea53f85a8fa641ca80503d5d8b15716fd3",
+      "counts": {
+        "limit": 27,
+        "requests": 11,
+        "roles": 9
+      },
+      "human_adjudication": "pending"
+    },
+    {
+      "case": "generate-http",
+      "status": "unresolved",
+      "error_type": "RuntimeError",
+      "error": "Technique decision remains unresolved after one truncation recovery",
+      "input_sha256": "b06fe67be9930b71c37b307fd4e26fa843217a46463619d2fb7bc4c6910e38fc",
+      "counts": {
+        "limit": 27,
+        "requests": 15,
+        "roles": 12
+      },
+      "human_adjudication": "pending"
+    }
+  ],
+  "initial_connection_failures": 3,
+  "total_provider_requests": 18,
+  "authorized_total": 30,
+  "unused_requests": 12,
+  "pipeline_completed": 2,
+  "denominator": 3,
+  "human_accepted_useful_documents": null,
+  "interpretation": "Conditional pipeline yield only; no causal improvement or actual-use claim"
+}

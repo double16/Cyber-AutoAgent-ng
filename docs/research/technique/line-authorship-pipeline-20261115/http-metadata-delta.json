@@ -1,0 +1,20 @@
+{
+  "sources": {
+    "second": [
+      {
+        "url": "https://portswigger.net/web-security/access-control/idor",
+        "title": "IDOR",
+        "retrieved_at": "",
+        "selection_reason": "Provides an authoritative definition of IDOR as bypassing access controls to view the records of other customers and notes the conditional 'If no other controls are in place', which supports the prerequisite framing for an authorization-violation assessment."
+      }
+    ],
+    "third": [
+      {
+        "url": "https://portswigger.net/web-security/access-control/idor",
+        "title": "IDOR",
+        "retrieved_at": "",
+        "selection_reason": "The retained excerpts contain the phrase 'bypassing access controls to view the records of other customers' and the conditional phrase 'If no other controls are in place', which can be used to support a limited reference to the IDOR concept framing present in the source."
+      }
+    ]
+  }
+}

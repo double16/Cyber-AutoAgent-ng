@@ -1,0 +1,76 @@
+{
+  "requests": 4,
+  "cases": [
+    {
+      "case": "network-access",
+      "expected": "partial_failure",
+      "status": "partial_failure",
+      "repair_kind": "acceptance",
+      "review": {
+        "status": "partial_failure",
+        "reason": "The published no_testable_hypotheses disposition remains unsupported by the frozen inspection evidence. The retained source states the listener accepts a supplied principal and record selector and returns that record, ownership enforcement is unobserved, and two same-role accounts own separate records. This grounds a conditional IDOR/information-disclosure test for the assigned service tcp://service.test:1234. The current publication contains zero hypotheses with reason 'No safe probe in current scope', which contradicts the content-bearing inspection evidence.",
+        "instructions": "",
+        "repair": {
+          "kind": "acceptance",
+          "evidence_gaps": [],
+          "execution_receipt_gaps": []
+        },
+        "publication_sha256": "43114f68f8b32eece4bae39800207532a54ba498aff60b1d44c3a90dd8690ed9",
+        "subject_reviews": [
+          {
+            "item_id": "subject",
+            "decision": "revise",
+            "reason": "Inspection evidence shows a listener that accepts a supplied principal and record selector and returns the record with ownership enforcement unobserved and two same-role accounts owning separate records. This supports a conditional unauthorized-access test for the assigned service. The no_testable_hypotheses disposition with zero hypotheses is therefore unsupported.",
+            "hypotheses": [],
+            "no_hypothesis_basis": {
+              "kind": "inspected_evidence",
+              "inspection_refs": [
+                "artifact:artifacts/hypothesis_context/returned_results/b57123f20ec6c4f196dd47dab416622a31f8b7478b38d20327b07fb0906dbbb6/84a51a638fb4578b0af0e1db8741e462d3848d6f0dcfef7bc542c6de3a6913de.json"
+              ],
+              "no_relevant_behavior_reason": "Evidence supports a conditional test; empty disposition is not justified."
+            }
+          }
+        ],
+        "prerequisite_gaps": [],
+        "unresolved_criterion_ids": []
+      },
+      "receipts_retained": true
+    },
+    {
+      "case": "bare-route",
+      "expected": "done",
+      "status": "done",
+      "repair_kind": "none",
+      "review": {
+        "status": "done",
+        "reason": "The publication contains a reasoned no_testable_hypotheses disposition for the assigned endpoint. The retained inspection of the assigned source shows only a route name with no request, implementation, input or behavior available, and the inventory records empty inputs and operations with inputs_unrecorded diagnostic. This inspected evidence supports no grounded safe conditional security test for the frozen subject, satisfying the hypothesis_set requirement via a valid no_testable_hypotheses disposition.",
+        "instructions": "",
+        "repair": {
+          "kind": "none",
+          "evidence_gaps": [],
+          "execution_receipt_gaps": []
+        },
+        "publication_sha256": "fb91308931f26f476d796d07f2169da547d76654af1c91908c83af12b52fc9b7",
+        "subject_reviews": [
+          {
+            "item_id": "subject",
+            "decision": "retain",
+            "reason": "Inspected source contains only a route name with no request, implementation, input or behavior. Inventory shows empty inputs/operations and inputs_unrecorded diagnostic. No grounded safe conditional test can be derived from the frozen evidence.",
+            "hypotheses": [],
+            "no_hypothesis_basis": {
+              "kind": "inspected_evidence",
+              "inspection_refs": [
+                "artifact:artifacts/hypothesis_context/returned_results/e38cc971d2c3de76bdbb50a054b21e052fa37da980c18de037e5e3685faccb6a/bdb23873c0db60e8e1f9daf343f014def4be59faf4a77130f68142a4f8df485e.json"
+              ],
+              "no_relevant_behavior_reason": "No reconciled input candidates supplied; inspected evidence provides no observable interaction or trust boundary to ground a conditional security test."
+            }
+          }
+        ],
+        "prerequisite_gaps": [],
+        "unresolved_criterion_ids": []
+      },
+      "receipts_retained": true
+    }
+  ],
+  "limitation": "Isolated actual evaluator/controller routing with injected native runner; not a complete operation."
+}

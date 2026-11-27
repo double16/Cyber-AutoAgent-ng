@@ -1,0 +1,355 @@
+"""Production executor-core pilot with isolated fixture I/O and real acceptance persistence."""
+
+import importlib.util
+import json
+import logging
+import time
+from contextlib import ExitStack
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+
+def load_fixture():
+    path = Path("docs/research/technique/task-guidance-discovery-20261115/run.py")
+    spec = importlib.util.spec_from_file_location("discovery_fixture", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def run_case(folder, mode, arm, offline=False):
+    from strands import tool
+    from strands.tools.executors import SequentialToolExecutor
+
+    from cyberautoagent import run_agent_until_terminal_state
+    from modules.agents.cyber_autoagent import AgentRuntimeResources, create_agent
+    from modules.agents.multi_agent_workflow import MultiAgentWorkflowController
+    from modules.agents.run_policy import AgentRunPolicy
+    from modules.config import AgentConfig, get_config_manager
+    from modules.config.types import BudgetConfig
+    from modules.handlers.conversation_budget import MappingConversationManager
+    from modules.handlers.react import AgentEventHandler
+    from modules.prompts.factory import get_system_prompt
+    from modules.tools import artifact, memory
+    from modules.tools.memory import (
+        AcceptanceBasis,
+        AcceptanceContract,
+        AcceptanceCriterion,
+        EvidenceRequirement,
+        OperationPlan,
+        PlanPhase,
+        SQLiteApplicationStore,
+        Task,
+        build_record_task_acceptance_tool,
+    )
+
+    fixture = load_fixture()
+    folder = Path(folder).resolve()
+    folder.mkdir(parents=True)
+    (folder / "artifacts").mkdir()
+    op_id = "OP_EXECUTOR_PILOT"
+    target = "https://fixture.invalid"
+    store = SQLiteApplicationStore(str(folder / "state.db"), target)
+    acceptance = AcceptanceContract(
+        mode="outcome",
+        basis=AcceptanceBasis(
+            kind="procedure",
+            description="Controlled account comparison",
+            source_refs=["target:target-1", "plan:phase-1"],
+            procedure={
+                "methods": ["fixture comparison"],
+                "limits": {"max_items": 2},
+                "stop_condition": "first_limit_reached",
+                "gap_policy": "record_unassessed",
+                "output_kind": "artifact",
+            },
+        ),
+        criteria=[
+            AcceptanceCriterion(
+                id="classification",
+                description=(
+                    "Publish an evidence-backed comparison classification for independent "
+                    "assessment, without claiming a confirmed finding."
+                ),
+                evidence_requirements=[EvidenceRequirement(kind="artifact")],
+            )
+        ],
+    )
+    task = Task(
+        "pilot-task",
+        "Compare account access",
+        "Assess selector behavior and policy; publish a comparison artifact for independent review.",
+        acceptance,
+        1,
+        "active",
+    )
+    plan = OperationPlan(
+        objective=task.objective,
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Assessment", status="active")],
+    )
+    store.store_plan(op_id, plan)
+    store.store_task(op_id, task)
+    observations = []
+    lookups = []
+    published = []
+
+    class LocalClient:
+        def patch_task(self, task_uid, user_id=None, **kwargs):
+            return store.patch_task(op_id, task_uid, **kwargs)
+
+    class Emitter:
+        def emit(self, event):
+            with (folder / "events.jsonl").open("a") as stream:
+                stream.write(json.dumps(event, default=str) + "\n")
+
+        def flush_immediate(self):
+            pass
+
+    @tool
+    def inspect_context(kind: str) -> str:
+        """Read fixture context: kind is identity or policy."""
+        row = {"id": f"obs-{len(observations) + 1}", "kind": kind, "response": fixture.context(mode, kind)}
+        observations.append(row)
+        return json.dumps(row)
+
+    @tool
+    def request_account(principal: str, selector: str) -> str:
+        """Query the simulated endpoint. principal is session-red or session-blue; selector is any string."""
+        row = {
+            "id": f"obs-{len(observations) + 1}",
+            "principal": principal,
+            "selector": selector,
+            "response": fixture.response(mode, principal, selector),
+        }
+        observations.append(row)
+        return json.dumps(row)
+
+    @tool
+    def publish_result(classification: str, evidence_ids: list[str], explanation: str) -> str:
+        """Write the comparison artifact. classification: violation, no_violation_observed, or inconclusive."""
+        decision = fixture.Decision(classification=classification, evidence_ids=evidence_ids, explanation=explanation)
+        result = {"decision": decision.model_dump(), "observations": list(observations)}
+        (folder / "artifacts/result.json").write_text(json.dumps(result, indent=2))
+        published.append(decision)
+        return "artifact:artifacts/result.json"
+
+    @tool
+    def get_technique(request: str) -> str:
+        """Look up reusable header-selector comparison guidance when useful. Guidance is advisory."""
+        lookups.append(request)
+        return Path("docs/research/technique/line-authorship-pipeline-20261115/generated-http.md").read_text()
+
+    with ExitStack() as stack:
+        for module in (memory, artifact):
+            stack.enter_context(patch.object(module, "_operation_output_root", lambda: str(folder)))
+        stack.enter_context(patch.object(memory, "_get_database_store", lambda: store))
+        stack.enter_context(patch.object(memory, "_operation_id", lambda *args: op_id))
+        stack.enter_context(patch.object(memory, "_ensure_memory_client", lambda: LocalClient()))
+        stack.enter_context(patch.object(memory, "_store_memory_entry", lambda *args: SimpleNamespace(created=False)))
+        accept = build_record_task_acceptance_tool(task.task_uid, task)
+        tools = [inspect_context, request_account, publish_result, accept]
+        if arm == "lookup":
+            tools.append(get_technique)
+        config = AgentConfig(
+            target=target,
+            objective=task.objective,
+            provider="ollama",
+            model_id="muse-glimmer:30b-mlx",
+            op_id=op_id,
+            available_tools=[],
+        )
+        manager = get_config_manager()
+        callback = AgentEventHandler(
+            operation_id=op_id, emitter=Emitter(), emit_operation_init=False, start_metrics_thread=False
+        )
+        system = get_system_prompt(
+            target,
+            task.objective,
+            op_id,
+            budget=BudgetConfig(60),
+            provider="ollama",
+            tools_context="Only the explicitly registered isolated fixture tools are available.",
+            output_config={"operation_path": str(folder), "artifacts_path": str(folder / "artifacts")},
+            plan_snapshot=plan,
+        )
+        runtime = AgentRuntimeResources(
+            config=config,
+            operation_id=op_id,
+            server_config=SimpleNamespace(),
+            config_manager=manager,
+            callback_handler=callback,
+            tools_list=tools,
+            tool_executor=SequentialToolExecutor(),
+            system_prompt_payload=system,
+            system_prompt=system,
+            hooks=[],
+            conversation_manager=MappingConversationManager(
+                window_size=40, summary_ratio=0.3, preserve_recent_messages=2, preserve_first_messages=1
+            ),
+            sdk_context_manager=None,
+            trace_attributes={},
+            prompt_token_limit=40000,
+            provider_capture_directory=folder / "provider_responses",
+        )
+        prompt = (
+            "Assess whether X-Account permits unauthorized access. Available credential handles: "
+            "session-red and session-blue; candidate selector values A and B. Discover identity and "
+            "policy using the context tool. Publish your evidence-backed classification through "
+            "publish_result, then record task acceptance of that artifact as an observation for "
+            "independent review. Do not claim a confirmed finding. All tools simulate an isolated "
+            "endpoint; no external target is accessible.\n"
+            "\n\n## Frozen Task Acceptance Contract (Controller-owned)\n"
+            + json.dumps(acceptance.to_dict(), indent=2, sort_keys=True)
+            + "\n\n## Operation Constraints (Controller-owned)\n"
+            + plan.constraints_to_toon()
+            + MultiAgentWorkflowController._inventory_manifest_evidence_prompt(task)
+            + MultiAgentWorkflowController._task_executor_contract(
+                task, {t.tool_spec["name"] for t in tools}, plan=plan
+            )
+            + MultiAgentWorkflowController._tool_selection_policy()
+        )
+        (folder / "assembled.json").write_text(
+            json.dumps({"system": system, "prompt": prompt, "tools": [t.tool_spec for t in tools]}, indent=2)
+        )
+        agent = create_agent(
+            target,
+            task.objective,
+            runtime_resources=runtime,
+            tools=tools,
+            agent_type="task_executor",
+            include_tool_catalog=False,
+        )
+        stack.callback(agent.cleanup)
+        assert agent._cyber_tool_outcome_recording_hook.journal is agent._cyber_callback_handler.tool_outcome_journal
+        policy = AgentRunPolicy(
+            min_tool_calls=1,
+            required_tool_names={"record_task_acceptance"},
+            terminal_after_required_tools=True,
+            require_successful_required_tools=True,
+            allow_text_final_after_tools=False,
+            actionless_mode="task_progress",
+            max_actionless_calls=3,
+            max_agent_calls=8,
+            max_model_turns=32,
+            recovery_objective=task.objective,
+            recovery_next_action="Call record_task_acceptance with canonical durable evidence references.",
+            terminal_reason="task_executor_done",
+        )
+        if offline:
+            inspect_context(kind="identity")
+            inspect_context(kind="policy")
+            request_account(principal="session-red", selector="B")
+            expected = "inconclusive" if mode == "unknown" else "no_violation_observed"
+            publish_result(
+                classification=expected, evidence_ids=[r["id"] for r in observations], explanation="Offline specimen"
+            )
+            accept(
+                status="satisfied",
+                disposition="observation",
+                summary="Comparison artifact produced for independent review",
+                evidence_refs=["artifact:artifacts/result.json"],
+            )
+            reason = "offline"
+        else:
+            result = run_agent_until_terminal_state(
+                agent=agent,
+                callback_handler=callback,
+                current_message=prompt,
+                initial_prompt=prompt,
+                budget_cfg=BudgetConfig(60),
+                operation_start=time.time(),
+                max_duration=None,
+                logger=logging.getLogger("executor_pilot"),
+                run_policy=policy,
+            )
+            reason = result.reason
+        journal = agent._cyber_callback_handler.tool_outcome_journal
+        row = {
+            "mode": mode,
+            "arm": arm,
+            "reason": reason,
+            "lookups": lookups,
+            "observations": observations,
+            "acceptance": [r.to_dict() for r in store.get_acceptance_results(op_id, task.task_uid)],
+            "tool_outcomes": [str(r) for r in journal.since(0)],
+        }
+        if published:
+            row.update(answer=published[-1].model_dump(), **fixture.grade(mode, published[-1], observations))
+        (folder / "outcome.json").write_text(json.dumps(row, indent=2, default=str))
+        return row
+
+
+def run_experiment(root, worker=run_case, limit=100):
+    """Count all generation attempts, retain every planned case, and never exceed the allowance."""
+    import hashlib
+
+    import ollama
+
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("Allowance must be an integer from 1 to 100")
+    root = Path(root)
+    root.mkdir(parents=True)
+    plans = [("unknown", "lookup"), ("unknown", "none"), ("shared", "none"), ("shared", "lookup")]
+    script = Path(__file__).read_bytes()
+    guidance = Path("docs/research/technique/line-authorship-pipeline-20261115/generated-http.md").read_bytes()
+    (root / "protocol.json").write_text(
+        json.dumps(
+            {
+                "limit": limit,
+                "plans": plans,
+                "script_sha256": hashlib.sha256(script).hexdigest(),
+                "guidance_sha256": hashlib.sha256(guidance).hexdigest(),
+                "scope": "Production factory, run loop, hooks and SQLite acceptance; controlled fixture I/O and task assignment.",
+                "excluded": [
+                    "whole controller scheduling",
+                    "model prompt-builder/evaluator",
+                    "semantic catalog retrieval",
+                    "Qdrant publication",
+                ],
+            },
+            indent=2,
+        )
+    )
+    counts = {"requests": 0, "limit": limit}
+    original = ollama.AsyncClient.chat
+
+    async def counted(client, *args, **kwargs):
+        if counts["requests"] >= limit:
+            raise RuntimeError("Approved request allowance exhausted")
+        counts["requests"] += 1
+        (root / "budget.json").write_text(json.dumps(counts))
+        return await original(client, *args, **kwargs)
+
+    outcomes = []
+    with patch.object(ollama.AsyncClient, "chat", counted):
+        for index, (mode, arm) in enumerate(plans):
+            before = counts["requests"]
+            if before >= limit:
+                row = {"mode": mode, "arm": arm, "status": "unattempted_budget_exhausted"}
+            else:
+                try:
+                    row = worker(root / f"{index:02}", mode, arm)
+                    row["status"] = "completed"
+                except Exception as error:
+                    row = {
+                        "mode": mode,
+                        "arm": arm,
+                        "status": "unresolved",
+                        "error": str(error),
+                        "error_type": type(error).__name__,
+                    }
+            row["requests"] = counts["requests"] - before
+            outcomes.append(row)
+            (root / "results.json").write_text(json.dumps({"counts": counts, "outcomes": outcomes}, indent=2))
+            print(json.dumps({key: row[key] for key in ("mode", "arm", "status", "requests")}), flush=True)
+    return {"counts": counts, "outcomes": outcomes}
+
+
+if __name__ == "__main__":
+    from dotenv import load_dotenv
+
+    load_dotenv(".env")
+    run_experiment("outputs/technique_review_trials/production-executor-20261115")
