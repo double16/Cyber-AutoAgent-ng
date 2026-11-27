@@ -68,13 +68,13 @@ correction ownership are in the single-reviewer and grounding records below.
 For exact lifecycle event names, schemas, role inputs, correction ownership and retry behavior, see
 the focused current records:
 
-- [Single-reviewer publication](../technique-single-reviewer/README.md)
-- [Knowledge-based grounding](../technique-knowledge-grounding/README.md)
-- [Purpose-aware review](../technique-review-purpose/README.md)
-- [Materiality and repair precision](../technique-review-materiality/README.md)
-- [Incremental review corrections](../technique-review-incremental-corrections/README.md)
-- [Nested correction references](../technique-review-nested-corrections/README.md)
-- [Support-scope generation follow-up](../technique-generation-yield-pilot/upstream-scope-followup/README.md)
+- [Single-reviewer publication](single-reviewer/README.md)
+- [Knowledge-based grounding](knowledge-grounding/README.md)
+- [Purpose-aware review](review-purpose/README.md)
+- [Materiality and repair precision](review-materiality/README.md)
+- [Incremental review corrections](review-incremental-corrections/README.md)
+- [Nested correction references](review-nested-corrections/README.md)
+- [Support-scope generation follow-up](generation-yield-pilot/upstream-scope-followup/README.md)
 
 ## Calibration and study interpretation
 
@@ -84,8 +84,8 @@ model call, passing scripted transport check or label match alone does not estab
 quality. Preserve incomplete outcomes and distinguish human acceptance of an exact draft from
 pipeline completion or production reliability.
 
-- [Review calibration](../technique-review-calibration/README.md)
-- [Generation-yield pilot](../technique-generation-yield-pilot/README.md)
+- [Review calibration](review-calibration/README.md)
+- [Generation-yield pilot](generation-yield-pilot/README.md)
 - [Earlier technique studies and reports](../README.md)
 
 Raw operation context and provider payloads remain in private operation-local storage. The research

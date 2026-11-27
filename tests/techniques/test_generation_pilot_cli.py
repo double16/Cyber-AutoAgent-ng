@@ -11,7 +11,7 @@ from modules.techniques.review_calibration import code_identity
 
 @pytest.fixture
 def inputs(tmp_path):
-    cases = json.loads(Path("docs/research/technique-generation-yield-pilot/cases.json").read_text())
+    cases = json.loads(Path("docs/research/technique/generation-yield-pilot/cases.json").read_text())
     protocol = {"status": "prepared", "candidate_code_identity": code_identity(Path.cwd()),
                 "cases": [{"id": row["id"], "input_sha256": row["input_sha256"]} for row in cases],
                 "provider": "ollama", "model": "scripted"}

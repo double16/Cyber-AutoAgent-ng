@@ -18,7 +18,7 @@ in research reports. Public-source fixtures should identify the source URL and r
 
 - [Technique forensics reference](technique/forensics-reference.md): current event map,
   interpretation boundaries and links to detailed technique lifecycle and calibration records.
-- [Technique review calibration](technique-review-calibration/README.md): new-policy baseline,
+- [Technique review calibration](technique/review-calibration/README.md): new-policy baseline,
   bounded matched-review protocol and pending fixture adjudication.
 
 ## Earlier reports
@@ -33,5 +33,5 @@ the reports alone.
 - [Purpose-aware correctness evaluation](technique/review-correctness-evaluation.md)
 - [Critique verdict evaluation](technique/critique-verdict-evaluation.md)
 
-- [Conditional generation-yield pilot](technique-generation-yield-pilot/README.md): three frozen,
+- [Conditional generation-yield pilot](technique/generation-yield-pilot/README.md): three frozen,
   draft-free requests; harness and new live allowance pending.

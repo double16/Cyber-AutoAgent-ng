@@ -259,7 +259,7 @@ def test_captured_empty_mapping_response_is_not_semantically_matched_from_prose(
     import json
     from pathlib import Path
 
-    path = Path("docs/research/technique-review-incremental-corrections/live-acceptance-1/"
+    path = Path("docs/research/technique/review-incremental-corrections/live-acceptance-1/"
                 "filesystem-correction-response.json")
     captured = json.loads(path.read_text())["response"]["content"][0]["toolUse"]["input"]
     patch = CriticCorrection.model_validate(captured)

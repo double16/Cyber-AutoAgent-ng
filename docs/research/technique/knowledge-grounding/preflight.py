@@ -9,14 +9,14 @@ from pathlib import Path
 from modules.techniques.review_calibration import CalibrationCase, code_identity
 
 research = Path(__file__).resolve().parent
-repo = research.parents[2]
+repo = research.parents[3]
 protocol = json.loads((research / "protocol.json").read_text())
 cases = [CalibrationCase.model_validate(row) for row in json.loads((research / "cases.json").read_text())]
 assert {case.id: case.digest() for case in cases} == {
     row["id"]: row["sha256"] for row in protocol["subjects"]
 }
 assert code_identity(repo) == protocol["candidate_code_identity"]
-trial = repo / "outputs/technique_review_trials/single-review-preflight-20261106-1"
+trial = repo / "outputs/technique_review_trials/knowledge-grounding-preflight-20261106-1"
 results = []
 for mode in ("native", "tool"):
     for index, case in enumerate(cases):

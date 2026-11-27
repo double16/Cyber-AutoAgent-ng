@@ -83,8 +83,8 @@ provider dispatch. The default command is scripted preflight only:
 ```bash
 LITELLM_LOCAL_MODEL_COST_MAP=True KMP_DUPLICATE_LIB_OK=TRUE UV_CACHE_DIR="$PWD/.uv-cache" \
   uv run python -m modules.techniques.generation_pilot_cli \
-    --protocol docs/research/technique-generation-yield-pilot/protocol.json \
-    --cases docs/research/technique-generation-yield-pilot/cases.json \
+    --protocol docs/research/technique/generation-yield-pilot/protocol.json \
+    --cases docs/research/technique/generation-yield-pilot/cases.json \
     --output outputs/technique_review_trials/NEW-UNUSED-DIRECTORY
 ```
 

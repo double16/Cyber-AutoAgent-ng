@@ -5,7 +5,7 @@ table. The controller retains unchanged rows rather than asking the model to rep
 Every disputed row requires an explicit disposition; every independent finding requires a
 referenced response. The assessor still judges the complete merged decision.
 
-The earlier trial remains in ../technique-review-purpose/ and is not relabeled as successful.
+The earlier trial remains in ../review-purpose/ and is not relabeled as successful.
 This is an output-contract change, not evidence that the model's semantic reasoning improved.
 No new live requests were made. The cumulative live request count remains 180.
 

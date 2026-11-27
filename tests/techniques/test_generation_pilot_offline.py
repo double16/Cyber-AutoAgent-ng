@@ -8,7 +8,7 @@ import pytest
 from modules.techniques.calibration_budget import CalibrationBudget
 from modules.techniques.generation_pilot_offline import GenerationContractModel, run_offline_generation
 
-CASES = json.loads(Path("docs/research/technique-generation-yield-pilot/cases.json").read_text())
+CASES = json.loads(Path("docs/research/technique/generation-yield-pilot/cases.json").read_text())
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case["id"])

@@ -139,7 +139,7 @@ def test_web_module_technique_documents_are_distinct_and_parseable():
 
 
 def test_brokencrystals_readme_coverage_crosswalk_is_complete_and_resolvable():
-    crosswalk = REPOSITORY / "docs/research/brokencrystals-web-technique-coverage.md"
+    crosswalk = REPOSITORY / "docs/research/technique/brokencrystals-web-technique-coverage.md"
     rows = [
         line
         for line in crosswalk.read_text(encoding="utf-8").splitlines()

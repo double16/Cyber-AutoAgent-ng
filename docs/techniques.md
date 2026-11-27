@@ -1136,8 +1136,8 @@ reasoning are allowed, while explicit attribution and source-required obligation
 Isolated experiments require hash-bound inputs, human labels, frozen code and complete diagnostics.
 Scripted native/schema-tool preflights test contracts, not semantics. Live allowances and failures
 belong to each recorded protocol; there is no universal production 30-request cap.
-See [single-review results](research/technique-single-reviewer/README.md) and
-[knowledge-grounding results](research/technique-knowledge-grounding/README.md).
+See [single-review results](research/technique/single-reviewer/README.md) and
+[knowledge-grounding results](research/technique/knowledge-grounding/README.md).
 The latest knowledge-grounding trial completed four of five decisions, with two matching frozen
 human labels and one invalid review exhausting its retry. It did not establish production acceptance
 or improved generation yield. Offline tests do not override those live failures.

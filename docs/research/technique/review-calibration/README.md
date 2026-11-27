@@ -30,7 +30,7 @@ retain every outcome, and stop at the cumulative request cap. An exhausted allow
 cases incomplete. Approval counts do not establish useful-document yield or production readiness.
 
 Existing failed trials remain failed. Their known harness errors and missing temporary artifacts are
-reported in the [earlier acceptance report](../technique/technique-generation-acceptance.md).
+reported in the [earlier acceptance report](../technique-generation-acceptance.md).
 
 ## Prepared fixtures
 
@@ -49,7 +49,7 @@ From the repository root, validate inputs without inference:
 
 ```bash
 UV_CACHE_DIR="$PWD/.uv-cache" uv run python -m modules.techniques.review_calibration \
-  docs/research/technique-review-calibration/corpus.json
+  docs/research/technique/review-calibration/corpus.json
 ```
 
 Use `--verify-transports --baseline-root <reconstructed-baseline>` for scripted checks. After all
