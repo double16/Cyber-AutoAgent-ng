@@ -134,13 +134,15 @@ def test_cache_binding_and_invalid_snapshots(prepared):
     assert p.events[-1]["type"] == "technique_warning"
 
 
-@pytest.mark.parametrize("enabled", ["false", "true", "yes", "0"])
-def test_opt_in_roles_and_default(prepared, monkeypatch, enabled):
+@pytest.mark.parametrize("enabled", ["", "false", "true", "yes", "0"])
+def test_automatic_delivery_roles_and_default(prepared, monkeypatch, enabled):
     monkeypatch.delenv("TECHNIQUE_AUTO_DELIVERY", raising=False)
-    assert not delivery.automatic_delivery_hooks(prepared.context, "task_executor")
+    assert delivery.DeliverySettings().enabled
+    assert delivery.DeliverySettings.from_environment().enabled
+    assert delivery.automatic_delivery_hooks(prepared.context, "task_executor")
     monkeypatch.setenv("TECHNIQUE_AUTO_DELIVERY", enabled)
     hooks = delivery.automatic_delivery_hooks(prepared.context, "task_executor")
-    assert bool(hooks) is (enabled in {"true", "yes"})
+    assert bool(hooks) is (enabled in {"", "true", "yes"})
     for role in ["task_evaluator", "task_prompt_builder", "task_prompt_critic"]:
         assert not delivery.automatic_delivery_hooks(prepared.context, role)
     monkeypatch.setenv("TECHNIQUE_AUTO_DELIVERY", "unknown")

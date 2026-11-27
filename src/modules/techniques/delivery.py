@@ -1,4 +1,4 @@
-"""Opt-in, task-local delivery of one existing methodology after normal prompt fitting."""
+"""Task-local delivery of one existing methodology after normal prompt fitting."""
 
 import json
 import logging
@@ -27,11 +27,11 @@ PREAMBLE = (
 
 
 class DeliverySettings(BaseModel):
-    enabled: bool = False
+    enabled: bool = True
 
     @classmethod
     def from_environment(cls):
-        return cls(enabled=os.environ.get("TECHNIQUE_AUTO_DELIVERY") or "false")
+        return cls(enabled=os.environ.get("TECHNIQUE_AUTO_DELIVERY") or "true")
 
 
 def task_uses(service, operation, task):

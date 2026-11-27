@@ -1216,20 +1216,20 @@ Unset or blank retrieval overrides preserve the defaults below.
 | `TECHNIQUE_DOCUMENT_LIMIT` | `10` | Eligible document shortlist, integer 1–50. |
 | `TECHNIQUE_TRIGGER_LIMIT` | `20` | Eligible trigger shortlist, integer 1–50. |
 | `TECHNIQUE_SEARCH_REPRESENTATION` | `full` | `full` Markdown or `summary` metadata and trigger descriptions. |
-| `TECHNIQUE_AUTO_DELIVERY` | `false` | Opt-in operation pilot: select and supply one existing guide per task when complete text fits. Boolean; blank preserves the default. |
+| `TECHNIQUE_AUTO_DELIVERY` | `true` | Select and supply one existing guide per task when complete text fits. Set `false` to disable. Boolean; blank preserves the default. |
 
 Changing representation creates a separate rebuildable index. Full Markdown remains authoritative
 for review and delivery in both modes. Invalid settings fail initialization.
 
-### Opt-in automatic delivery pilot
+### Automatic delivery
 
-Set `TECHNIQUE_AUTO_DELIVERY=true` in the operation environment to pilot automatic guidance delivery.
+Automatic guidance delivery is enabled by default. Set `TECHNIQUE_AUTO_DELIVERY=false` to disable it.
 The setting is forwarded by `docker/docker-compose.yml`. Restart the operation process after changing
-it. The default retains voluntary lookup. Standalone `caa-technique` lookup behavior is unchanged.
+it. Voluntary lookup remains available. Standalone `caa-technique` lookup behavior is unchanged.
 
 ```mermaid
 flowchart LR
-    R[Task recommendation] --> S[Opt-in existing-document selection]
+    R[Task recommendation] --> S[Existing-document selection]
     S --> F{Complete guide fits?}
     F -->|Yes| D[Record snapshot and supply advisory guide]
     F -->|No or unresolved| L[Continue with optional lookup]
