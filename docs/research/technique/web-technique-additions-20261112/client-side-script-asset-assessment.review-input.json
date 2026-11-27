@@ -1,0 +1,813 @@
+{
+  "document": "src/modules/operation_plugins/web/techniques/client-side-script-asset-assessment.md",
+  "sha256": "65228c97834a7cb6c2e950513b2f4461deea24a7a321b223fec113d758fa4953",
+  "requirements": [
+    {
+      "id": "method",
+      "description": "Full lifecycle assigned JavaScript asset assessment with multiple dependency/version identification per bundle, duplicate versions, package evidence locations and uncertainty, source maps within scope, conflicting clues, bundled presence versus runtime use, embedded sensitive material and referencing-page integrity. Use existing CVE applicability guidance; no version/SRI-only vulnerability inference. Include controls, cleanup, limits and semantic triggers.",
+      "kind": "authored_deliverable",
+      "grounding": "knowledge_allowed",
+      "origins": []
+    }
+  ],
+  "restrictions": [],
+  "contract": {
+    "acceptance_criteria": [
+      {
+        "id": "core:correctness",
+        "obligation": "Identify concrete technical errors, contradictions or consequential procedural flaws; model knowledge and reasoning are allowed without retrieved support.",
+        "origin": "shared_review_policy"
+      },
+      {
+        "id": "core:interpretation",
+        "obligation": "Outcome interpretations distinguish legitimate behavior from boundary violations.",
+        "origin": "shared_review_policy"
+      },
+      {
+        "id": "core:operational_sufficiency",
+        "obligation": "The requested method can be followed with explicit necessary prerequisites and controls.",
+        "origin": "shared_review_policy"
+      },
+      {
+        "id": "core:attribution",
+        "obligation": "Attribution accurately describes retained sources and limitations in the document, including metadata; body placement is required only when explicitly requested.",
+        "origin": "shared_review_policy"
+      },
+      {
+        "id": "core:restrictions",
+        "obligation": "The method complies with supplied restrictions and document policies.",
+        "origin": "shared_review_policy"
+      },
+      {
+        "grounding": "knowledge_allowed",
+        "id": "requirement:method",
+        "kind": "authored_deliverable",
+        "obligation": "Full lifecycle assigned JavaScript asset assessment with multiple dependency/version identification per bundle, duplicate versions, package evidence locations and uncertainty, source maps within scope, conflicting clues, bundled presence versus runtime use, embedded sensitive material and referencing-page integrity. Use existing CVE applicability guidance; no version/SRI-only vulnerability inference. Include controls, cleanup, limits and semantic triggers.",
+        "origin": "validated_request",
+        "requirement_id": "method"
+      }
+    ],
+    "reference_fields": {
+      "criterion_id": {
+        "allowed_values": [
+          "core:correctness",
+          "core:interpretation",
+          "core:operational_sufficiency",
+          "core:attribution",
+          "core:restrictions",
+          "requirement:method"
+        ]
+      },
+      "requirement_ids": {
+        "allowed_values": [
+          "method"
+        ],
+        "empty_list_allowed": true
+      }
+    }
+  },
+  "snapshot": {
+    "draft_references": [
+      {
+        "reference": "d65228c97834a:m1",
+        "path": "metadata.schema_version",
+        "value": 1
+      },
+      {
+        "reference": "d65228c97834a:m2",
+        "path": "metadata.title",
+        "value": "Client-side JavaScript assets and bundled dependencies"
+      },
+      {
+        "reference": "d65228c97834a:m3",
+        "path": "metadata.purpose",
+        "value": "Inventory dependencies and versions in assigned JavaScript assets and assess sensitive embedded content and script-integrity controls without equating clues with vulnerabilities."
+      },
+      {
+        "reference": "d65228c97834a:m4",
+        "path": "metadata.applicability[0]",
+        "value": "An assigned application loads JavaScript assets or supplies captured bundles whose dependencies, sensitive contents, or execution trust require assessment."
+      },
+      {
+        "reference": "d65228c97834a:m5",
+        "path": "metadata.phases[0]",
+        "value": "reconnaissance"
+      },
+      {
+        "reference": "d65228c97834a:m6",
+        "path": "metadata.phases[1]",
+        "value": "hypothesis_generation"
+      },
+      {
+        "reference": "d65228c97834a:m7",
+        "path": "metadata.phases[2]",
+        "value": "vulnerability_verification"
+      },
+      {
+        "reference": "d65228c97834a:m8",
+        "path": "metadata.phases[3]",
+        "value": "execution"
+      },
+      {
+        "reference": "d65228c97834a:m9",
+        "path": "metadata.phases[4]",
+        "value": "analysis"
+      },
+      {
+        "reference": "d65228c97834a:m10",
+        "path": "metadata.triggers[0].phases[0]",
+        "value": "reconnaissance"
+      },
+      {
+        "reference": "d65228c97834a:m11",
+        "path": "metadata.triggers[0].phases[1]",
+        "value": "hypothesis_generation"
+      },
+      {
+        "reference": "d65228c97834a:m12",
+        "path": "metadata.triggers[0].phases[2]",
+        "value": "vulnerability_verification"
+      },
+      {
+        "reference": "d65228c97834a:m13",
+        "path": "metadata.triggers[0].phases[3]",
+        "value": "execution"
+      },
+      {
+        "reference": "d65228c97834a:m14",
+        "path": "metadata.triggers[0].phases[4]",
+        "value": "analysis"
+      },
+      {
+        "reference": "d65228c97834a:m15",
+        "path": "metadata.triggers[0].when",
+        "value": "Assigned JavaScript assets or referencing pages require dependency/version inventory, embedded-content review, or script-integrity assessment."
+      },
+      {
+        "reference": "d65228c97834a:m16",
+        "path": "metadata.triggers[0].request",
+        "value": "Client-side JavaScript asset and bundled dependency assessment"
+      },
+      {
+        "reference": "d65228c97834a:m17",
+        "path": "metadata.triggers[0].signals_any",
+        "value": []
+      },
+      {
+        "reference": "d65228c97834a:m18",
+        "path": "metadata.sources[0].url",
+        "value": "https://www.w3.org/TR/2016/REC-SRI-20160623/"
+      },
+      {
+        "reference": "d65228c97834a:m19",
+        "path": "metadata.sources[0].title",
+        "value": "Subresource Integrity W3C Recommendation 23 June 2016"
+      },
+      {
+        "reference": "d65228c97834a:m20",
+        "path": "metadata.sources[0].retrieved_at",
+        "value": "2026-11-12"
+      },
+      {
+        "reference": "d65228c97834a:m21",
+        "path": "metadata.sources[0].selection_reason",
+        "value": "Defines integrity metadata and resource verification; pinned stable baseline avoids treating newer draft controls as universally implemented."
+      },
+      {
+        "reference": "d65228c97834a:m22",
+        "path": "metadata.sources[1].url",
+        "value": "https://cheatsheetseries.owasp.org/cheatsheets/Third_Party_Javascript_Management_Cheat_Sheet.html"
+      },
+      {
+        "reference": "d65228c97834a:m23",
+        "path": "metadata.sources[1].title",
+        "value": "OWASP Third Party Javascript Management Cheat Sheet"
+      },
+      {
+        "reference": "d65228c97834a:m24",
+        "path": "metadata.sources[1].retrieved_at",
+        "value": "2026-11-12"
+      },
+      {
+        "reference": "d65228c97834a:m25",
+        "path": "metadata.sources[1].selection_reason",
+        "value": "Explains third-party script execution trust and integrity or isolation control background."
+      },
+      {
+        "reference": "d65228c97834a:m26",
+        "path": "metadata.sources[2].url",
+        "value": "https://cheatsheetseries.owasp.org/cheatsheets/Vulnerable_Dependency_Management_Cheat_Sheet.html"
+      },
+      {
+        "reference": "d65228c97834a:m27",
+        "path": "metadata.sources[2].title",
+        "value": "OWASP Vulnerable Dependency Management Cheat Sheet"
+      },
+      {
+        "reference": "d65228c97834a:m28",
+        "path": "metadata.sources[2].retrieved_at",
+        "value": "2026-11-12"
+      },
+      {
+        "reference": "d65228c97834a:m29",
+        "path": "metadata.sources[2].selection_reason",
+        "value": "Supplies dependency risk assessment background; individual component advisories and affected versions need separate verification."
+      },
+      {
+        "reference": "d65228c97834a:m30",
+        "path": "metadata.active",
+        "value": true
+      },
+      {
+        "reference": "d65228c97834a:m31",
+        "path": "metadata.source_coverage",
+        "value": "References describe integrity, execution trust, and contextual dependency risk. Bundle identification, provenance comparisons, and synthetic-content controls are original knowledge-allowed methodology, not individually source-verified. Source maps and banners are identification leads, not authoritative affectedness evidence. References establish no target vulnerability or component-specific affected version."
+      },
+      {
+        "reference": "d65228c97834a:b1",
+        "path": "body.line[1]",
+        "value": ""
+      },
+      {
+        "reference": "d65228c97834a:b2",
+        "path": "body.line[2]",
+        "value": "# Client-side JavaScript assets and bundled dependencies"
+      },
+      {
+        "reference": "d65228c97834a:b3",
+        "path": "body.line[3]",
+        "value": ""
+      },
+      {
+        "reference": "d65228c97834a:b4",
+        "path": "body.line[4]",
+        "value": "## Applicability and prerequisites"
+      },
+      {
+        "reference": "d65228c97834a:b5",
+        "path": "body.line[5]",
+        "value": ""
+      },
+      {
+        "reference": "d65228c97834a:b6",
+        "path": "body.line[6]",
+        "value": "Use assigned script assets, captures, and referencing pages only. Record which application subject"
+      },
+      {
+        "reference": "d65228c97834a:b7",
+        "path": "body.line[7]",
+        "value": "loads each asset; a different script elsewhere in a shared bundle inventory does not establish a"
+      },
+      {
+        "reference": "d65228c97834a:b8",
+        "path": "body.line[8]",
+        "value": "connection. Resolve permitted hosts, source-map access, browser execution, identities, and state"
+      },
+      {
+        "reference": "d65228c97834a:b9",
+        "path": "body.line[9]",
+        "value": "changes before retrieving new material. A referenced CDN or source-map URL does not extend scope."
+      },
+      {
+        "reference": "d65228c97834a:b10",
+        "path": "body.line[10]",
+        "value": "Use HTTP capture, bounded offline parsing/search, and a disposable browser or equivalents. Preserve"
+      },
+      {
+        "reference": "d65228c97834a:b11",
+        "path": "body.line[11]",
+        "value": "configured HTTP/HTTPS proxy use where supported. Do not execute downloaded bundles as local scripts"
+      },
+      {
+        "reference": "d65228c97834a:b12",
+        "path": "body.line[12]",
+        "value": "or fetch dependencies merely because a parser discovers a URL. Local files are operation evidence"
+      },
+      {
+        "reference": "d65228c97834a:b13",
+        "path": "body.line[13]",
+        "value": "or tooling, never an alternative route into the assessed target."
+      },
+      {
+        "reference": "d65228c97834a:b14",
+        "path": "body.line[14]",
+        "value": ""
+      },
+      {
+        "reference": "d65228c97834a:b15",
+        "path": "body.line[15]",
+        "value": "## Accepted baselines and controls"
+      },
+      {
+        "reference": "d65228c97834a:b16",
+        "path": "body.line[16]",
+        "value": ""
+      },
+      {
+        "reference": "d65228c97834a:b17",
+        "path": "body.line[17]",
+        "value": "Preserve the original captured bytes and acquisition context, and work on a separate decoded or"
+      },
+      {
+        "reference": "d65228c97834a:b18",
+        "path": "body.line[18]",
+        "value": "formatted copy with offsets traceable to the original. Capture a normal page load and the actual"
+      },
+      {
+        "reference": "d65228c97834a:b19",
+        "path": "body.line[19]",
+        "value": "script responses when authorized. A valid response body, content type, stable hash, or successful"
+      },
+      {
+        "reference": "d65228c97834a:b20",
+        "path": "body.line[20]",
+        "value": "parser establishes availability only. Compression, cache variation, missing ETags, and differing"
+      },
+      {
+        "reference": "d65228c97834a:b21",
+        "path": "body.line[21]",
+        "value": "wire lengths do not by themselves make a script unassessable."
+      },
+      {
+        "reference": "d65228c97834a:b22",
+        "path": "body.line[22]",
+        "value": ""
+      },
+      {
+        "reference": "d65228c97834a:b23",
+        "path": "body.line[23]",
+        "value": "Use synthetic content, known package references, and an owned test page where comparisons need"
+      },
+      {
+        "reference": "d65228c97834a:b24",
+        "path": "body.line[24]",
+        "value": "them. Keep normal page behavior as baseline. Missing runtime access or source maps limits precision;"
+      },
+      {
+        "reference": "d65228c97834a:b25",
+        "path": "body.line[25]",
+        "value": "it does not erase a useful static inventory or establish absence of dependencies."
+      },
+      {
+        "reference": "d65228c97834a:b26",
+        "path": "body.line[26]",
+        "value": ""
+      },
+      {
+        "reference": "d65228c97834a:b27",
+        "path": "body.line[27]",
+        "value": "## Reconnaissance"
+      },
+      {
+        "reference": "d65228c97834a:b28",
+        "path": "body.line[28]",
+        "value": ""
+      },
+      {
+        "reference": "d65228c97834a:b29",
+        "path": "body.line[29]",
+        "value": "1. Record each assigned asset URL or artifact reference, acquisition time, status, representation"
+      },
+      {
+        "reference": "d65228c97834a:b30",
+        "path": "body.line[30]",
+        "value": "   decoding, body hash, referencing page, script element attributes, and observed loading context."
+      },
+      {
+        "reference": "d65228c97834a:b31",
+        "path": "body.line[31]",
+        "value": "   Distinguish first-party code, vendored code, third-party origins, workers, modules, and lazy chunks"
+      },
+      {
+        "reference": "d65228c97834a:b32",
+        "path": "body.line[32]",
+        "value": "   only as supported by evidence. Follow explicitly assigned chunks/references within scope; record"
+      },
+      {
+        "reference": "d65228c97834a:b33",
+        "path": "body.line[33]",
+        "value": "   uninspected chunks and avoid claiming whole-application coverage from one bundle."
+      },
+      {
+        "reference": "d65228c97834a:b34",
+        "path": "body.line[34]",
+        "value": "2. Search the entire available bundle for all identifiable dependencies, not just the first library."
+      },
+      {
+        "reference": "d65228c97834a:b35",
+        "path": "body.line[35]",
+        "value": "   Inspect banners, license notices, embedded package metadata, module identifiers, recognizable"
+      },
+      {
+        "reference": "d65228c97834a:b36",
+        "path": "body.line[36]",
+        "value": "   library code, and explicitly authorized source maps. Parse safely offline without running bundle"
+      },
+      {
+        "reference": "d65228c97834a:b37",
+        "path": "body.line[37]",
+        "value": "   code. Map formatted or source-map locations back to the actual captured bundle where possible."
+      },
+      {
+        "reference": "d65228c97834a:b38",
+        "path": "body.line[38]",
+        "value": "3. Create a per-occurrence inventory: component/package and ecosystem, proposed version or range,"
+      },
+      {
+        "reference": "d65228c97834a:b39",
+        "path": "body.line[39]",
+        "value": "   asset/hash, evidence offset or module/source-map location, identification method, confidence,"
+      },
+      {
+        "reference": "d65228c97834a:b40",
+        "path": "body.line[40]",
+        "value": "   conflicting clues, and unresolved conditions. Preserve distinct versions of the same package."
+      },
+      {
+        "reference": "d65228c97834a:b41",
+        "path": "body.line[41]",
+        "value": "   Deduplicate corroborating clues for one occurrence without merging genuinely separate copies."
+      },
+      {
+        "reference": "d65228c97834a:b42",
+        "path": "body.line[42]",
+        "value": "4. Corroborate versions using independent clues or a trusted known release when available. A banner"
+      },
+      {
+        "reference": "d65228c97834a:b43",
+        "path": "body.line[43]",
+        "value": "   can be stale, a license list can include build-only packages, and minification/forking can defeat"
+      },
+      {
+        "reference": "d65228c97834a:b44",
+        "path": "body.line[44]",
+        "value": "   signatures. Do not apply the application's version to every dependency or invent exact versions"
+      },
+      {
+        "reference": "d65228c97834a:b45",
+        "path": "body.line[45]",
+        "value": "   from a generic code match. Report unknown versions and conflicting evidence explicitly."
+      },
+      {
+        "reference": "d65228c97834a:b46",
+        "path": "body.line[46]",
+        "value": "5. Separately inventory potential secrets, internal references, source-map contents, and public"
+      },
+      {
+        "reference": "d65228c97834a:b47",
+        "path": "body.line[47]",
+        "value": "   configuration. Record minimal supporting locations without exposing real secrets in reports."
+      },
+      {
+        "reference": "d65228c97834a:b48",
+        "path": "body.line[48]",
+        "value": "   A public client identifier, endpoint name, example key, or high-entropy string is only a lead."
+      },
+      {
+        "reference": "d65228c97834a:b49",
+        "path": "body.line[49]",
+        "value": ""
+      },
+      {
+        "reference": "d65228c97834a:b50",
+        "path": "body.line[50]",
+        "value": "## Hypothesis generation"
+      },
+      {
+        "reference": "d65228c97834a:b51",
+        "path": "body.line[51]",
+        "value": ""
+      },
+      {
+        "reference": "d65228c97834a:b52",
+        "path": "body.line[52]",
+        "value": "1. Use recorded evidence only; fetch no new asset or advisory, execute no page, and test no credential"
+      },
+      {
+        "reference": "d65228c97834a:b53",
+        "path": "body.line[53]",
+        "value": "   during this phase. Design future checks for unresolved inventory, sensitivity, execution, and"
+      },
+      {
+        "reference": "d65228c97834a:b54",
+        "path": "body.line[54]",
+        "value": "   integrity conditions rather than declaring completed results."
+      },
+      {
+        "reference": "d65228c97834a:b55",
+        "path": "body.line[55]",
+        "value": "2. Separate hypotheses for embedded sensitive values, a specific component's applicable vulnerability,"
+      },
+      {
+        "reference": "d65228c97834a:b56",
+        "path": "body.line[56]",
+        "value": "   and a script trust/integrity failure. For CVEs, use the existing known-component/CVE applicability"
+      },
+      {
+        "reference": "d65228c97834a:b57",
+        "path": "body.line[57]",
+        "value": "   guidance: establish package identity, advisory conditions, affected code path, and mitigations."
+      },
+      {
+        "reference": "d65228c97834a:b58",
+        "path": "body.line[58]",
+        "value": "3. Plan normal and controlled comparisons with explicit outcomes. Distinguish bundled presence,"
+      },
+      {
+        "reference": "d65228c97834a:b59",
+        "path": "body.line[59]",
+        "value": "   loaded module, reachable function, and exploitable behavior. Plan execution tracing only if needed"
+      },
+      {
+        "reference": "d65228c97834a:b60",
+        "path": "body.line[60]",
+        "value": "   and authorized. Neither an old-looking version nor a missing integrity attribute proves impact."
+      },
+      {
+        "reference": "d65228c97834a:b61",
+        "path": "body.line[61]",
+        "value": ""
+      },
+      {
+        "reference": "d65228c97834a:b62",
+        "path": "body.line[62]",
+        "value": "## Vulnerability verification"
+      },
+      {
+        "reference": "d65228c97834a:b63",
+        "path": "body.line[63]",
+        "value": ""
+      },
+      {
+        "reference": "d65228c97834a:b64",
+        "path": "body.line[64]",
+        "value": "1. Recheck the relevant captured occurrence and referencing page against the current assigned response"
+      },
+      {
+        "reference": "d65228c97834a:b65",
+        "path": "body.line[65]",
+        "value": "   when permitted. Explain build changes and cache differences; retain both revisions rather than"
+      },
+      {
+        "reference": "d65228c97834a:b66",
+        "path": "body.line[66]",
+        "value": "   silently combining them. Confirm runtime use only through an authorized normal interaction or"
+      },
+      {
+        "reference": "d65228c97834a:b67",
+        "path": "body.line[67]",
+        "value": "   instrumented disposable context; unexecuted bundled code remains an inventory observation."
+      },
+      {
+        "reference": "d65228c97834a:b68",
+        "path": "body.line[68]",
+        "value": "2. For sensitive-content claims, establish the intended audience and actual sensitive meaning."
+      },
+      {
+        "reference": "d65228c97834a:b69",
+        "path": "body.line[69]",
+        "value": "   Prefer an owner-provided synthetic canary or test value, compared with a public/example-value"
+      },
+      {
+        "reference": "d65228c97834a:b70",
+        "path": "body.line[70]",
+        "value": "   control. Verify that the excluded actor can retrieve the value from the assigned asset. Do not"
+      },
+      {
+        "reference": "d65228c97834a:b71",
+        "path": "body.line[71]",
+        "value": "   redeem real embedded credentials or access unrelated systems to determine whether they work."
+      },
+      {
+        "reference": "d65228c97834a:b72",
+        "path": "body.line[72]",
+        "value": "3. For integrity assessment, inspect the actual referencing element, integrity metadata, resource"
+      },
+      {
+        "reference": "d65228c97834a:b73",
+        "path": "body.line[73]",
+        "value": "   bytes, origin/CORS behavior, and browser outcome. Missing SRI alone is a configuration observation;"
+      },
+      {
+        "reference": "d65228c97834a:b74",
+        "path": "body.line[74]",
+        "value": "   determine what attacker-controlled modification path and protected execution effect the claim"
+      },
+      {
+        "reference": "d65228c97834a:b75",
+        "path": "body.line[75]",
+        "value": "   requires. CSP nonces do not validate the bytes of an otherwise trusted external script."
+      },
+      {
+        "reference": "d65228c97834a:b76",
+        "path": "body.line[76]",
+        "value": "4. Where an owned isolated page and fixture asset are authorized, compare a matching integrity hash"
+      },
+      {
+        "reference": "d65228c97834a:b77",
+        "path": "body.line[77]",
+        "value": "   with a deliberately mismatched hash while preserving loading conditions. Use harmless marker code"
+      },
+      {
+        "reference": "d65228c97834a:b78",
+        "path": "body.line[78]",
+        "value": "   and observe execution versus browser rejection, with a normal-load control. This demonstrates the"
+      },
+      {
+        "reference": "d65228c97834a:b79",
+        "path": "body.line[79]",
+        "value": "   browser control under those conditions, not an ability to modify the target's script. Do not"
+      },
+      {
+        "reference": "d65228c97834a:b80",
+        "path": "body.line[80]",
+        "value": "   tamper with production/CDN resources or infer target exploitability from a local demonstration."
+      },
+      {
+        "reference": "d65228c97834a:b81",
+        "path": "body.line[81]",
+        "value": "5. Leave dependency exploitability to its specific controlled method. Scanner labels, absent runtime"
+      },
+      {
+        "reference": "d65228c97834a:b82",
+        "path": "body.line[82]",
+        "value": "   errors, unobserved function calls, or an available patch are insufficient conclusions about the"
+      },
+      {
+        "reference": "d65228c97834a:b83",
+        "path": "body.line[83]",
+        "value": "   tested code path. Preserve reachability, configuration, and backport uncertainty explicitly."
+      },
+      {
+        "reference": "d65228c97834a:b84",
+        "path": "body.line[84]",
+        "value": ""
+      },
+      {
+        "reference": "d65228c97834a:b85",
+        "path": "body.line[85]",
+        "value": "## Execution"
+      },
+      {
+        "reference": "d65228c97834a:b86",
+        "path": "body.line[86]",
+        "value": ""
+      },
+      {
+        "reference": "d65228c97834a:b87",
+        "path": "body.line[87]",
+        "value": "1. After a boundary is verified and minimal impact is authorized, preserve one synthetic sensitive"
+      },
+      {
+        "reference": "d65228c97834a:b88",
+        "path": "body.line[88]",
+        "value": "   value delivered to the excluded actor or one harmless script marker through the verified trust"
+      },
+      {
+        "reference": "d65228c97834a:b89",
+        "path": "body.line[89]",
+        "value": "   failure. Do not extract bulk secrets, alter third-party assets, or chain into other systems."
+      },
+      {
+        "reference": "d65228c97834a:b90",
+        "path": "body.line[90]",
+        "value": "2. Remove test fixtures and instrumentation, close disposable browser sessions, and invalidate test"
+      },
+      {
+        "reference": "d65228c97834a:b91",
+        "path": "body.line[91]",
+        "value": "   credentials where applicable. Restore authorized temporary changes and verify normal page loading."
+      },
+      {
+        "reference": "d65228c97834a:b92",
+        "path": "body.line[92]",
+        "value": "   Preserve unconfirmed cleanup as a limitation."
+      },
+      {
+        "reference": "d65228c97834a:b93",
+        "path": "body.line[93]",
+        "value": ""
+      },
+      {
+        "reference": "d65228c97834a:b94",
+        "path": "body.line[94]",
+        "value": "## Analysis, evidence, and limitations"
+      },
+      {
+        "reference": "d65228c97834a:b95",
+        "path": "body.line[95]",
+        "value": ""
+      },
+      {
+        "reference": "d65228c97834a:b96",
+        "path": "body.line[96]",
+        "value": "Deliver the multi-component inventory with every supported version, conflicting clue, unresolved"
+      },
+      {
+        "reference": "d65228c97834a:b97",
+        "path": "body.line[97]",
+        "value": "version, and uninspected asset. For each candidate distinguish identification confidence, actual"
+      },
+      {
+        "reference": "d65228c97834a:b98",
+        "path": "body.line[98]",
+        "value": "runtime use, advisory applicability, and demonstrated impact. A bundle containing two versions is"
+      },
+      {
+        "reference": "d65228c97834a:b99",
+        "path": "body.line[99]",
+        "value": "not automatically using both; a source map or license notice need not match the served build."
+      },
+      {
+        "reference": "d65228c97834a:b100",
+        "path": "body.line[100]",
+        "value": ""
+      },
+      {
+        "reference": "d65228c97834a:b101",
+        "path": "body.line[101]",
+        "value": "Retain assigned-subject provenance, raw/decoded representation relation, hashes, supporting locations,"
+      },
+      {
+        "reference": "d65228c97834a:b102",
+        "path": "body.line[102]",
+        "value": "identification references, browser/page context, actual controls, and cleanup. Keep exact secrets only"
+      },
+      {
+        "reference": "d65228c97834a:b103",
+        "path": "body.line[103]",
+        "value": "in sensitive internal evidence and redact report/shareable output. Do not strip the evidence needed"
+      },
+      {
+        "reference": "d65228c97834a:b104",
+        "path": "body.line[104]",
+        "value": "for later correlation merely because the asset is static."
+      },
+      {
+        "reference": "d65228c97834a:b105",
+        "path": "body.line[105]",
+        "value": ""
+      },
+      {
+        "reference": "d65228c97834a:b106",
+        "path": "body.line[106]",
+        "value": "Static analysis cannot prove all runtime paths, exhaustive dependency absence, server-side behavior,"
+      },
+      {
+        "reference": "d65228c97834a:b107",
+        "path": "body.line[107]",
+        "value": "or supply-chain compromise. Lack of strong ETag, script MIME label, public accessibility, and zero"
+      },
+      {
+        "reference": "d65228c97834a:b108",
+        "path": "body.line[108]",
+        "value": "request inputs are not blanket exclusion criteria. Scope, unreadable evidence, unavailable maps, and"
+      },
+      {
+        "reference": "d65228c97834a:b109",
+        "path": "body.line[109]",
+        "value": "insufficient controls remain bounded limitations rather than evidence of safety or vulnerability."
+      },
+      {
+        "reference": "d65228c97834a:b110",
+        "path": "body.line[110]",
+        "value": ""
+      },
+      {
+        "reference": "d65228c97834a:b111",
+        "path": "body.line[111]",
+        "value": "## Trigger examples and non-examples"
+      },
+      {
+        "reference": "d65228c97834a:b112",
+        "path": "body.line[112]",
+        "value": ""
+      },
+      {
+        "reference": "d65228c97834a:b113",
+        "path": "body.line[113]",
+        "value": "Matching: an assigned application script contains multiple possible package/version clues, or its"
+      },
+      {
+        "reference": "d65228c97834a:b114",
+        "path": "body.line[114]",
+        "value": "referencing page needs integrity or embedded-content assessment. Non-matching: library names in an"
+      },
+      {
+        "reference": "d65228c97834a:b115",
+        "path": "body.line[115]",
+        "value": "unrelated shared artifact, a vendor filename without asset evidence, or an unassigned source-map"
+      },
+      {
+        "reference": "d65228c97834a:b116",
+        "path": "body.line[116]",
+        "value": "host. Select the current structured phase; a recommendation does not establish vulnerability or"
+      },
+      {
+        "reference": "d65228c97834a:b117",
+        "path": "body.line[117]",
+        "value": "expand the assigned subject."
+      }
+    ]
+  }
+}

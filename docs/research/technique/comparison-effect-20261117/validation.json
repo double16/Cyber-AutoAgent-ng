@@ -1,0 +1,44 @@
+{
+  "tests_passed": 24,
+  "ruff": "passed",
+  "diff_check": "passed",
+  "files": {
+    "docs/research/technique/comparison-effect-20261117/run.py": {
+      "sha256": "92d2664c420841e522ea9410c7bf4fd5302296d4e333c19b0e574d981ca390db",
+      "statement_percent": 89.88764044943821,
+      "branch_percent": 95.45454545454545
+    },
+    "docs/research/technique/full-controller-20261115/run.py": {
+      "sha256": "87264cf6eaa57443f88f4ae2a59583e0103f8b7803f305487a4c54faafe1be20",
+      "statement_percent": 95.34883720930233,
+      "branch_percent": 83.33333333333333
+    }
+  },
+  "application_source_changed_in_followup": true,
+  "diagnostic_structured_invocations": 27,
+  "transport_generation_count": "not instrumented for static diagnostics",
+  "controller_routing_tests_passed": 17,
+  "research_tests_passed": 24,
+  "full_repository_suite": {
+    "passed": 8227,
+    "skipped": 46,
+    "deselected": 89,
+    "warnings": 29,
+    "seconds": 743.01,
+    "entry_point": ".github/scripts/run-python-coverage.sh"
+  },
+  "coverage_floor": "All measured Python files meet 80% statement and branch floors",
+  "controller_source": {
+    "path": "src/modules/agents/multi_agent_workflow.py",
+    "sha256": "bf4553e38946e349396d36858a30243b069e4af702a61dfcf26a8ed7f70f763c",
+    "statement_percent": 90.74756229685808,
+    "branch_percent": 85.02239641657334
+  },
+  "corrected_harness_live_run": {
+    "generation_requests": 38,
+    "task_status": "done",
+    "accepted_supported_correct": true,
+    "feedback_score": 1,
+    "routing_fix_present_during_live_run": false
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "readiness_tests": 21,
+  "ruff": "passed",
+  "diff_check": "passed",
+  "production_full_suite": {
+    "passed": 8381,
+    "skipped": 47,
+    "deselected": 89,
+    "coverage_log": "/tmp/task-relevance-post-revert-coverage.log"
+  },
+  "changed_production_file_coverage_floor": "80% line and branch passed",
+  "model_requests": 142,
+  "request_cap": 360,
+  "deployment": "not performed"
+}

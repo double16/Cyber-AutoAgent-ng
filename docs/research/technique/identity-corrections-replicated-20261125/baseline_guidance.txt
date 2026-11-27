@@ -1,0 +1,39 @@
+Keep observed facts, assumptions and unresolved prerequisites explicit. Identify expected legitimate behavior and the suspected security consequence. What observation would distinguish that consequence from legitimate behavior? Use a baseline, a controlled variation and the evidence needed to tell them apart. Supporting and refuting outcomes must address the same claimed consequence; an ordinary intermediate effect is not that consequence. Future identity comparisons must agree with declared authentication requirements, even when credentials are not yet available. Successful execution or a different response establishes only what was observed. Establish relevant policy from documentation, configuration or independently known authorized and denied baselines. Unknown implementation details can become future checks when observed behavior motivates a conditional proposal. Observed client input and data flow can provide that basis without confirmed server handling. Preserve uncertainty until the distinguishing evidence is available. 
+## Hypothesis semantic rubric
+Use frozen inventory and retained source artifacts; inspect explicitly linked retained resources when
+needed. Public research may inform future tests. Do not fetch the live target or execute proposed tests.
+Name concrete necessary missing evidence as a prerequisite gap, not as a negative observation.
+For a source-derived input with unresolved downstream use, focus inspection on its recorded source
+location and directly linked consumers. Follow argument, return-value or field transfers to the
+relevant processing boundary; save the source references, observed flow and remaining uncertainty.
+An unresolved consumer is an inspection question, not evidence that no processing boundary exists.
+Stop when the assigned mechanism can be assessed; exhaustive source inspection is unnecessary.
+Grounding concerns the observed basis, not proof of a proposed outcome. Keep observed facts,
+conditional mechanism assumptions and future outcomes distinct. A source-backed mechanism may be
+proposed conditionally when relevant observations motivate it and future checks establish whether
+it applies; do not demand observed exploitation, protected response content or confirmed server-side
+implementation merely to retain such a proposal. An unrelated or invented observation remains a defect.
+Grounding: connect inspected observations to the assigned subject, proposed mechanism, and intended
+trust boundary. Distinguish observed facts from unresolved preconditions. An explicitly evidenced link
+to a related resource can ground a workflow hypothesis; the tested action need not use the subject's
+literal path. For example, a page can call a backend API. Unrelated resources remain outside the
+assignment. Inferred GET operations and unrecorded inputs do not restrict a subject to its page response.
+Positive expectations describe the claimed security consequence.
+Under test_discrimination, compare positive expectations with legitimate and control outcomes.
+Explain any missing distinction in the existing check reason. For example, accepting an upload body
+is ordinary file-write behavior; a mass-assignment test needs an unauthorized effect on a protected
+property, with structured binding established as a future prerequisite if unknown. A SPA shell alone
+cannot establish unauthorized access; distinguish access to protected data or actions. For network
+and filesystem checks, compare access against the applicable connection policy or file entitlement.
+Identity requirements: declared identities and comparisons must match the proposed future tests.
+Authenticated identity comparison required by this work. none requests no comparison between authenticated accounts, roles, or tenants; it can still require authenticated sessions. Anonymous controls are separate from this mode.
+Missing execution credentials alone do not invalidate a future test plan.
+Retain grounded conditional hypotheses when proposed controls can resolve uncertainty;
+completed exploitation is not required. Request revise for repairable tests and withdraw for an
+ungrounded premise.
+For repairable grounding or identity requirements, request revise. Explain the deficient claim or test
+and the missing distinction in the existing check reason; do not demand execution of future tests.
+Request inspection only for concrete necessary evidence that is missing or unexamined. A reasoned
+empty disposition is valid when inspected observations support no security-relevant test. Apply this
+rubric to the assigned mechanism, not a keyword checklist. Python owns bookkeeping; semantic judgments
+belong to the model.

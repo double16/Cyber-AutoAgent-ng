@@ -1,0 +1,790 @@
+{
+  "status": "failed",
+  "runtime_identity": "a17349c14faced6e8c9e18789028880e61a2bd01bd073eaa64a524d485c1737a",
+  "runtime_identity_rechecked": true,
+  "provider": "ollama",
+  "model": "muse-glimmer:30b",
+  "review_mode": "single",
+  "counts": {
+    "limit": 21,
+    "requests": 16,
+    "roles": 6
+  },
+  "roles": [
+    "technique_critic",
+    "technique_critic",
+    "technique_critic",
+    "technique_critic",
+    "technique_critic",
+    "technique_critic"
+  ],
+  "review_validation_errors": [
+    {
+      "timestamp": "2026-11-06T20:10:53.684696+00:00",
+      "run_id": "112a9fd3-1647-4e69-85a1-bab2e4f327e3",
+      "stage": "critique",
+      "status": "invalid_review",
+      "snapshot_id": "64288cb0469771ccec102314ac93c998c2beb44a91ea2ebc8b1df9e2761a4b1d",
+      "retry_number": 0,
+      "reason": "Unknown retained passage reference",
+      "type": "technique_build_progress",
+      "level": "info"
+    },
+    {
+      "timestamp": "2026-11-06T20:13:10.590693+00:00",
+      "run_id": "112a9fd3-1647-4e69-85a1-bab2e4f327e3",
+      "stage": "critique",
+      "status": "invalid_review",
+      "snapshot_id": "64288cb0469771ccec102314ac93c998c2beb44a91ea2ebc8b1df9e2761a4b1d",
+      "retry_number": 1,
+      "reason": "Unknown retained passage reference",
+      "type": "technique_build_progress",
+      "level": "info"
+    }
+  ],
+  "cases_completed": 4,
+  "valid_label_agreements": 2,
+  "prior_live_requests": 227,
+  "cumulative_live_requests": 243,
+  "running": false,
+  "cases": [
+    {
+      "case": "human-network",
+      "expected_label": "acceptable",
+      "valid_label_agreement": false,
+      "outcome": {
+        "status": "completed",
+        "review": {
+          "approved": false,
+          "decision_origin": "legacy",
+          "issue_dispositions": [],
+          "category": "authored_content",
+          "reason": "The draft provides a reusable, policy-based connectivity comparison framework with identity binding, controlled baseline vs variation, controls, evidence requirements and interpretation guidance. It correctly limits source claims to pf rule precedence and state creation and acknowledges implementation-specific gaps. The methodology is generally aligned with the request for a reusable description without target execution or command syntax, but it presents pf-specific evaluation semantics as universal procedural facts, which risks misleading application to non-pf policy systems.",
+          "issues": [
+            {
+              "id": "issue:1",
+              "category": "authored_content",
+              "criterion_id": "core:correctness",
+              "material_impact": "Users applying the method to non-pf or first-match policy systems will misinterpret evaluation order and state creation expectations, leading to incorrect baseline/variation design and false boundary-violation conclusions.",
+              "problem": "Procedure universalizes OpenBSD pf-specific semantics as generic requirements.",
+              "requested_correction": "Qualify that 'last matching rule decides action' and 'first packet matching a pass rule creates a state entry' are pf-specific examples supported by the retained source, and reframe steps 1.1, 3.3, 4 statefulness control and evidence requirements as generic placeholders with explicit policy-system-specific semantics to be defined during future application.",
+              "requirement_ids": [],
+              "source_urls": [
+                "https://man.openbsd.org/pf.conf"
+              ],
+              "draft_references": [
+                "da0191fe62909:b16",
+                "da0191fe62909:b31",
+                "da0191fe62909:b38",
+                "da0191fe62909:b45"
+              ],
+              "absence_scope": "inspected_passages",
+              "draft_excerpt": "1.1 Record the ordered policy set. Note that evaluation order matters and the last matching rule decides the action taken.\n- First-packet decision and state entry creation timestamp\n- **Statefulness control**: Observe first-packet state creation on pass and verify subsequent packets follow state, not re-evaluate policy.\n- Stateful evidence: state table entry creation record for first matching pass, including tuple and lifetime.",
+              "passage_ids": [
+                "bebc0239c72c87fd30b739ed0ac19e28b0c2077e70aa6c0d2f1e298eccd92bb1"
+              ],
+              "passages": [
+                {
+                  "url": "https://man.openbsd.org/pf.conf",
+                  "start": 0,
+                  "end": 146
+                }
+              ],
+              "absence_of_support": ""
+            },
+            {
+              "id": "issue:2",
+              "category": "authored_content",
+              "criterion_id": "core:operational_sufficiency",
+              "material_impact": "The method cannot be followed reproducibly because the binding mechanism, trust assumptions, and mapping of identity attributes to enforcement points are stated as prerequisites but not operationalized in the procedure steps.",
+              "problem": "Usable procedure relies on implicit clarity of identity binding and observation capability without explicit definition of what must be documented for a given enforcement point.",
+              "requested_correction": "Add explicit procedural sub-steps to document the identity attribute, binding enforcement point, trust assumptions, and how binding is verified per observation, keeping description generic and without command syntax.",
+              "requirement_ids": [],
+              "source_urls": [],
+              "draft_references": [
+                "da0191fe62909:b9",
+                "da0191fe62909:b17",
+                "da0191fe62909:b29"
+              ],
+              "absence_scope": "inspected_passages",
+              "draft_excerpt": "2. **Identity binding model**: Explicit mapping of identity attributes to enforcement points, e.g., source identifier, user context, device tag. The binding mechanism and its trust assumptions must be stated.\n1.2 Define the identity binding for the test: which attribute is used to select the rule set and how the binding is enforced at the enforcement point.\n- Identity attributes used for binding",
+              "passage_ids": [],
+              "passages": [],
+              "absence_of_support": ""
+            }
+          ],
+          "suggestions": [
+            {
+              "improvement": "Make the source attribution explicit in the body for the two pf claims, e.g., note they are illustrative for OpenBSD pf per the retained manual, and keep the generic methodology separate from the example.",
+              "draft_references": [],
+              "requirement_ids": []
+            },
+            {
+              "improvement": "Clarify that retrieved_at is empty in metadata and either populate it or note the limitation in attribution.",
+              "draft_references": [],
+              "requirement_ids": []
+            },
+            {
+              "improvement": "Consider adding a template comparison table schema in suggestions for evidence collection without prescribing tool-specific fields.",
+              "draft_references": [],
+              "requirement_ids": []
+            }
+          ],
+          "interpretations": [],
+          "no_security_checks_reason": ""
+        },
+        "counts": {
+          "limit": 21,
+          "requests": 3,
+          "roles": 1
+        }
+      },
+      "outcome_sha256": "1a82cbaa96f696fba46c95370e4dbfab50b787ecd7e0c852d2f1814f06806bff",
+      "controller_events": [
+        {
+          "timestamp": "2026-11-06T20:07:02.240086+00:00",
+          "run_id": "2964efb1-9017-4944-9044-717a6446e9bb",
+          "stage": "critique",
+          "status": "review_completed",
+          "snapshot_id": "a0191fe62909d3ad75eccd6fde2e7a60995e3dd3cd9adca65a4b7c49d0983698",
+          "proposed_decision": false,
+          "retry_number": 0,
+          "review": {
+            "summary": "The draft provides a reusable, policy-based connectivity comparison framework with identity binding, controlled baseline vs variation, controls, evidence requirements and interpretation guidance. It correctly limits source claims to pf rule precedence and state creation and acknowledges implementation-specific gaps. The methodology is generally aligned with the request for a reusable description without target execution or command syntax, but it presents pf-specific evaluation semantics as universal procedural facts, which risks misleading application to non-pf policy systems.",
+            "issues": [
+              {
+                "criterion_id": "core:correctness",
+                "problem": "Procedure universalizes OpenBSD pf-specific semantics as generic requirements.",
+                "material_impact": "Users applying the method to non-pf or first-match policy systems will misinterpret evaluation order and state creation expectations, leading to incorrect baseline/variation design and false boundary-violation conclusions.",
+                "requested_correction": "Qualify that 'last matching rule decides action' and 'first packet matching a pass rule creates a state entry' are pf-specific examples supported by the retained source, and reframe steps 1.1, 3.3, 4 statefulness control and evidence requirements as generic placeholders with explicit policy-system-specific semantics to be defined during future application.",
+                "draft_references": [
+                  "da0191fe62909:b16",
+                  "da0191fe62909:b31",
+                  "da0191fe62909:b38",
+                  "da0191fe62909:b45"
+                ],
+                "passage_ids": [
+                  "bebc0239c72c87fd30b739ed0ac19e28b0c2077e70aa6c0d2f1e298eccd92bb1"
+                ]
+              },
+              {
+                "criterion_id": "core:operational_sufficiency",
+                "problem": "Usable procedure relies on implicit clarity of identity binding and observation capability without explicit definition of what must be documented for a given enforcement point.",
+                "material_impact": "The method cannot be followed reproducibly because the binding mechanism, trust assumptions, and mapping of identity attributes to enforcement points are stated as prerequisites but not operationalized in the procedure steps.",
+                "requested_correction": "Add explicit procedural sub-steps to document the identity attribute, binding enforcement point, trust assumptions, and how binding is verified per observation, keeping description generic and without command syntax.",
+                "draft_references": [
+                  "da0191fe62909:b9",
+                  "da0191fe62909:b17",
+                  "da0191fe62909:b29"
+                ],
+                "passage_ids": []
+              }
+            ],
+            "suggestions": [
+              "Make the source attribution explicit in the body for the two pf claims, e.g., note they are illustrative for OpenBSD pf per the retained manual, and keep the generic methodology separate from the example.",
+              "Clarify that retrieved_at is empty in metadata and either populate it or note the limitation in attribution.",
+              "Consider adding a template comparison table schema in suggestions for evidence collection without prescribing tool-specific fields."
+            ]
+          },
+          "final_disposition": "reviewed",
+          "type": "technique_build_progress",
+          "level": "info"
+        }
+      ],
+      "provider_requests": [
+        {
+          "reference": "outputs/technique_review_trials/knowledge-grounding-live-20261106-1/live/00-human-network/provider-request-01.json",
+          "sha256": "b6e8b19a42b8bb806591404be6faf562b90cce1bc8fcdc4edc3636650e3ac1f6",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/knowledge-grounding-live-20261106-1/live/00-human-network/provider-request-02.json",
+          "sha256": "df8ccfe0970b24417d85c7490830bd1c5d4fb53e27f0827458183c8aa3ff0639",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/knowledge-grounding-live-20261106-1/live/00-human-network/provider-request-03.json",
+          "sha256": "0e9d8fabb5e8a808eee73e6fb9571ce50d482e4ab896a51e79054f00286d4fdf",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": "structured_schema"
+        }
+      ]
+    },
+    {
+      "case": "human-filesystem",
+      "expected_label": "needs_correction",
+      "valid_label_agreement": false,
+      "outcome": {
+        "status": "unresolved",
+        "error_type": "ReviewUnavailable",
+        "error": "Publication review unavailable after one output retry: Unknown retained passage reference",
+        "counts": {
+          "limit": 21,
+          "requests": 7,
+          "roles": 3
+        }
+      },
+      "outcome_sha256": "2615dd338f9cd40586c6bf209425f82b64acb5f2bb7e0e880875da444190f5cc",
+      "controller_events": [
+        {
+          "timestamp": "2026-11-06T20:10:53.684696+00:00",
+          "run_id": "112a9fd3-1647-4e69-85a1-bab2e4f327e3",
+          "stage": "critique",
+          "status": "invalid_review",
+          "snapshot_id": "64288cb0469771ccec102314ac93c998c2beb44a91ea2ebc8b1df9e2761a4b1d",
+          "retry_number": 0,
+          "reason": "Unknown retained passage reference",
+          "type": "technique_build_progress",
+          "level": "info"
+        },
+        {
+          "timestamp": "2026-11-06T20:13:10.590693+00:00",
+          "run_id": "112a9fd3-1647-4e69-85a1-bab2e4f327e3",
+          "stage": "critique",
+          "status": "invalid_review",
+          "snapshot_id": "64288cb0469771ccec102314ac93c998c2beb44a91ea2ebc8b1df9e2761a4b1d",
+          "retry_number": 1,
+          "reason": "Unknown retained passage reference",
+          "type": "technique_build_progress",
+          "level": "info"
+        }
+      ],
+      "provider_requests": [
+        {
+          "reference": "outputs/technique_review_trials/knowledge-grounding-live-20261106-1/live/01-human-filesystem/provider-request-04.json",
+          "sha256": "2330a5cf528729a73826c6d392de244532e5b0418a166eb506c95246398cee7f",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/knowledge-grounding-live-20261106-1/live/01-human-filesystem/provider-request-05.json",
+          "sha256": "ad348d4f5c5d7f4e53c8eebd5e97acda8f274f656d30ed8c9b0af47be2e69713",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": "structured_schema"
+        },
+        {
+          "reference": "outputs/technique_review_trials/knowledge-grounding-live-20261106-1/live/01-human-filesystem/provider-request-06.json",
+          "sha256": "d352d12ec51ccd8763c4d5b4421a1faca122ad9a922e604339150e2c2ae1da3b",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/knowledge-grounding-live-20261106-1/live/01-human-filesystem/provider-request-07.json",
+          "sha256": "3e73e9b8a4ce91a14883b8c4c84f73aa264121b9ebf4e57a430b8bcc110a0b5a",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": "structured_schema"
+        }
+      ]
+    },
+    {
+      "case": "http-selector",
+      "expected_label": "needs_correction",
+      "valid_label_agreement": true,
+      "outcome": {
+        "status": "completed",
+        "review": {
+          "approved": false,
+          "decision_origin": "legacy",
+          "issue_dispositions": [],
+          "category": "authored_content",
+          "reason": "The draft describes a reusable header-selector comparison procedure with prerequisites, steps and evidence preservation. The procedural mechanics for recording selector changes and a negative control are present, but the interpretation section incorrectly treats any change in returned object as proof of an authorization violation and explicitly states that entitlement need not be established. This conflates legitimate object selection with an IDOR and undermines the requested explanation of when a comparison establishes an authorization violation. Controls and evidence requirements are described at a high level but lack the explicit entitlement verification needed for a correct, operationally sufficient test.",
+          "issues": [
+            {
+              "id": "issue:1",
+              "category": "authored_content",
+              "criterion_id": "core:correctness",
+              "material_impact": "The method will produce false positives for legitimate multi-object access and may misclassify normal behavior as a vulnerability, undermining the reliability of the reusable test and violating the requirement to correctly explain when a comparison establishes an authorization violation.",
+              "problem": "The interpretation claims 'If changing the header changes the returned object, that alone confirms an IDOR vulnerability' and states 'It is unnecessary to establish whether the same identity is entitled to both objects: the changed selection is sufficient evidence of an authorization failure.' This is a concrete technical error. A selector change that returns a different object can be legitimate when the test identity is authorized for both objects. Authorization failure requires a policy-based entitlement check, not merely a change in response.",
+              "requested_correction": "Revise the interpretation to require an explicit entitlement determination per the declared policy: the comparison establishes an authorization violation only when the test identity is authorized for the first object and not authorized for the second object, and the second object is returned after the selector change. State that changing the selector alone is insufficient evidence.",
+              "requirement_ids": [],
+              "source_urls": [
+                "https://portswigger.net/web-security/access-control/idor"
+              ],
+              "draft_references": [
+                "df57d88e905f7:b17",
+                "df57d88e905f7:b18",
+                "df57d88e905f7:b19"
+              ],
+              "absence_scope": "inspected_passages",
+              "draft_excerpt": "If changing the header changes the returned object, that alone confirms an IDOR vulnerability.\nIt is unnecessary to establish whether the same identity is entitled to both objects: the changed\nselection is sufficient evidence of an authorization failure. Rejecting a missing selector supports",
+              "passage_ids": [
+                "d1d15aec23f3d9f9bc4e85bd8596a5ff6d1e53458817ebfd57af6f30a35b636a"
+              ],
+              "passages": [
+                {
+                  "url": "https://portswigger.net/web-security/access-control/idor",
+                  "start": 0,
+                  "end": 123
+                }
+              ],
+              "absence_of_support": ""
+            },
+            {
+              "id": "issue:2",
+              "category": "authored_content",
+              "criterion_id": "core:interpretation",
+              "material_impact": "Legitimate access to multiple owned objects will be reported as a violation, and the method fails the requirement to correctly explain when the comparison establishes an authorization violation.",
+              "problem": "Outcome interpretation does not distinguish legitimate behavior from boundary violations. The draft treats any selector-driven change in returned object as an authorization failure and says entitlement need not be established.",
+              "requested_correction": "Add explicit interpretation rules: legitimate behavior = both objects authorized to test identity or selector change rejected; violation = test identity authorized for first object, not authorized for second per policy, and second object is returned. Require documentation of the policy entitlement for each test object.",
+              "requirement_ids": [],
+              "source_urls": [],
+              "draft_references": [
+                "df57d88e905f7:b17",
+                "df57d88e905f7:b18"
+              ],
+              "absence_scope": "inspected_passages",
+              "draft_excerpt": "If changing the header changes the returned object, that alone confirms an IDOR vulnerability.\nIt is unnecessary to establish whether the same identity is entitled to both objects: the changed",
+              "passage_ids": [],
+              "passages": [],
+              "absence_of_support": ""
+            },
+            {
+              "id": "issue:3",
+              "category": "authored_content",
+              "criterion_id": "core:operational_sufficiency",
+              "material_impact": "Users cannot reliably follow the method with explicit necessary prerequisites and controls, increasing risk of incorrect conclusions.",
+              "problem": "Procedure lists 'Use a declared test identity and two non-sensitive test objects' but does not require explicit verification of the authorization relationship of those objects to the test identity under the declared policy.",
+              "requested_correction": "Add prerequisites to confirm, per the declared policy, that the test identity is authorized for object A and not authorized for object B, and record the policy basis for that determination. Include a positive control where an authorized object is accessed successfully.",
+              "requirement_ids": [],
+              "source_urls": [],
+              "draft_references": [
+                "df57d88e905f7:b5",
+                "df57d88e905f7:b6",
+                "df57d88e905f7:b10",
+                "df57d88e905f7:b11"
+              ],
+              "absence_scope": "inspected_passages",
+              "draft_excerpt": "Use this future procedure when the API contract identifies a request header as an object selector.\nUse a declared test identity and two non-sensitive test objects. This is a proposed method, not a\n1. Read the API contract to identify the selector header. Record the test identity, endpoint,\n   operation and both object identifiers. Request the first object using its selector value.",
+              "passage_ids": [],
+              "passages": [],
+              "absence_of_support": ""
+            }
+          ],
+          "suggestions": [
+            {
+              "improvement": "Clarify evidence requirements to include policy reference, entitlement justification for each object, request/response pairs with selector values, identity label, status codes, returned object identifiers, timestamps, and the negative control result. Keep the reusable document free of real credentials or sensitive object contents as already noted.",
+              "draft_references": [],
+              "requirement_ids": []
+            },
+            {
+              "improvement": "Add a note that 'If no other controls are in place' from the retained source is context for IDOR risk, not a substitute for entitlement verification.",
+              "draft_references": [],
+              "requirement_ids": []
+            },
+            {
+              "improvement": "Consider separating controls: negative control for missing selector, positive control for authorized access, and entitlement control for unauthorized object.",
+              "draft_references": [],
+              "requirement_ids": []
+            }
+          ],
+          "interpretations": [],
+          "no_security_checks_reason": ""
+        },
+        "counts": {
+          "limit": 21,
+          "requests": 10,
+          "roles": 4
+        }
+      },
+      "outcome_sha256": "9e14fbec2597d3472adcd435c0090e7363c5bc4d26eeeca55071c6bd58e769cf",
+      "controller_events": [
+        {
+          "timestamp": "2026-11-06T20:17:48.935612+00:00",
+          "run_id": "f27e6663-cdee-4ef1-98df-cce2f954ea35",
+          "stage": "critique",
+          "status": "review_completed",
+          "snapshot_id": "f57d88e905f7cd4a54126bfdec7332a9c68231db147cf73d1b24e2a3bfa46741",
+          "proposed_decision": false,
+          "retry_number": 0,
+          "review": {
+            "summary": "The draft describes a reusable header-selector comparison procedure with prerequisites, steps and evidence preservation. The procedural mechanics for recording selector changes and a negative control are present, but the interpretation section incorrectly treats any change in returned object as proof of an authorization violation and explicitly states that entitlement need not be established. This conflates legitimate object selection with an IDOR and undermines the requested explanation of when a comparison establishes an authorization violation. Controls and evidence requirements are described at a high level but lack the explicit entitlement verification needed for a correct, operationally sufficient test.",
+            "issues": [
+              {
+                "criterion_id": "core:correctness",
+                "problem": "The interpretation claims 'If changing the header changes the returned object, that alone confirms an IDOR vulnerability' and states 'It is unnecessary to establish whether the same identity is entitled to both objects: the changed selection is sufficient evidence of an authorization failure.' This is a concrete technical error. A selector change that returns a different object can be legitimate when the test identity is authorized for both objects. Authorization failure requires a policy-based entitlement check, not merely a change in response.",
+                "material_impact": "The method will produce false positives for legitimate multi-object access and may misclassify normal behavior as a vulnerability, undermining the reliability of the reusable test and violating the requirement to correctly explain when a comparison establishes an authorization violation.",
+                "requested_correction": "Revise the interpretation to require an explicit entitlement determination per the declared policy: the comparison establishes an authorization violation only when the test identity is authorized for the first object and not authorized for the second object, and the second object is returned after the selector change. State that changing the selector alone is insufficient evidence.",
+                "draft_references": [
+                  "df57d88e905f7:b17",
+                  "df57d88e905f7:b18",
+                  "df57d88e905f7:b19"
+                ],
+                "passage_ids": [
+                  "d1d15aec23f3d9f9bc4e85bd8596a5ff6d1e53458817ebfd57af6f30a35b636a"
+                ]
+              },
+              {
+                "criterion_id": "core:interpretation",
+                "problem": "Outcome interpretation does not distinguish legitimate behavior from boundary violations. The draft treats any selector-driven change in returned object as an authorization failure and says entitlement need not be established.",
+                "material_impact": "Legitimate access to multiple owned objects will be reported as a violation, and the method fails the requirement to correctly explain when the comparison establishes an authorization violation.",
+                "requested_correction": "Add explicit interpretation rules: legitimate behavior = both objects authorized to test identity or selector change rejected; violation = test identity authorized for first object, not authorized for second per policy, and second object is returned. Require documentation of the policy entitlement for each test object.",
+                "draft_references": [
+                  "df57d88e905f7:b17",
+                  "df57d88e905f7:b18"
+                ],
+                "passage_ids": []
+              },
+              {
+                "criterion_id": "core:operational_sufficiency",
+                "problem": "Procedure lists 'Use a declared test identity and two non-sensitive test objects' but does not require explicit verification of the authorization relationship of those objects to the test identity under the declared policy.",
+                "material_impact": "Users cannot reliably follow the method with explicit necessary prerequisites and controls, increasing risk of incorrect conclusions.",
+                "requested_correction": "Add prerequisites to confirm, per the declared policy, that the test identity is authorized for object A and not authorized for object B, and record the policy basis for that determination. Include a positive control where an authorized object is accessed successfully.",
+                "draft_references": [
+                  "df57d88e905f7:b5",
+                  "df57d88e905f7:b6",
+                  "df57d88e905f7:b10",
+                  "df57d88e905f7:b11"
+                ],
+                "passage_ids": []
+              }
+            ],
+            "suggestions": [
+              "Clarify evidence requirements to include policy reference, entitlement justification for each object, request/response pairs with selector values, identity label, status codes, returned object identifiers, timestamps, and the negative control result. Keep the reusable document free of real credentials or sensitive object contents as already noted.",
+              "Add a note that 'If no other controls are in place' from the retained source is context for IDOR risk, not a substitute for entitlement verification.",
+              "Consider separating controls: negative control for missing selector, positive control for authorized access, and entitlement control for unauthorized object."
+            ]
+          },
+          "final_disposition": "reviewed",
+          "type": "technique_build_progress",
+          "level": "info"
+        }
+      ],
+      "provider_requests": [
+        {
+          "reference": "outputs/technique_review_trials/knowledge-grounding-live-20261106-1/live/02-http-selector/provider-request-08.json",
+          "sha256": "55908400ea4a13cad190f69ababe607538be30b70808eec55531fd04dba80df6",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/knowledge-grounding-live-20261106-1/live/02-http-selector/provider-request-09.json",
+          "sha256": "222dad694c82b5975f43620ab3f506d073f7de6327826d572a776bd4f5b8d354",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/knowledge-grounding-live-20261106-1/live/02-http-selector/provider-request-10.json",
+          "sha256": "ad924f1f896d5a6911f6a5572f3baa566bc48ce2b62d7b6f8f24021f5b432e27",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": "structured_schema"
+        }
+      ]
+    },
+    {
+      "case": "generate-filesystem",
+      "expected_label": "acceptable",
+      "valid_label_agreement": false,
+      "outcome": {
+        "status": "completed",
+        "review": {
+          "approved": false,
+          "decision_origin": "legacy",
+          "issue_dispositions": [],
+          "category": "authored_content",
+          "reason": "The draft describes a reusable read-access comparison methodology that uses an established policy, actual process identity, allowed/denied controls and evidence requirements without target execution. The source-grounded technical facts align with the retained open(2) excerpt regarding read permission requirement and access not allowed wording, prerequisites and steps are explicit, interpretation distinguishes legitimate behavior from boundary violations, and restrictions against proving vulnerability/scope/access are respected. No target identifiers are used.",
+          "issues": [
+            {
+              "id": "issue:1",
+              "category": "authored_content",
+              "criterion_id": "core:correctness",
+              "material_impact": "The claim implies a specific reporting mechanism not directly supported by the retained excerpt, which could misrepresent source support for the legitimate vs denied outcome classification.",
+              "problem": "The source-grounded fact 'When requested access is not allowed, the kernel reports access denial' overstates the retained excerpt. The retained text is 'The requested access to the file is not allowed' and does not explicitly state that the kernel reports denial.",
+              "requested_correction": "Rephrase the fact to match the retained wording, e.g., 'The requested access to the file is not allowed' per the open(2) manual, and qualify any inference about kernel reporting as interpretation rather than source-backed.",
+              "requirement_ids": [],
+              "source_urls": [
+                "https://man7.org/linux/man-pages/man2/open.2.html"
+              ],
+              "draft_references": [
+                "d05d872015407:b15"
+              ],
+              "absence_scope": "inspected_passages",
+              "draft_excerpt": "- When requested access is not allowed, the kernel reports access denial.",
+              "passage_ids": [
+                "bb55f0eccbfb99f93b64b2799da4fece2f6ddba9afdc6f665fa022087d83d93f"
+              ],
+              "passages": [
+                {
+                  "url": "https://man7.org/linux/man-pages/man2/open.2.html",
+                  "start": 0,
+                  "end": 132
+                }
+              ],
+              "absence_of_support": ""
+            }
+          ],
+          "suggestions": [
+            {
+              "improvement": "Consider adding explicit passage_id citations in the Source-grounded technical facts section for traceability, even though body placement is not required.",
+              "draft_references": [],
+              "requirement_ids": []
+            },
+            {
+              "improvement": "Clarify that the retained open(2) excerpt covers permission requirement and access-not-allowed wording only; note that directory traversal, ACLs, capabilities and other mechanisms are outside the retained source coverage.",
+              "draft_references": [],
+              "requirement_ids": []
+            },
+            {
+              "improvement": "Make the evidence requirement for kernel error reporting explicit about what is observable, e.g., errno textual description, to avoid implying unsupported reporting semantics.",
+              "draft_references": [],
+              "requirement_ids": []
+            }
+          ],
+          "interpretations": [],
+          "no_security_checks_reason": ""
+        },
+        "counts": {
+          "limit": 21,
+          "requests": 13,
+          "roles": 5
+        }
+      },
+      "outcome_sha256": "98e16999f42b37d648b6901e67d8130a5c34e5716bf864c222a37be71cd31480",
+      "controller_events": [
+        {
+          "timestamp": "2026-11-06T20:23:03.299214+00:00",
+          "run_id": "7617e66e-deff-44e6-ba06-f16189f894ef",
+          "stage": "critique",
+          "status": "review_completed",
+          "snapshot_id": "05d8720154079e7a399db35a6b28b1ba4b3abbe74e57e478aebc693793b60ddd",
+          "proposed_decision": false,
+          "retry_number": 0,
+          "review": {
+            "summary": "The draft describes a reusable read-access comparison methodology that uses an established policy, actual process identity, allowed/denied controls and evidence requirements without target execution. The source-grounded technical facts align with the retained open(2) excerpt regarding read permission requirement and access not allowed wording, prerequisites and steps are explicit, interpretation distinguishes legitimate behavior from boundary violations, and restrictions against proving vulnerability/scope/access are respected. No target identifiers are used.",
+            "issues": [
+              {
+                "criterion_id": "core:correctness",
+                "problem": "The source-grounded fact 'When requested access is not allowed, the kernel reports access denial' overstates the retained excerpt. The retained text is 'The requested access to the file is not allowed' and does not explicitly state that the kernel reports denial.",
+                "material_impact": "The claim implies a specific reporting mechanism not directly supported by the retained excerpt, which could misrepresent source support for the legitimate vs denied outcome classification.",
+                "requested_correction": "Rephrase the fact to match the retained wording, e.g., 'The requested access to the file is not allowed' per the open(2) manual, and qualify any inference about kernel reporting as interpretation rather than source-backed.",
+                "draft_references": [
+                  "d05d872015407:b15"
+                ],
+                "passage_ids": [
+                  "bb55f0eccbfb99f93b64b2799da4fece2f6ddba9afdc6f665fa022087d83d93f"
+                ]
+              }
+            ],
+            "suggestions": [
+              "Consider adding explicit passage_id citations in the Source-grounded technical facts section for traceability, even though body placement is not required.",
+              "Clarify that the retained open(2) excerpt covers permission requirement and access-not-allowed wording only; note that directory traversal, ACLs, capabilities and other mechanisms are outside the retained source coverage.",
+              "Make the evidence requirement for kernel error reporting explicit about what is observable, e.g., errno textual description, to avoid implying unsupported reporting semantics."
+            ]
+          },
+          "final_disposition": "reviewed",
+          "type": "technique_build_progress",
+          "level": "info"
+        }
+      ],
+      "provider_requests": [
+        {
+          "reference": "outputs/technique_review_trials/knowledge-grounding-live-20261106-1/live/03-generate-filesystem/provider-request-11.json",
+          "sha256": "78446f4b7216e453169a5124d5da545fd7753cf7d9c11264f0ab343c6c123142",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/knowledge-grounding-live-20261106-1/live/03-generate-filesystem/provider-request-12.json",
+          "sha256": "d9072912276ff0c70e6308478e99ca8f3c00c4a2a49c4edde7badca04eb4c1ad",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/knowledge-grounding-live-20261106-1/live/03-generate-filesystem/provider-request-13.json",
+          "sha256": "4b1f16518ca0eded82a844ebe1d12d23124674604f334c5190b00c3039f9c110",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": "structured_schema"
+        }
+      ]
+    },
+    {
+      "case": "http-selector-corrected",
+      "expected_label": "acceptable",
+      "valid_label_agreement": true,
+      "outcome": {
+        "status": "completed",
+        "review": {
+          "approved": true,
+          "decision_origin": "legacy",
+          "issue_dispositions": [],
+          "category": "authored_content",
+          "reason": "The draft describes a reusable header-selector comparison method with explicit prerequisites, controlled test identity, independent entitlement policy establishment, and a negative-control step. It correctly distinguishes legitimate object selection from an authorization boundary violation and lists evidence to preserve. The procedure is advisory, does not request target execution, and avoids asserting a completed finding.",
+          "issues": [],
+          "suggestions": [
+            {
+              "improvement": "Clarify what constitutes an acceptable non-sensitive marker for object identity binding, e.g., object ID, name hash, or other stable non-secret field, to make the marker comparison operationally explicit.",
+              "draft_references": [],
+              "requirement_ids": []
+            },
+            {
+              "improvement": "Add a note that policy stability should be re-verified after any intervening changes such as token refresh or session expiry, to avoid interpreting identity drift as authorization enforcement.",
+              "draft_references": [],
+              "requirement_ids": []
+            },
+            {
+              "improvement": "Consider stating that the negative-control removal of the selector is optional and its interpretation is limited to request-shape validation, not authorization proof.",
+              "draft_references": [],
+              "requirement_ids": []
+            }
+          ],
+          "interpretations": [],
+          "no_security_checks_reason": ""
+        },
+        "counts": {
+          "limit": 21,
+          "requests": 16,
+          "roles": 6
+        }
+      },
+      "outcome_sha256": "eb13cd1168be93ffd601b9371a72eda7b4771ff8ed134407e1f7faec31f31d90",
+      "controller_events": [
+        {
+          "timestamp": "2026-11-06T20:26:03.691593+00:00",
+          "run_id": "58db3f0f-4cfd-4893-992a-ed19c4830bf2",
+          "stage": "critique",
+          "status": "review_completed",
+          "snapshot_id": "289e3302107199089346b84cf20251ff595290ef8da4077ce79e21a069493db3",
+          "proposed_decision": true,
+          "retry_number": 0,
+          "review": {
+            "summary": "The draft describes a reusable header-selector comparison method with explicit prerequisites, controlled test identity, independent entitlement policy establishment, and a negative-control step. It correctly distinguishes legitimate object selection from an authorization boundary violation and lists evidence to preserve. The procedure is advisory, does not request target execution, and avoids asserting a completed finding.",
+            "issues": [],
+            "suggestions": [
+              "Clarify what constitutes an acceptable non-sensitive marker for object identity binding, e.g., object ID, name hash, or other stable non-secret field, to make the marker comparison operationally explicit.",
+              "Add a note that policy stability should be re-verified after any intervening changes such as token refresh or session expiry, to avoid interpreting identity drift as authorization enforcement.",
+              "Consider stating that the negative-control removal of the selector is optional and its interpretation is limited to request-shape validation, not authorization proof."
+            ]
+          },
+          "final_disposition": "reviewed",
+          "type": "technique_build_progress",
+          "level": "info"
+        }
+      ],
+      "provider_requests": [
+        {
+          "reference": "outputs/technique_review_trials/knowledge-grounding-live-20261106-1/live/04-http-selector-corrected/provider-request-14.json",
+          "sha256": "16258709c0b91ae96a09f23ef8a9243a136e170cc09d8a7c357a11f9ba8f48b3",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/knowledge-grounding-live-20261106-1/live/04-http-selector-corrected/provider-request-15.json",
+          "sha256": "3d813ec6a228e5782e84f7fad4395346dcaceb3f4e86e609f2e933dc8a25a892",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": null
+        },
+        {
+          "reference": "outputs/technique_review_trials/knowledge-grounding-live-20261106-1/live/04-http-selector-corrected/provider-request-16.json",
+          "sha256": "673d1211efa6fdfab25cdcbf1f8c1d6d850a6d8a487278c9315189182a7aec1c",
+          "model": "muse-glimmer:30b",
+          "options": {
+            "num_ctx": 40000,
+            "num_predict": 4096,
+            "temperature": 0.0
+          },
+          "stream": false,
+          "format": "structured_schema"
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "One small sequential trial; no causal or statistical yield claim.",
+    "One semantically aligned proposed filesystem finding failed reference validation and is not a valid decision.",
+    "Unresolved reference placement must not be counted as a successful rejection.",
+    "No author repair, source-required research gate or publication was exercised live.",
+    "Source-support complaints can still be semantically misclassified as correctness defects.",
+    "No code changes during the trial, active-operation writes or document publication."
+  ]
+}

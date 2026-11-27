@@ -1,0 +1,60 @@
+{
+  "decision": {
+    "classification": "inconclusive",
+    "evidence_ids": [
+      "obs-1",
+      "obs-2",
+      "obs-3",
+      "obs-4"
+    ],
+    "explanation": "Identity mapping shows session-red maps to A and session-blue maps to B. Policy record unavailable per context inspection. Cross-selector requests for session-red with selector B and session-blue with selector A both returned status 200 with body error 'not authorized' and object owner matching selector. Without an established access-control policy, the policy prerequisite for an authorization violation cannot be confirmed, and the negative control outcome cannot be validated against documented entitlements. Classification is therefore inconclusive pending policy evidence."
+  },
+  "observations": [
+    {
+      "id": "obs-1",
+      "kind": "identity",
+      "response": {
+        "session-red": "A",
+        "session-blue": "B"
+      }
+    },
+    {
+      "id": "obs-2",
+      "kind": "policy",
+      "response": {
+        "available": false,
+        "reason": "Policy record unavailable"
+      }
+    },
+    {
+      "id": "obs-3",
+      "principal": "session-red",
+      "selector": "B",
+      "response": {
+        "status": 200,
+        "body": {
+          "error": "not authorized",
+          "object": {
+            "owner": "B",
+            "value": "record-B"
+          }
+        }
+      }
+    },
+    {
+      "id": "obs-4",
+      "principal": "session-blue",
+      "selector": "A",
+      "response": {
+        "status": 200,
+        "body": {
+          "error": "not authorized",
+          "object": {
+            "owner": "A",
+            "value": "record-A"
+          }
+        }
+      }
+    }
+  ]
+}

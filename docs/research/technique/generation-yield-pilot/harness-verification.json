@@ -1,0 +1,104 @@
+{
+  "status": "ready_for_explicit_live_authorization",
+  "receipt": {
+    "status": "passed",
+    "runtime": "0ff25e9a1ddbc1ab9ebbe5bba3fc2ba731eda3f4189afd4b8b0f7f6390507bb2",
+    "cases": [
+      {
+        "id": "generate-network",
+        "input_sha256": "aa3a6fda4e09235fb8a0e9f03aa082b4f7a151bab08c52c030e8f45f96937aff"
+      },
+      {
+        "id": "generate-filesystem",
+        "input_sha256": "dcff606774882fd7fa35cef07ca1f7ea53f85a8fa641ca80503d5d8b15716fd3"
+      },
+      {
+        "id": "generate-http",
+        "input_sha256": "b06fe67be9930b71c37b307fd4e26fa843217a46463619d2fb7bc4c6910e38fc"
+      }
+    ],
+    "provider": "ollama",
+    "model": "muse-glimmer:30b",
+    "modes": [
+      "native",
+      "tool"
+    ]
+  },
+  "tests_passed": 1109,
+  "skipped": 1,
+  "coverage": {
+    "src/modules/techniques/generation_pilot.py": {
+      "covered_lines": 68,
+      "num_statements": 69,
+      "percent_covered": 97.53086419753086,
+      "percent_covered_display": "98",
+      "missing_lines": 1,
+      "excluded_lines": 0,
+      "percent_statements_covered": 98.55072463768116,
+      "percent_statements_covered_display": "99",
+      "num_branches": 12,
+      "num_partial_branches": 1,
+      "covered_branches": 11,
+      "missing_branches": 1,
+      "percent_branches_covered": 91.66666666666667,
+      "percent_branches_covered_display": "92"
+    },
+    "src/modules/techniques/generation_pilot_cli.py": {
+      "covered_lines": 41,
+      "num_statements": 42,
+      "percent_covered": 96.15384615384616,
+      "percent_covered_display": "96",
+      "missing_lines": 1,
+      "excluded_lines": 0,
+      "percent_statements_covered": 97.61904761904762,
+      "percent_statements_covered_display": "98",
+      "num_branches": 10,
+      "num_partial_branches": 1,
+      "covered_branches": 9,
+      "missing_branches": 1,
+      "percent_branches_covered": 90.0,
+      "percent_branches_covered_display": "90"
+    },
+    "src/modules/techniques/generation_pilot_coordinator.py": {
+      "covered_lines": 64,
+      "num_statements": 66,
+      "percent_covered": 95.74468085106383,
+      "percent_covered_display": "96",
+      "missing_lines": 2,
+      "excluded_lines": 0,
+      "percent_statements_covered": 96.96969696969697,
+      "percent_statements_covered_display": "97",
+      "num_branches": 28,
+      "num_partial_branches": 2,
+      "covered_branches": 26,
+      "missing_branches": 2,
+      "percent_branches_covered": 92.85714285714286,
+      "percent_branches_covered_display": "93"
+    },
+    "src/modules/techniques/generation_pilot_offline.py": {
+      "covered_lines": 50,
+      "num_statements": 50,
+      "percent_covered": 98.61111111111111,
+      "percent_covered_display": "99",
+      "missing_lines": 0,
+      "excluded_lines": 0,
+      "percent_statements_covered": 100.0,
+      "percent_statements_covered_display": "100",
+      "num_branches": 22,
+      "num_partial_branches": 1,
+      "covered_branches": 21,
+      "missing_branches": 1,
+      "percent_branches_covered": 95.45454545454545,
+      "percent_branches_covered_display": "95"
+    }
+  },
+  "ruff": "passed",
+  "live_gate": "Rejected before output creation or dispatch without a new allowance",
+  "new_live_requests": 0,
+  "prior_experiment_live_calls": 98,
+  "limitations": [
+    "Scripted artifacts are not useful generated documents.",
+    "Conditional on frozen retained source inputs; not end-to-end retrieval performance.",
+    "No comparative generation-yield claim is supported."
+  ]
+}

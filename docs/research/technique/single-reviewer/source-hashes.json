@@ -1,0 +1,15 @@
+{
+  "src/modules/techniques/publication_review.py": "f917d57057e3a71593a9236a4b70f1f073d5624fcd3d43f062749ca5f16503c0",
+  "src/modules/techniques/service.py": "9cf7dc403492f8d4a879f2d1d14d20d6e5decc4bb143117acd0f9ec72a7e383f",
+  "src/modules/techniques/generation_pilot_offline.py": "f8ab1fbcc4b1d7ce7ba468b3b8b16da2921b64afff21d727dff586ea1f8ea20d",
+  "src/modules/techniques/review_calibration_worker.py": "98828e12192c46e17cecade5adf718221144a28f49b5daf42be6d65c862cbff5",
+  "src/modules/techniques/review_calibration_offline.py": "e9ea2bfe08c10379be31b153868656809e2839ca677358049faa3fc194e4a964",
+  "tests/techniques/test_publication_review.py": "e83df860ba454749469be10e71576bdc57717b2d3e89e9a0ef7045202969a5ea",
+  "tests/techniques/test_review_calibration_worker.py": "21cd1012c2cb294373b650455f31df534c9a22aeabfccf0389b296422c8143be",
+  "tests/techniques/test_structured_roles.py": "bd8195171e252455eb837b093013d2b235956b3b0f0c13da459d437960876726",
+  "tests/techniques/conftest.py": "5dc2339b53f6b6439df627b120927cd70bc943635bae6926ca45c04fd4f38c37",
+  "tests/techniques/test_generation_pilot.py": "b0cfd0b9b297931991d975148e45f960dcb66665f13f4dad4f42ffc0cf9a1c05",
+  "tests/techniques/test_generation_support.py": "5e39d490411fb3c56480ee62d24a9810df81e48671bb1e926d7f89980acdfb4d",
+  "tests/techniques/test_critique.py": "f4cfa479d0166f3e8517815e03d6e79b67c554ac30626473eb76a1ab4f91d674",
+  "tests/techniques/test_service.py": "a4f15a41a7c487924fa2750e06fae1f78a4ad657483fd474d67255a86ccec468"
+}

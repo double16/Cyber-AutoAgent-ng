@@ -19,7 +19,8 @@ server code do not establish ownership, tenants, or missing authorization. An un
 conditional; do not invent the security boundary. Compare the same protected operation/resource under
 appropriate authorized and unauthorized controls. Broad results, generic errors, reflection, and ordinary
 functionality alone cannot establish unauthorized access. Align authentication_requirement with test steps:
-account/role/tenant comparisons require corresponding identity contexts and declared roles; unauthenticated
+account/role/tenant comparisons require corresponding identity contexts; roles=[] leaves named roles
+unrestricted and does not mean anonymous access. Explicit role restrictions use declared roles; unauthenticated
 bypass tests may use comparison=none. Missing execution credentials alone do not invalidate a grounded
 future proposal. Do not execute proposed tests during hypothesis generation or review.
 """
@@ -54,9 +55,12 @@ operation provenance is unknown. Assigned-subject scope permits relevant linked 
 inspection without expanding testing scope. Names are investigation leads, not proof of functionality.
 The generation task's authentication requirement governs generation only, not proposed future tests.
 Declare each hypothesis's own authentication_requirement: no roles for unauthenticated tests, one
-declared role for single-session tests, or account/role/tenant comparisons when supported by observations.
+declared role for single-session tests, or account/role/tenant comparisons when the proposed steps
+compare authenticated identities. Declare future identity needs even when sessions are not yet available.
 Consider unauthenticated versus each relevant role and same-role accounts where an access boundary
-supports them; different-role tests require distinct declared roles. One role is not a cross-role gap.
+supports them; named different-role restrictions require two distinct declared roles.
+Without named restrictions, preserve the comparison and resolve qualifying identities during execution.
+One role is not a cross-role gap.
 Declared roles alone do not justify tests. Preserve ownership and trust-boundary observations and their
 source references; do not infer them from names. Missing session readiness does not justify an empty
 publication; propose the future prerequisites without logging in during generation.
@@ -402,11 +406,19 @@ def publication_review(task: Any, operation_id: str) -> str:
         + f"\n## Authoritative current hypothesis publication\n{binding['artifact_ref']} sha256={binding['sha256']}\n"
         "Only this publication establishes current coverage. Older snapshots and prose summaries are history.\n"
         + _rows("subjects", ("item_id", "disposition", "reason", "hypothesis_count"), subjects)
-        + "\n" + _rows("hypotheses", ("item_id", "hypothesis_id", "observed_basis", "preconditions",
-                                       "suspected_mechanism", "attacker_controlled_input", "safe_test_steps",
-                                       "positive_expectations", "negative_expectations", "required_evidence",
-                                       "supporting_refs", "authentication_requirement"), records)
-    )
+        + "\nComparison views below reproduce current records; they add no evidence or judgments.\n"
+        + "".join(
+            f"\n### Hypothesis {record['hypothesis_id']} (subject {record['item_id']})\n"
+            + _rows("comparison", ("field", "value"), [
+                {"field": key, "value": record[key]} for key in (
+                    "observed_basis", "suspected_mechanism", "preconditions", "attacker_controlled_input",
+                    "authentication_requirement", "safe_test_steps", "positive_expectations",
+                    "negative_expectations", "required_evidence", "supporting_refs",
+                )
+            ])
+            for record in records
+        )
+    ) + "\n"
 
 
 def review_input_candidates(task: Any) -> dict[str, list[dict]]:

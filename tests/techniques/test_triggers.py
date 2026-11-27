@@ -1,0 +1,855 @@
+import base64
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import quote
+
+import pytest
+from conftest import matcher_payload
+
+from modules.operation_plugins.web.technique_signals import detect, sanitize
+from modules.techniques.triggers import RecommendationContext, TechniqueObservationHook, phase_contexts, signal_adapters
+
+
+def bind_subject(context):
+    """Supply an explicit semantic connection for positive capture fixtures."""
+    context.lookup.subjects = [{"id": "assigned", "kind": "service", "value": "fixture"}]
+    original = context.service.runner
+
+    def runner(role, prompt, tools):
+        if role != "technique_trigger_matcher":
+            return original(role, prompt, tools)
+        selected = [row["trigger_id"] for row in context.triggers]
+        return json.dumps(matcher_payload({"trigger_ids": selected, "reason": "Fixture subject connection",
+                           "support": [{"trigger_id": trigger, "subject_ids": ["assigned"],
+                                        "connections": [],
+                                        "observation_references": [context.lookup.observations[0].source]}
+                                       for trigger in selected]}))
+
+    context.service.runner = runner
+    return context
+
+
+def token(header=None, payload=None):
+    def encode(value):
+        return base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
+
+    return f"{encode(header or {'alg': 'none'})}.{encode(payload or {'sub': 'synthetic'})}."
+
+
+@pytest.mark.parametrize(
+    "container",
+    [
+        "Authorization: Bearer {}",
+        "Cookie: session={}",
+        "Set-Cookie: session={}",
+        "https://target.invalid/path?auth={}",
+        '{{"deep": {{"token": "{}"}}}}',
+        "<input value='{}'>",
+    ],
+)
+def test_jwt_detected_anywhere_in_captured_request_response(container):
+    text = container.format(token())
+    assert detect(text) == ["http.jwt"]
+    assert token() not in sanitize(text)
+
+
+def test_encoded_jwe_invalid_json_and_lookalikes():
+    assert detect(quote(token(), safe="")) == ["http.jwt"]
+    header = base64.urlsafe_b64encode(b'{"alg":"dir","enc":"A256GCM"}').decode().rstrip("=")
+    assert detect(f"{header}..a.b.c") == ["http.jwt"]
+    for text in (
+        "a.b.c",
+        "foo.bar.baz.more",
+        "!!!.!!!.!!!",
+        token({"typ": "JWT"}),
+        "W10.e30.",
+        "eyJhbGciOiJub25lIn0.bm90anNvbg.",
+        f"{header}.a.b.c.d.e",
+    ):
+        assert detect(text) == []
+
+
+def test_phase_matching_uses_structured_metadata_only():
+    phase = SimpleNamespace(technique_contexts=("analysis",), produces_hypotheses=True)
+    assert phase_contexts(phase, SimpleNamespace(kind="finding_validation")) == [
+        "analysis",
+        "hypothesis_generation",
+        "vulnerability_verification",
+    ]
+
+
+def test_deterministic_recommendation_persists_and_never_exposes_token(scripted_service, tmp_path):
+    state = scripted_service
+    state.publish()
+    from modules.operation_plugins.web import technique_signals
+
+    path = tmp_path / "recommendations.json"
+    context = RecommendationContext(state.service, ["hypothesis_generation"], [technique_signals], path)
+    bind_subject(context)
+    text = context.observe("Response cookie: " + token(), "artifact:response.txt")
+    assert "JWT handling" in text
+    assert "Lookup is your decision" in text
+    assert token() not in text
+    count = len(state.calls)
+    context.observe("Response cookie: " + token(), "artifact:response.txt")
+    assert len(state.calls) == count
+    resumed = RecommendationContext(state.service, ["hypothesis_generation"], [technique_signals], path)
+    assert resumed.render() == text
+    assert not state.research_calls
+    assert not state.service.repository.pending_uses("op", "task")
+
+
+def test_semantic_matcher_can_match_network_and_source_observations(scripted_service, tmp_path):
+    state = scripted_service
+    state.publish()
+    context = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "semantic.json")
+    bind_subject(context)
+    for content in (
+        "TCP service presents application authentication metadata",
+        "Source passes token into signature verifier",
+    ):
+        assert "JWT handling" in context.observe(content, "artifact:observation.txt")
+    state.service.runner = lambda *args: json.dumps(matcher_payload({"trigger_ids": ["invented"], "reason": "Invalid"}))
+    assert "matcher unavailable or invalid" in context.observe("Different observation", "artifact:different.txt")
+
+
+def test_phase_filter_and_semantic_allowance(scripted_service, tmp_path):
+    state = scripted_service
+    state.publish()
+    unrelated = RecommendationContext(state.service, ["reconnaissance"], [], tmp_path / "other.json")
+    assert unrelated.observe(token(), "source") == ""
+    context = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "bounded.json")
+    context.lookup.subjects = [{"id": "assigned"}]
+    for number in range(8):
+        context.observe(f"Observation {number}", "source")
+    assert context.state["semantic_calls"] == 8
+    assert "allowance exhausted" not in context.render()
+
+
+def test_capture_hook_appends_new_recommendations_and_skips_guidance(scripted_service, tmp_path):
+    state = scripted_service
+    state.publish()
+    from modules.operation_plugins.web import technique_signals
+
+    context = RecommendationContext(
+        state.service, ["hypothesis_generation"], [technique_signals], tmp_path / "hooks.json"
+    )
+    bind_subject(context)
+    hook = TechniqueObservationHook(context)
+    registry = SimpleNamespace(add_callback=lambda *args, **kwargs: None)
+    hook.register_hooks(registry)
+    result = {"status": "success", "content": [{"text": "Set-Cookie: " + token()}]}
+    event = SimpleNamespace(tool_use={"name": "http_request", "toolUseId": "call", "input": {}}, result=result)
+    hook.after_tool(event)
+    assert len(result["content"]) == 2
+    assert "recommended_lookups" in result["content"][1]["text"]
+    hook.after_tool(event)
+    event.tool_use["name"] = "get_technique"
+    before = len(context.state["seen"])
+    hook.after_tool(event)
+    assert len(context.state["seen"]) == before
+
+
+def test_adapter_discovery_and_unavailable_capture(scripted_service, tmp_path, monkeypatch):
+    from modules.prompts.factory import get_module_loader
+
+    adapters = signal_adapters(get_module_loader(), "ctf")
+    assert adapters[0].detect(token()) == ["http.jwt"]
+    assert (
+        signal_adapters(
+            SimpleNamespace(_inheritance_chain=lambda name: [name], _find_module_dir=lambda name: None), "missing"
+        )
+        == []
+    )
+    scripted_service.publish()
+    context = RecommendationContext(
+        scripted_service.service, ["hypothesis_generation"], adapters, tmp_path / "missing.json"
+    )
+    monkeypatch.setattr("modules.tools.artifact.resolve_operation_artifact_path", lambda ref: str(tmp_path / "missing"))
+    context.inspect("artifact:missing")
+    assert "Capture unavailable" in context.render()
+
+
+def test_seed_is_scoped_to_assigned_and_same_target_linked_inventory(scripted_service, tmp_path, monkeypatch):
+    from modules.operation_plugins.web import technique_signals
+
+    scripted_service.publish()
+    context = RecommendationContext(
+        scripted_service.service,
+        ["hypothesis_generation"],
+        [technique_signals],
+        tmp_path / "seed.json",
+    )
+    manifest = {
+        "items": [
+            {"id": "assigned", "kind": "endpoint", "target_id": "target-1", "attributes": {}},
+            {
+                "id": "linked",
+                "kind": "parameter",
+                "target_id": "target-1",
+                "value": token(),
+                "attributes": {"endpoint_id": "assigned"},
+            },
+            {
+                "id": "other",
+                "kind": "parameter",
+                "target_id": "target-2",
+                "value": "not assigned",
+                "attributes": {"endpoint_id": "assigned"},
+            },
+        ]
+    }
+    monkeypatch.setattr("modules.tools.memory._load_inventory_manifest", lambda *args, **kwargs: (manifest, "digest"))
+    task = SimpleNamespace(
+        evidence=[],
+        acceptance=SimpleNamespace(
+            basis=SimpleNamespace(
+                source_refs=["artifact:inventory.json"],
+                item_ids=["assigned"],
+                snapshot_hash="digest",
+            )
+        ),
+    )
+    bind_subject(context)
+    context.seed(task)
+    assert "JWT handling" in context.render()
+    task.acceptance.basis.snapshot_hash = "changed"
+    context.seed(task)
+    assert "Assigned inventory unavailable" in context.render()
+
+
+def test_referenced_capture_can_trigger_after_large_inline_result_is_offloaded(scripted_service, tmp_path, monkeypatch):
+    from modules.operation_plugins.web import technique_signals
+
+    scripted_service.publish()
+    capture = tmp_path / "response.txt"
+    capture.write_text("Response: " + token())
+    monkeypatch.setattr("modules.tools.artifact.resolve_operation_artifact_path", lambda ref: str(capture))
+    context = RecommendationContext(
+        scripted_service.service,
+        ["hypothesis_generation"],
+        [technique_signals],
+        tmp_path / "capture.json",
+    )
+    bind_subject(context)
+    event = SimpleNamespace(
+        tool_use={"name": "new_runtime_capture_tool", "toolUseId": "capture", "input": {}},
+        result={"content": [{"text": "Full response: artifact:response.txt"}]},
+    )
+    TechniqueObservationHook(context).after_tool(event)
+    assert "JWT handling" in context.render()
+    assert token() not in json.dumps(context.state)
+    capture.write_bytes(b"\xff\xfe")
+    context.inspect("artifact:response.txt")
+    assert "Capture unavailable" in context.render()
+
+
+def test_passive_hook_failure_never_changes_successful_tool_result(scripted_service, tmp_path, monkeypatch):
+    scripted_service.publish()
+    context = RecommendationContext(scripted_service.service, ["hypothesis_generation"], [], tmp_path / "passive.json")
+    monkeypatch.setattr(context, "observe", lambda *args: (_ for _ in ()).throw(OSError("disk")))
+    result = {"status": "success", "content": [{"text": "Successful target response"}]}
+    hook = TechniqueObservationHook(context)
+    hook.after_tool(SimpleNamespace(tool_use={"name": "capture", "input": {}}, result=result))
+    assert result == {"status": "success", "content": [{"text": "Successful target response"}]}
+
+
+def test_production_sdk_hooks_detect_jwt_and_preserve_original_outcome(scripted_service, tmp_path, monkeypatch):
+    from modules.operation_plugins.web import technique_signals
+    from tests.fixtures.outcome_agent import complete_tool_call, create_outcome_agent
+
+    scripted_service.publish()
+    context = RecommendationContext(
+        scripted_service.service,
+        ["hypothesis_generation"],
+        [technique_signals],
+        tmp_path / "sdk.json",
+    )
+    bind_subject(context)
+    selected = scripted_service.service.tool("op", "task")
+    selected._cyber_technique_context = context
+    agent = create_outcome_agent(monkeypatch, "task_executor", [selected])
+    event = complete_tool_call(agent, "future_capture_tool", {}, "Set-Cookie: " + token())
+    assert "recommended_lookups" in event.result["content"][-1]["text"]
+    original = agent._cyber_callback_handler.tool_outcome_journal.entries()[0]
+    assert original.success
+    assert "Set-Cookie:" in original.output_summary
+
+
+def test_compact_tokens_are_blocked_before_research_or_embedding(scripted_service):
+    from modules.tools.web_search import contains_sensitive_web_search_data
+
+    assert contains_sensitive_web_search_data(token())
+    with pytest.raises(ValueError, match="without secrets"):
+        scripted_service.service.get("Review validation of " + token())
+    assert not scripted_service.calls
+
+
+@pytest.mark.parametrize("positive", [True, False])
+def test_semantic_cache_shared_across_tasks_and_continuation(scripted_service, tmp_path, positive):
+    state = scripted_service
+    state.publish()
+    first = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "first.json")
+    first.lookup.subjects = [{"id": "assigned"}]
+    selected = [first.triggers[0]["trigger_id"]] if positive else []
+    calls = []
+
+    def runner(*args):
+        calls.append(args)
+        return json.dumps(matcher_payload({"trigger_ids": selected, "reason": "PRIVATE observation reason",
+                           "support": [{"trigger_id": trigger, "subject_ids": ["assigned"],
+                                        "connections": [],
+                                        "observation_references": ["artifact:first"]} for trigger in selected]}))
+
+    state.service.runner = runner
+    first.observe("Equivalent evidence", "artifact:first")
+    second = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "second.json")
+    second.lookup.subjects = [{"id": "assigned"}]
+    second.observe("Equivalent evidence", "artifact:first")
+    assert len(calls) == 1
+    assert second.state["semantic_calls"] == 0
+    assert bool(second.state["recommendations"]) is positive
+    if positive:
+        assert second.state["recommendations"][0]["source"] == "artifact:first"
+    resumed = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "second.json")
+    resumed.lookup.subjects = [{"id": "assigned"}]
+    resumed.observe("Equivalent evidence", "artifact:first")
+    assert len(calls) == 1
+    cached = next((tmp_path / "semantic_cache").glob("*.json")).read_text()
+    assert "Equivalent evidence" not in cached
+    assert "PRIVATE" not in cached
+
+
+def test_semantic_cache_isolates_phase_catalog_excerpt_and_operation(scripted_service, tmp_path):
+    state = scripted_service
+    state.publish()
+    contexts = ["hypothesis_generation"]
+    first = RecommendationContext(state.service, contexts, [], tmp_path / "op1" / "first.json")
+    first.lookup.subjects = [{"id": "assigned"}]
+    first.observe("Evidence", "source")
+    other_phase = RecommendationContext(
+        state.service, [*contexts, "analysis"], [], tmp_path / "op1" / "phase.json"
+    )
+    other_phase.lookup.subjects = [{"id": "assigned"}]
+    other_phase.observe("Evidence", "source")
+    other_catalog = RecommendationContext(state.service, contexts, [], tmp_path / "op1" / "catalog.json")
+    other_catalog.lookup.subjects = [{"id": "assigned"}]
+    other_catalog.triggers = [{**first.triggers[0], "when": "Changed condition"}]
+    original_search = state.service.store.search_triggers
+    state.service.store.search_triggers = lambda *args: other_catalog.triggers
+    other_catalog.observe("Evidence", "source")
+    state.service.store.search_triggers = original_search
+    other_operation = RecommendationContext(state.service, contexts, [], tmp_path / "op2" / "first.json")
+    other_operation.lookup.subjects = [{"id": "assigned"}]
+    other_operation.observe("Evidence", "source")
+    first.observe("Different evidence", "source")
+    assert len([role for role, _, _ in state.calls if role == "technique_trigger_matcher"]) == 5
+
+
+def test_failed_semantic_match_can_retry_same_observation(scripted_service, tmp_path):
+    state = scripted_service
+    state.publish()
+    context = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "retry.json")
+    context.lookup.subjects = [{"id": "assigned"}]
+    calls = []
+    def runner(*args):
+        calls.append(args)
+        return "invalid" if len(calls) == 1 else '{"matches":[]}'
+    state.service.runner = runner
+    context.observe("Same evidence", "source")
+    assert context.state["semantic_calls"] == 2
+    context.observe("Same evidence", "source")
+    assert len(calls) == 2
+    assert list((tmp_path / "semantic_cache").glob("*.json"))
+
+
+def test_inputs_empty_outputs_and_exhaustion_preserve_deterministic_detection(scripted_service, tmp_path):
+    from modules.operation_plugins.web import technique_signals
+
+    state = scripted_service
+    state.publish()
+    context = RecommendationContext(
+        state.service, ["hypothesis_generation"], [technique_signals], tmp_path / "inputs.json"
+    )
+    context.lookup.subjects = [{"id": "assigned"}]
+    context.observe("Some arguments", "tool_input:1")
+    context.observe("  ", "tool_output:1")
+    assert context.state["semantic_calls"] == 0
+    for number in range(7):
+        context.observe(f"Evidence {number}", "tool_output:2")
+    assert context.state["semantic_calls"] == 7
+    assert "JWT handling" not in context.observe(token(), "tool_input:jwt")
+
+
+def test_bad_cache_is_replaced_and_cached_decisions_work_after_exhaustion(scripted_service, tmp_path):
+    state = scripted_service
+    state.publish()
+    first = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "first.json")
+    first.lookup.subjects = [{"id": "assigned"}]
+    first.observe("Shared evidence", "source")
+    path = next((tmp_path / "semantic_cache").glob("*.json"))
+    path.write_text(json.dumps(matcher_payload({"trigger_ids": ["invented"], "reason": "bad cache"})))
+    second = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "second.json")
+    second.lookup.subjects = [{"id": "assigned"}]
+    second.observe("Shared evidence", "source")
+    assert second.state["semantic_calls"] == 1
+    third = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "third.json")
+    third.lookup.subjects = [{"id": "assigned"}]
+    third.state["semantic_calls"] = 6
+    third.observe("Shared evidence", "source")
+    assert not third.state["limitations"]
+    assert third.state["semantic_calls"] == 6
+
+
+def test_concurrent_task_bindings_share_one_semantic_decision(scripted_service, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    state = scripted_service
+    state.publish()
+    contexts = [
+        RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / f"task-{number}.json")
+        for number in range(2)
+    ]
+    for context in contexts:
+        context.lookup.subjects = [{"id": "assigned"}]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda context: context.observe("Shared observation", "source"), contexts))
+    assert len(results) == 2
+    assert sum(context.state["semantic_calls"] for context in contexts) == 1
+
+
+def test_cache_identity_includes_observation_provenance(scripted_service, tmp_path):
+    state = scripted_service
+    state.publish()
+    adapter = SimpleNamespace(detect=lambda text: [], sanitize=lambda text: text.replace("private detail", "MASK"))
+    first = RecommendationContext(state.service, ["hypothesis_generation"], [adapter], tmp_path / "first.json")
+    first.lookup.subjects = [{"id": "assigned"}]
+    second = RecommendationContext(state.service, ["hypothesis_generation"], [adapter], tmp_path / "second.json")
+    second.lookup.subjects = [{"id": "assigned"}]
+    first.observe("private detail" + "a" * 12_000 + "tail one", "source")
+    second.observe("MASK" + "a" * 12_000 + "tail two", "source")
+    assert first.state["semantic_calls"] == 1
+    assert second.state["semantic_calls"] == 1
+
+
+def test_added_trigger_reuses_old_decisions_and_preserves_task_allowance(scripted_service, markdown, tmp_path):
+    from modules.techniques.documents import TechniqueDocument
+
+    state = scripted_service
+    state.publish()
+    path = tmp_path / "first.json"
+    first = RecommendationContext(state.service, ["hypothesis_generation"], [], path)
+    first.lookup.subjects = [{"id": "assigned"}]
+    old = first.triggers[0]["trigger_id"]
+    calls = []
+
+    def runner(_role, prompt, _tools):
+        calls.append(prompt)
+        trigger = old if len(calls) == 1 else new
+        return json.dumps(matcher_payload({"trigger_ids": [trigger], "reason": "Observed conditions", "support": [
+            {"trigger_id": trigger, "subject_ids": ["assigned"],
+            "connections": [],
+            "observation_references": ["source:first"]}]}))
+
+    state.service.runner = runner
+    first.observe("Shared evidence", "source:first")
+    # A newly published technique changes the catalog without invalidating the old trigger.
+    state.service.store.publish(TechniqueDocument(markdown(title="New method")), "module:new", "module:source")
+    second = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "second.json")
+    second.lookup.subjects = [{"id": "assigned"}]
+    new = next(row["trigger_id"] for row in second.triggers if row["trigger_id"] != old)
+    second.observe("Shared evidence", "source:first")
+    assert len(calls) == 2
+    assert old not in calls[1] and new not in calls[1]
+    assert "t1" in calls[1]
+    assert {row["trigger_id"] for row in second.state["recommendations"]} == {old, new}
+    assert all(row["source"] == "source:first" for row in second.state["recommendations"])
+    # Resuming the first task retains its allowance and recommendations across the catalog change.
+    first.state["semantic_calls"] = 6
+    first._save()
+    resumed = RecommendationContext(state.service, ["hypothesis_generation"], [], path)
+    assert resumed.state["semantic_calls"] == 6
+    assert resumed.state["recommendations"][0]["trigger_id"] == old
+    resumed.lookup.subjects = [{"id": "assigned"}]
+    resumed.observe("Shared evidence", "source:first")
+    assert len(calls) == 2  # cached new-trigger decisions also remain usable after exhaustion
+    assert RecommendationContext._fingerprint(first.triggers[0]) == RecommendationContext._fingerprint({
+        **first.triggers[0], "active": False,
+    })
+
+
+def test_generated_tool_output_and_its_artifacts_do_not_trigger(scripted_service, tmp_path, monkeypatch):
+    state = scripted_service
+    state.publish()
+    context = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "origin.json")
+    context.tool_origins["publish_analysis"] = "analysis"
+    hook = TechniqueObservationHook(context)
+    generated = {"status": "success", "content": [{"text": "artifact:generated.json"}]}
+    hook.after_tool(SimpleNamespace(
+        tool_use={"name": "publish_analysis", "toolUseId": "write", "input": {}}, result=generated,
+    ))
+    assert context.artifact_origins == {"artifact:generated.json": "analysis"}
+    resumed = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "resumed.json")
+    assert resumed.artifact_origins == context.artifact_origins
+    TechniqueObservationHook(resumed).after_tool(SimpleNamespace(
+        tool_use={"name": "future_reader", "toolUseId": "read-input", "input": {"path": "artifact:generated.json"}},
+        result={"status": "success", "content": [{"text": "Generated hypotheses without a reference header"}]},
+    ))
+    assert not resumed.lookup.observations
+    hook.after_tool(SimpleNamespace(
+        tool_use={"name": "future_reader", "toolUseId": "read", "input": {}}, result=generated,
+    ))
+    path = tmp_path / "source.json"
+    path.write_text("Generated hypothesis text")
+    monkeypatch.setattr("modules.tools.artifact.resolve_operation_artifact_path", lambda _: str(path))
+    context.inspect("artifact:generated.json")
+    assert not context.state["recommendations"]
+    assert not context.lookup.observations
+    assert not state.calls
+
+
+def test_procedure_source_seed_works_without_inventory_or_adapters(scripted_service, tmp_path, monkeypatch):
+    state = scripted_service
+    state.publish()
+    path = tmp_path / "source.txt"
+    path.write_text("Configuration declares a service dependency")
+    monkeypatch.setattr("modules.tools.artifact.resolve_operation_artifact_path", lambda _: str(path))
+    context = RecommendationContext(state.service, ["analysis"], [], tmp_path / "procedure.json")
+    task = SimpleNamespace(evidence=[], acceptance=SimpleNamespace(basis=SimpleNamespace(
+        source_refs=["target:service", "artifact:source.txt"], item_ids=[], snapshot_hash="",
+    )))
+    context.seed(task)
+    assert context.lookup.observations[0].origin == "source"
+    assert context.lookup.observations[0].scope == "subject"
+    assert not context.state["limitations"]
+
+
+def test_runtime_tool_declarations_are_read_from_actual_sdk_registry(scripted_service, tmp_path, monkeypatch):
+    from strands import tool
+    from strands.tools.registry import ToolRegistry
+
+    from tests.fixtures.outcome_agent import complete_tool_call, create_outcome_agent
+
+    @tool
+    def late_source() -> str:
+        """Read an assigned source file."""
+        return "Source data"
+
+    late_source._cyber_technique_observation_origin = "source"
+    state = scripted_service
+    context = RecommendationContext(state.service, ["analysis"], [], tmp_path / "late.json")
+    lookup = state.service.tool("op", "task", context.lookup)
+    lookup._cyber_technique_context = context
+    agent = create_outcome_agent(monkeypatch, "task_executor", [lookup])
+    agent.tool_registry = ToolRegistry()
+    agent.tool_registry.register_tool(lookup)
+    agent.tool_registry.register_tool(late_source)
+    complete_tool_call(agent, "late_source", {}, "Source code uses a bound parameter")
+    assert context.lookup.observations[-1].origin == "source"
+    assert "late_source" in context.lookup.capabilities
+    late_source._cyber_technique_observation_origin = "analysis"
+    before = list(context.lookup.observations)
+    complete_tool_call(agent, "late_source", {}, "Generated analysis")
+    assert context.lookup.observations == before
+
+
+@pytest.mark.parametrize(("signal", "positive", "negative"), [
+    ("http.oauth", "/authorize?response_type=code&client_id=test", "response_type is documented"),
+    ("http.oidc", '{"id_token": "opaque"}', '{"id_token_hint": "opaque"}'),
+    ("http.saml", "/sso?SAMLResponse=encoded", "SAMLResponse is documented"),
+    ("http.graphql", '{"query": "query Read { viewer { id } }"}', '{"query": "ordinary search"}'),
+    ("http.websocket", "Upgrade: websocket\r\n", "Upgrade: h2c\r\n"),
+    ("http.xml", "Content-Type: application/soap+xml; charset=utf-8", "Content-Type: application/json"),
+    ("http.multipart", "Content-Type: multipart/form-data; boundary=test", "Content-Type: multipart/form-data"),
+    ("http.cors", "Access-Control-Allow-Origin: https://client.invalid", "Origin: https://client.invalid"),
+])
+def test_protocol_signals_identify_syntax_without_claiming_vulnerability(signal, positive, negative):
+    assert detect(positive) == [signal]
+    assert detect(negative) == []
+    assert detect(quote(positive, safe="")) == [signal]
+
+
+def test_protocol_signals_accumulate_once_in_stable_order():
+    text = f'{token()}\nUpgrade: websocket\nAccess-Control-Allow-Origin: *\nUpgrade: websocket'
+    assert detect(text) == ["http.jwt", "http.websocket", "http.cors"]
+    assert token() not in sanitize(text)
+
+
+@pytest.mark.parametrize("text", [
+    "https://issuer.invalid/.well-known/openid-configuration",
+    "urn:oasis:names:tc:SAML:2.0:protocol",
+    '{"query": "{ viewer { id } }"}',
+    "Sec-WebSocket-Key: test",
+    "Content-Type: text/xml",
+])
+def test_alternate_protocol_forms(text):
+    assert len(detect(text)) == 1
+
+
+def test_invalid_compact_candidates_do_not_suppress_protocol_clues():
+    def header(value):
+        return base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
+
+    for candidate in (f'{header({"alg": "dir"})}..a.b.c', f'{header({"alg": 1})}.e30.'):
+        assert detect(candidate + "\nUpgrade: websocket") == ["http.websocket"]
+
+
+@pytest.mark.parametrize(("filename", "observation"), [
+    ("jwt-verification.md", token()),
+    ("oauth-oidc.md", "/authorize?response_type=code"),
+    ("oauth-oidc.md", '{"id_token": "synthetic"}'),
+    ("saml.md", "/sso?SAMLResponse=synthetic"),
+    ("graphql.md", '{"query": "{ viewer { id } }"}'),
+    ("websockets.md", "Upgrade: websocket"),
+    ("xxe.md", "Content-Type: application/xml"),
+    ("file-upload-processing.md", "Content-Type: multipart/form-data; boundary=synthetic"),
+    ("cors.md", "Access-Control-Allow-Origin: https://client.invalid"),
+])
+def test_library_documents_assemble_phase_specific_signal_recommendations(
+    scripted_service, tmp_path, filename, observation,
+):
+    from modules.operation_plugins.web import technique_signals
+    from modules.techniques.documents import TechniqueDocument
+
+    root = Path(__file__).resolve().parents[2] / "src/modules/operation_plugins/web/techniques"
+    path = root / filename
+    doc = TechniqueDocument(path.read_bytes().decode("utf-8"))
+    state = scripted_service
+    state.service.store.publish(doc, f"module:web:techniques/{path.name}", "module:web")
+    for phase in ("hypothesis_generation", "vulnerability_verification"):
+        assert phase in doc.metadata.phases
+        context = RecommendationContext(state.service, [phase], [technique_signals], tmp_path / f"{phase}.json")
+        bind_subject(context)
+        context.observe(observation, "artifact:synthetic-capture")
+        recommendations = context.state["recommendations"]
+        assert recommendations
+        assert all(row["phase_contexts"] == [phase] for row in recommendations)
+        requests = {trigger.request for trigger in doc.metadata.triggers if phase in trigger.phases}
+        assert {row["request"] for row in recommendations} <= requests
+        assert all(row["source_sha256"] for row in recommendations)
+        unrelated = RecommendationContext(
+            state.service, [phase], [technique_signals], tmp_path / f"{phase}-negative.json"
+        )
+        assert unrelated.observe("A plain unrelated response", "artifact:negative", semantic=False) == ""
+    assert not state.research_calls
+
+
+def test_render_ranks_and_deduplicates_revisions(scripted_service, tmp_path):
+    state = scripted_service
+    state.publish()
+    context = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "rank.json")
+    context.state["recommendations"] = [
+        {"trigger_id": str(index), "revision_id": f"revision-{index}", "score": index / 100,
+         "request": f"method-{index}"}
+        for index in range(12)
+    ] + [{"trigger_id": "duplicate", "revision_id": "revision-11", "score": 0.1, "request": "duplicate"}]
+    rendered = context.render()
+    assert "method-11" in rendered
+    assert "method-0" not in rendered
+    assert "duplicate" not in rendered
+
+
+@pytest.mark.parametrize("kind,value", [
+    ("endpoint", "https://example.invalid/assigned"),
+    ("service", "tcp://example.invalid:22"),
+    ("file", "/workspace/assigned.py"),
+])
+@pytest.mark.parametrize("connected", [True, False])
+def test_shared_decoys_require_semantic_assigned_subject_support(scripted_service, tmp_path, kind, value, connected):
+    state = scripted_service
+    state.publish()
+    adapter = SimpleNamespace(detect=lambda text: ["http.jwt"], sanitize=lambda text: text)
+    context = RecommendationContext(state.service, ["hypothesis_generation"], [adapter], tmp_path / "subjects.json")
+    context.lookup.subjects = [{"id": "assigned", "kind": kind, "value": value}]
+    trigger = context.triggers[0]["trigger_id"]
+
+    def runner(role, prompt, tools):
+        assert value in prompt and "unrelated feature" in prompt
+        return json.dumps(matcher_payload({"trigger_ids": [trigger] if connected and "different" not in prompt else [], "reason": "Subject relevance reviewed",
+                           "support": [{"trigger_id": trigger, "subject_ids": ["assigned"],
+                                        "connections": [],
+                                        "observation_references": ["artifact:bundle"]}] if connected else []}))
+
+    state.service.runner = runner
+    context.observe("Shared bundle includes unrelated token material", "artifact:bundle", scope="shared")
+    assert bool(context.recommended()) is connected
+    if connected:
+        assert context.recommended()[0]["supporting_subject_ids"] == ["assigned"]
+        assert context.recommended()[0]["observation_references"] == ["artifact:bundle"]
+    context.lookup.subjects = [{"id": "different", "kind": kind, "value": value}]
+    context.observe("Shared bundle includes unrelated token material", "artifact:bundle", scope="shared")
+    assert not context.recommended()
+
+
+@pytest.mark.parametrize("field", ["trigger_id", "subject_id", "observation_reference"])
+def test_compact_matcher_rejects_unknown_ids_and_suppresses_repeat(scripted_service, tmp_path, field):
+    state = scripted_service
+    state.publish()
+    context = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "invalid.json")
+    context.lookup.subjects = [{"id": "assigned"}]
+    lead = {"trigger_id": "t1", "subject_id": "s1", "observation_reference": "o1"}
+    lead[field] = "unknown"
+    state.service.runner = lambda *args: json.dumps({"matches": [lead]})
+    context.observe("Source behavior", "source")
+    assert context.state["semantic_calls"] == 2
+    assert not context.recommended()
+    context.observe("Source behavior", "source")
+    assert context.state["semantic_calls"] == 2
+
+
+def test_legacy_recommendations_are_invalidated_without_new_allowance(scripted_service, tmp_path):
+    scripted_service.publish()
+    path = tmp_path / "legacy.json"
+    context = RecommendationContext(scripted_service.service, ["hypothesis_generation"], [], path)
+    path.write_text(json.dumps({
+        "trigger_identity": "previous-contract",
+        "trigger_fingerprints": context.state["trigger_fingerprints"],
+        "recommendations": [{"trigger_id": context.triggers[0]["trigger_id"]}],
+        "seen": ["previous-review"], "semantic_calls": 6, "limitations": [],
+    }))
+    resumed = RecommendationContext(scripted_service.service, ["hypothesis_generation"], [], path)
+    assert resumed.state["recommendations"] == []
+    assert resumed.state["semantic_calls"] == 6
+
+
+def test_unrelated_accumulation_and_source_label_do_not_repeat_matching(scripted_service, tmp_path):
+    state = scripted_service
+    state.publish()
+    context = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "first.json")
+    bind_subject(context)
+    context.observe("Assigned behavior", "artifact:first")
+    calls = context.state["semantic_calls"]
+    context.lookup.observe("Unrelated shared metadata", "artifact:unrelated", "source", "shared")
+    context.lookup.capabilities = ["new_runtime_tool"]
+    context.observe("Assigned behavior", "artifact:copy")
+    assert context.state["semantic_calls"] == calls
+    assert context.recommended()[0]["connections"][0]["provenance_kind"] == "lookup_lead"
+    assert "quote" not in context.recommended()[0]["connections"][0]
+
+
+def test_observation_scope_change_invalidates_match(scripted_service, tmp_path):
+    state = scripted_service
+    state.publish()
+    context = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "scope.json")
+    bind_subject(context)
+    context.observe("Assigned behavior", "artifact:first", scope="subject")
+    context.observe("Assigned behavior", "artifact:first", scope="shared")
+    assert context.state["semantic_calls"] == 2
+
+
+def test_no_assigned_subject_never_calls_matcher(scripted_service, tmp_path):
+    state = scripted_service
+    state.publish()
+    context = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "empty.json")
+    context.observe("Unassigned behavior", "artifact:first")
+    assert context.state["semantic_calls"] == 0
+    assert not context.recommended()
+
+
+def test_failed_match_is_cached_across_continuation(scripted_service, tmp_path):
+    state = scripted_service
+    state.publish()
+    state.service.runner = lambda *args: "{}"
+    for name in ("first", "continued"):
+        context = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / f"{name}.json")
+        context.lookup.subjects = [{"id": "assigned"}]
+        context.observe("Assigned behavior", "source")
+        assert context.state["semantic_calls"] == (2 if name == "first" else 0)
+        assert not context.recommended()
+
+
+def test_multiple_subjects_share_one_matcher_call(scripted_service, tmp_path):
+    state = scripted_service
+    state.publish()
+    context = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "batch.json")
+    context.lookup.subjects = [{"id": "b", "kind": "service"}, {"id": "a", "kind": "file"}]
+    state.service.runner = lambda *args: json.dumps({"matches": [
+        {"trigger_id": "t1", "subject_id": "s1", "observation_reference": "o1"},
+        {"trigger_id": "t1", "subject_id": "s2", "observation_reference": "o1"},
+    ]})
+    context.observe("Relevant recorded behavior", "source")
+    assert context.state["semantic_calls"] == 1
+    assert context.recommended()[0]["supporting_subject_ids"] == ["a", "b"]
+    context.lookup.subjects.reverse()
+    context.observe("Relevant recorded behavior", "copy")
+    assert context.state["semantic_calls"] == 1
+
+
+@pytest.mark.parametrize("eligible", [True, False])
+def test_recommendation_reaches_next_sdk_model_call(scripted_service, tmp_path, eligible):
+    from strands import Agent, tool
+    from strands.models.model import Model
+
+    state = scripted_service
+    state.publish()
+    context = bind_subject(RecommendationContext(state.service, ["hypothesis_generation"], [],
+                                                 tmp_path / "sdk-recommendations.json"))
+    context.tool_origins["observe"] = "source"
+    if not eligible:
+        state.service.runner = lambda role, prompt, tools: '{"matches":[]}'
+
+    @tool
+    def observe() -> str:
+        """Read a captured source observation."""
+        return "Captured token: " + token()
+
+    class Provider(Model):
+        def __init__(self):
+            self.config = {"model_id": "fixture"}
+            self.calls = []
+
+        def get_config(self):
+            return self.config
+
+        def update_config(self, **kwargs):
+            self.config.update(kwargs)
+
+        async def structured_output(self, *args, **kwargs):
+            raise AssertionError("This test exercises tool-result delivery, not structured finalization")
+
+        async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs):
+            self.calls.append(json.dumps(messages))
+            yield {"messageStart": {"role": "assistant"}}
+            if len(self.calls) == 1:
+                yield {"contentBlockStart": {"start": {"toolUse": {"toolUseId": "observe-1", "name": "observe"}},
+                                             "contentBlockIndex": 0}}
+                yield {"contentBlockDelta": {"delta": {"toolUse": {"input": "{}"}}, "contentBlockIndex": 0}}
+                yield {"contentBlockStop": {"contentBlockIndex": 0}}
+                yield {"messageStop": {"stopReason": "tool_use"}}
+            else:
+                yield {"contentBlockDelta": {"delta": {"text": "Observation read."}, "contentBlockIndex": 0}}
+                yield {"contentBlockStop": {"contentBlockIndex": 0}}
+                yield {"messageStop": {"stopReason": "end_turn"}}
+
+    model = Provider()
+    model.update_config(model_id="fixture")
+    agent = Agent(model=model, tools=[observe, state.service.tool("op", "task")],
+                  hooks=[TechniqueObservationHook(context)], callback_handler=None)
+    agent("Read one observation.")
+    assert len(model.calls) == 2
+    assert ("Technique lookup recommendations" in model.calls[1]) is eligible
+
+
+def test_semantic_cache_includes_assigned_objective(scripted_service, tmp_path):
+    scripted_service.publish()
+    prompts = []
+    for index, objective in enumerate(("Review HTTP authentication", "Review filesystem permissions")):
+        context = RecommendationContext(
+            scripted_service.service, ["hypothesis_generation"], [], tmp_path / f"task-{index}.json",
+        )
+        bind_subject(context)
+        context.lookup.purpose = objective
+        original = context.service.runner
+
+        def runner(role, prompt, tools, original=original):
+            if role == "technique_trigger_matcher":
+                prompts.append(prompt)
+            return original(role, prompt, tools)
+
+        context.service.runner = runner
+        context.observe("Shared source observation", "artifact:shared.txt")
+        assert context.state["semantic_calls"] == 1
+        assert objective in prompts[-1]
+        context.observe("Shared source observation", "artifact:shared.txt")
+        assert context.state["semantic_calls"] == 1

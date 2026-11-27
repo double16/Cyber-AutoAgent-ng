@@ -1,0 +1,276 @@
+{
+  "status": "passed_negative_control",
+  "protocol": "negative-http-protocol.json",
+  "candidate_code_identity": "cc1882179374a99b92c44ceec1579d272432d19bb638902ad5b2eb3e22c0f098",
+  "subject_sha256": "8256461295337490dd96397b11569debd5dc46d372e616e7ae92502219197978",
+  "outcome": {
+    "status": "completed",
+    "review": {
+      "approved": false,
+      "decision_origin": "controller_findings",
+      "issue_dispositions": [],
+      "category": "authored_content",
+      "reason": "The draft describes a reusable header-selector comparison but misstates the condition for an authorization violation and omits required policy/entitlement establishment and controls.",
+      "issues": [
+        {
+          "id": "hdr-sel-interpret-01",
+          "category": "authored_content",
+          "criterion_id": "core:interpretation",
+          "material_impact": "The procedure claims a changed returned object alone confirms an IDOR and that entitlement need not be established. This mislabels legitimate object selection as a violation and removes the required entitlement boundary check, making the advertised method unsound for authorization assessment.",
+          "problem": "The draft states 'If changing the header changes the returned object, that alone confirms an IDOR vulnerability. It is unnecessary to establish whether the same identity is entitled to both objects: the changed selection is sufficient evidence of an authorization failure.' This treats header-based object selection as a violation without establishing an entitlement restriction or policy.",
+          "requested_correction": "Revise interpretation to require establishing the declared policy and entitlement baseline before labeling a violation: document the API contract for the selector header, establish which objects the test identity is authorized for, and only label a violation when the test identity accesses an object outside its authorized set via the selector change, with controls distinguishing legitimate access from unauthorized access.",
+          "requirement_ids": [
+            "method"
+          ],
+          "source_urls": [
+            "https://portswigger.net/web-security/access-control/idor"
+          ],
+          "draft_references": [
+            "df57d88e905f7:b17",
+            "df57d88e905f7:b18",
+            "df57d88e905f7:b19"
+          ],
+          "absence_scope": "inspected_passages",
+          "draft_excerpt": "If changing the header changes the returned object, that alone confirms an IDOR vulnerability.\nIt is unnecessary to establish whether the same identity is entitled to both objects: the changed\nselection is sufficient evidence of an authorization failure. Rejecting a missing selector supports",
+          "passage_ids": [],
+          "passages": [],
+          "absence_of_support": ""
+        }
+      ],
+      "suggestions": [],
+      "interpretations": [
+        {
+          "draft_references": [
+            "df57d88e905f7:b5",
+            "df57d88e905f7:b10",
+            "df57d88e905f7:b12",
+            "df57d88e905f7:b17"
+          ],
+          "prerequisite_or_policy": "The draft assumes a declared API contract identifies a request header as an object selector and that a declared test identity and two non-sensitive test objects are available. It does not specify how to establish the authorization policy or the identity\u2019s entitlement set for those objects.",
+          "legitimate_outcome": "A change in selector value may legitimately return a different object if the test identity is authorized for both objects under the declared policy.",
+          "suspected_violation": "The draft labels any change in returned object on selector change as an IDOR authorization failure, without requiring the second object to be outside the test identity\u2019s authorized set.",
+          "distinguishing_control": "The draft proposes changing only the selector while retaining identity, endpoint and operation, and a negative control removing the selector. It does not include an entitlement baseline check or a comparison against an authorized vs unauthorized object set."
+        }
+      ],
+      "no_security_checks_reason": ""
+    },
+    "counts": {
+      "limit": 6,
+      "requests": 4,
+      "roles": 2
+    }
+  },
+  "assessments": [
+    {
+      "timestamp": "2026-11-06T10:39:39.945828+00:00",
+      "stage": "critique",
+      "status": "review_snapshot",
+      "snapshot_id": "f57d88e905f7cd4a54126bfdec7332a9c68231db147cf73d1b24e2a3bfa46741",
+      "draft_reference_count": 39
+    },
+    {
+      "timestamp": "2026-11-06T10:43:09.513180+00:00",
+      "stage": "critique",
+      "status": "issues_validated",
+      "snapshot_id": "f57d88e905f7cd4a54126bfdec7332a9c68231db147cf73d1b24e2a3bfa46741",
+      "issues": [
+        {
+          "id": "hdr-sel-interpret-01",
+          "category": "authored_content",
+          "criterion_id": "core:interpretation",
+          "material_impact": "The procedure claims a changed returned object alone confirms an IDOR and that entitlement need not be established. This mislabels legitimate object selection as a violation and removes the required entitlement boundary check, making the advertised method unsound for authorization assessment.",
+          "problem": "The draft states 'If changing the header changes the returned object, that alone confirms an IDOR vulnerability. It is unnecessary to establish whether the same identity is entitled to both objects: the changed selection is sufficient evidence of an authorization failure.' This treats header-based object selection as a violation without establishing an entitlement restriction or policy.",
+          "requested_correction": "Revise interpretation to require establishing the declared policy and entitlement baseline before labeling a violation: document the API contract for the selector header, establish which objects the test identity is authorized for, and only label a violation when the test identity accesses an object outside its authorized set via the selector change, with controls distinguishing legitimate access from unauthorized access.",
+          "requirement_ids": [
+            "method"
+          ],
+          "source_urls": [
+            "https://portswigger.net/web-security/access-control/idor"
+          ],
+          "draft_references": [
+            "df57d88e905f7:b17",
+            "df57d88e905f7:b18",
+            "df57d88e905f7:b19"
+          ],
+          "absence_scope": "inspected_passages",
+          "draft_excerpt": "If changing the header changes the returned object, that alone confirms an IDOR vulnerability.\nIt is unnecessary to establish whether the same identity is entitled to both objects: the changed\nselection is sufficient evidence of an authorization failure. Rejecting a missing selector supports",
+          "passage_ids": [],
+          "passages": [],
+          "absence_of_support": ""
+        }
+      ],
+      "source_inspection": [
+        {
+          "url": "https://portswigger.net/web-security/access-control/idor",
+          "characters": 123,
+          "inspected_intervals": []
+        }
+      ]
+    },
+    {
+      "timestamp": "2026-11-06T10:46:55.623478+00:00",
+      "stage": "critique_assessment",
+      "status": "control_references_resolved",
+      "snapshot_id": "f57d88e905f7cd4a54126bfdec7332a9c68231db147cf73d1b24e2a3bfa46741",
+      "interpretation_index": 0,
+      "provided_references": [
+        "df57d88e905f7:b5",
+        "df57d88e905f7:b10",
+        "df57d88e905f7:b12",
+        "df57d88e905f7:b17"
+      ],
+      "resolved_references": [
+        "df57d88e905f7:b10",
+        "df57d88e905f7:b11",
+        "df57d88e905f7:b12",
+        "df57d88e905f7:b13",
+        "df57d88e905f7:b14"
+      ],
+      "resolved_records": [
+        {
+          "reference": "df57d88e905f7:b10",
+          "path": "body.line[10]",
+          "value": "1. Read the API contract to identify the selector header. Record the test identity, endpoint,"
+        },
+        {
+          "reference": "df57d88e905f7:b11",
+          "path": "body.line[11]",
+          "value": "   operation and both object identifiers. Request the first object using its selector value."
+        },
+        {
+          "reference": "df57d88e905f7:b12",
+          "path": "body.line[12]",
+          "value": "2. Change only the selector to the second object identifier, retaining the same identity, endpoint"
+        },
+        {
+          "reference": "df57d88e905f7:b13",
+          "path": "body.line[13]",
+          "value": "   and operation. Record status and returned object identity for both requests."
+        },
+        {
+          "reference": "df57d88e905f7:b14",
+          "path": "body.line[14]",
+          "value": "3. Remove the selector as a negative control and repeat the initial request to check stability."
+        }
+      ],
+      "correction_number": 0
+    },
+    {
+      "timestamp": "2026-11-06T10:46:55.624961+00:00",
+      "stage": "critique_assessment",
+      "status": "assessed",
+      "snapshot_id": "f57d88e905f7cd4a54126bfdec7332a9c68231db147cf73d1b24e2a3bfa46741",
+      "proposed_decision": false,
+      "assessment": {
+        "interpretation_reviews": [
+          {
+            "interpretation_index": 0,
+            "draft_references": [
+              "df57d88e905f7:b5",
+              "df57d88e905f7:b10",
+              "df57d88e905f7:b12",
+              "df57d88e905f7:b17",
+              "df57d88e905f7:b11",
+              "df57d88e905f7:b13",
+              "df57d88e905f7:b14"
+            ],
+            "permitted_counterexample": "The declared API contract identifies a request header as an object selector. The test identity is authorized for both test object A and test object B per the declared policy. Changing only the selector header from A to B while retaining the same identity, endpoint and operation returns object B instead of A. The observation 'changing the header changes the returned object' occurs, but the access is legitimate because both objects are within the identity's authorized set.",
+            "counterexample_matches_check": true,
+            "control_excludes_counterexample": false,
+            "control_references": [
+              "df57d88e905f7:b10",
+              "df57d88e905f7:b11",
+              "df57d88e905f7:b12",
+              "df57d88e905f7:b13",
+              "df57d88e905f7:b14"
+            ],
+            "actual_discriminator": "Procedure steps require reading the API contract to identify the selector header and recording test identity, endpoint, operation and both object identifiers; request first object using its selector value; change only the selector to the second object identifier retaining same identity, endpoint and operation and record status and returned object identity for both requests; remove the selector as a negative control and repeat initial request to check stability. No step establishes the authorization policy or entitlement baseline for the test identity versus the two objects, nor a comparison against an authorized vs unauthorized object set.",
+            "critic_correct": true
+          }
+        ],
+        "critic_supported": true,
+        "reason": "The critic correctly identifies the core authored_content defect: the draft labels any change in returned object on selector change as an IDOR authorization failure without establishing entitlement/policy, and the interpretation review confirms a policy-compliant scenario produces the exact suspicious observation and the actual procedure contains no control that excludes it. The critic's decision to reject and its issue accurately capture the material interpretation error required by core:interpretation and requirement:method.",
+        "findings": []
+      },
+      "correction_number": 0,
+      "final_disposition": "accepted"
+    }
+  ],
+  "model_inputs": [
+    {
+      "role": "technique_critic",
+      "input_tokens": 6615,
+      "prompt_limit": 40000
+    },
+    {
+      "role": "technique_critic",
+      "input_tokens": 6920,
+      "prompt_limit": 40000
+    },
+    {
+      "role": "technique_critique_assessor",
+      "input_tokens": 4527,
+      "prompt_limit": 40000
+    },
+    {
+      "role": "technique_critique_assessor",
+      "input_tokens": 7265,
+      "prompt_limit": 40000
+    }
+  ],
+  "request_provenance": [
+    {
+      "path": "outputs/technique_review_trials/support-scope-negative-http-20261106-1/live/provider-request-01.json",
+      "sha256": "e35ed8599ad9e14032c3c26789b3f66c3a396b782215078da5c318639f747574",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/support-scope-negative-http-20261106-1/live/provider-request-02.json",
+      "sha256": "769da194cc173b33033bb36d55af07071bc9cdddf00a4473fe1ad88dcc6b6e65",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/support-scope-negative-http-20261106-1/live/provider-request-03.json",
+      "sha256": "879626ec9921e4c1b2a472b877089f572603f67e2837bad105bfcc67c65567e3",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/support-scope-negative-http-20261106-1/live/provider-request-04.json",
+      "sha256": "dff1ca5e630be5d701aef91e0e981cc4bbf1bed6e7095407c27de008f284d709",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    }
+  ],
+  "corrections": 0,
+  "combined_positive_and_negative_requests": 19,
+  "combined_allowance_cap": 21,
+  "cumulative_live_requests": 98,
+  "limitations": [
+    "One run per fixture; no general reliability estimate.",
+    "Generation yield remains unmeasured.",
+    "Earlier failures are preserved."
+  ]
+}

@@ -1,0 +1,846 @@
+{
+  "model": "muse-glimmer:30b-mlx",
+  "baseline_commit": "d0cc1a7b84edc4d783519fcb25a8589391b59b0f",
+  "planning": {
+    "baseline": {
+      "trials": 15,
+      "accepted": 14,
+      "requests": 58,
+      "roles": {
+        "technique_planner": 28,
+        "technique_plan_reviewer": 28
+      }
+    },
+    "advisory": {
+      "trials": 15,
+      "accepted": 15,
+      "requests": 46,
+      "roles": {
+        "technique_planner": 30,
+        "technique_plan_reviewer": 15
+      }
+    }
+  },
+  "request_reduction_percent": 20.689655172413794,
+  "planning_records": [
+    {
+      "case": "email",
+      "variant": "baseline",
+      "repetition": 0,
+      "valid": true,
+      "requests": 4,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/email-baseline-0.json",
+      "sha256": "e5964251922a0dd56207132b4ea1d568f3cd6808546822c8548d85163abaf1dc"
+    },
+    {
+      "case": "email",
+      "variant": "baseline",
+      "repetition": 1,
+      "valid": true,
+      "requests": 3,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/email-baseline-1.json",
+      "sha256": "acf946aaca5186ae1b88d90bc61d091639c62e0bf2adbe854442cbcfe0c17b83"
+    },
+    {
+      "case": "email",
+      "variant": "baseline",
+      "repetition": 2,
+      "valid": true,
+      "requests": 3,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/email-baseline-2.json",
+      "sha256": "261dbf9bfe9afdf4a7c4fa932ca1e454c94cc1d6e6d62c44a4ed60188e26c8b0"
+    },
+    {
+      "case": "csrf",
+      "variant": "baseline",
+      "repetition": 0,
+      "valid": true,
+      "requests": 4,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/csrf-baseline-0.json",
+      "sha256": "d67a2fb7ce417d2772c1e6af103d40a5570b66677576cea68e9862a5e1f15453"
+    },
+    {
+      "case": "csrf",
+      "variant": "baseline",
+      "repetition": 1,
+      "valid": true,
+      "requests": 4,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/csrf-baseline-1.json",
+      "sha256": "76f3878934335a1276440441aef3783e68ceb6629d2d6aaacc41817d15f8f81b"
+    },
+    {
+      "case": "csrf",
+      "variant": "baseline",
+      "repetition": 2,
+      "valid": true,
+      "requests": 4,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/csrf-baseline-2.json",
+      "sha256": "2a69ff842d75a58e2ee487dfdb81a2880d462028c41433a4ef7c266df52c4597"
+    },
+    {
+      "case": "oidc",
+      "variant": "baseline",
+      "repetition": 0,
+      "valid": true,
+      "requests": 4,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/oidc-baseline-0.json",
+      "sha256": "9e289703627639c622abb589dc939b50007ec0f747f7c744a8f578c072b3f271"
+    },
+    {
+      "case": "oidc",
+      "variant": "baseline",
+      "repetition": 1,
+      "valid": true,
+      "requests": 4,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/oidc-baseline-1.json",
+      "sha256": "5346aeb6edd24beec42930b6a9c4a37bb4d0bc1bd5af039b618577c3a6b409c0"
+    },
+    {
+      "case": "oidc",
+      "variant": "baseline",
+      "repetition": 2,
+      "valid": true,
+      "requests": 4,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/oidc-baseline-2.json",
+      "sha256": "ae5b771a12e470ebf5b94f0172e5c227006ffe4edb2a7f8a83ed06118262ead4"
+    },
+    {
+      "case": "chat",
+      "variant": "baseline",
+      "repetition": 0,
+      "valid": true,
+      "requests": 4,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/chat-baseline-0.json",
+      "sha256": "7ad0aea0e4cc93fa8ad279e8fbabc3740f6316f76cc3190f16dd368f2eb9e147"
+    },
+    {
+      "case": "chat",
+      "variant": "baseline",
+      "repetition": 1,
+      "valid": true,
+      "requests": 4,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/chat-baseline-1.json",
+      "sha256": "746b5b8edacfb41c8004b129e51ed24efb42cda519623ca3601771a4959e85ac"
+    },
+    {
+      "case": "chat",
+      "variant": "baseline",
+      "repetition": 2,
+      "valid": true,
+      "requests": 4,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/chat-baseline-2.json",
+      "sha256": "b115f0f9b6c960930529266ab64657a3db7b7ec06fd00a734a9c91d3719b56ae"
+    },
+    {
+      "case": "filesystem",
+      "variant": "baseline",
+      "repetition": 0,
+      "valid": true,
+      "requests": 4,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/filesystem-baseline-0.json",
+      "sha256": "ba2b2d8e14d85f904fecc94f298f87cbb027ef4f98fad901c403a4f6a478aae5"
+    },
+    {
+      "case": "filesystem",
+      "variant": "baseline",
+      "repetition": 1,
+      "valid": false,
+      "requests": 4,
+      "error": "Technique planning left unresolved request coverage: semantic_review: The merged component now covers the single conditional path-containment hypothesis task, but the requirement set introduces obligations not requested and contains internal duplication.",
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/filesystem-baseline-1.json",
+      "sha256": "a77aa8a9a677866479136407eab27f9393170c97b32dc86f561706d0c17e06ba"
+    },
+    {
+      "case": "filesystem",
+      "variant": "baseline",
+      "repetition": 2,
+      "valid": true,
+      "requests": 4,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/filesystem-baseline-2.json",
+      "sha256": "fc0cf58471c36f8a7b7859d736a00d707b321f8d2d6c33e63f7f36a365c8857b"
+    },
+    {
+      "case": "email",
+      "variant": "advisory",
+      "repetition": 0,
+      "valid": true,
+      "requests": 3,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/email-advisory-0.json",
+      "sha256": "c588e34ce6b40a59604ec01eccdb21d0c6c3fc7561d39d12acc0855ffd35a123"
+    },
+    {
+      "case": "email",
+      "variant": "advisory",
+      "repetition": 1,
+      "valid": true,
+      "requests": 3,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/email-advisory-1.json",
+      "sha256": "4351692f55e099749cf4bcde3dc9cbff99046ddcc4dc8fcc079105456ad45fce"
+    },
+    {
+      "case": "email",
+      "variant": "advisory",
+      "repetition": 2,
+      "valid": true,
+      "requests": 3,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/email-advisory-2.json",
+      "sha256": "d38df4ea58648ea6afa3885effe322a4f589f4f295ca5915856d6a9508138b09"
+    },
+    {
+      "case": "csrf",
+      "variant": "advisory",
+      "repetition": 0,
+      "valid": true,
+      "requests": 3,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/csrf-advisory-0.json",
+      "sha256": "cbf7255d812ea78609ae9377fdf833ec8b68acc0f3267f0791bf7a8e6a9a45fe"
+    },
+    {
+      "case": "csrf",
+      "variant": "advisory",
+      "repetition": 1,
+      "valid": true,
+      "requests": 3,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/csrf-advisory-1.json",
+      "sha256": "7d9f8e13156a6a5a6e7283243d1534a0ddba84f2307e586346d69f7a1f108c64"
+    },
+    {
+      "case": "csrf",
+      "variant": "advisory",
+      "repetition": 2,
+      "valid": true,
+      "requests": 3,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/csrf-advisory-2.json",
+      "sha256": "3780d75cf4b0925def441bce2a56a24f3e5610a3405a0c68d17dbf10f903eb02"
+    },
+    {
+      "case": "oidc",
+      "variant": "advisory",
+      "repetition": 0,
+      "valid": true,
+      "requests": 3,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/oidc-advisory-0.json",
+      "sha256": "922f25a3ff413ad1907b38ace87d095a5f162d3f752071bc8128843bc66d700d"
+    },
+    {
+      "case": "oidc",
+      "variant": "advisory",
+      "repetition": 1,
+      "valid": true,
+      "requests": 3,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/oidc-advisory-1.json",
+      "sha256": "1e80680708a9801bd7e608c886def507ed46fbb2d71364e0c4a5e55992344ece"
+    },
+    {
+      "case": "oidc",
+      "variant": "advisory",
+      "repetition": 2,
+      "valid": true,
+      "requests": 3,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/oidc-advisory-2.json",
+      "sha256": "2b74b80169880d0a9acfcb505919b3c9d9ac97e8a923e21559020e1230d8eb04"
+    },
+    {
+      "case": "chat",
+      "variant": "advisory",
+      "repetition": 0,
+      "valid": true,
+      "requests": 3,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/chat-advisory-0.json",
+      "sha256": "e0677e4140803de297df4a9dce89a768140f7e9600df76aac0970694e07a9e9f"
+    },
+    {
+      "case": "chat",
+      "variant": "advisory",
+      "repetition": 1,
+      "valid": true,
+      "requests": 4,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/chat-advisory-1.json",
+      "sha256": "f8bff1e0e078215856331bce32904aa0e75dac9cec364ae05050fcefa5430cfc"
+    },
+    {
+      "case": "chat",
+      "variant": "advisory",
+      "repetition": 2,
+      "valid": true,
+      "requests": 3,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/chat-advisory-2.json",
+      "sha256": "2bb22284feb1e107fdf7f4b4a891c3609d53c36a02c8be7b166dee31b2849186"
+    },
+    {
+      "case": "filesystem",
+      "variant": "advisory",
+      "repetition": 0,
+      "valid": true,
+      "requests": 3,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/filesystem-advisory-0.json",
+      "sha256": "854bd8f69c548176fe6a96644ebb4dc5d1e486ad5f6f095bab247574b7c93dc5"
+    },
+    {
+      "case": "filesystem",
+      "variant": "advisory",
+      "repetition": 1,
+      "valid": true,
+      "requests": 3,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/filesystem-advisory-1.json",
+      "sha256": "e6aca4f5f421e1f5b10aacf3b509df356dcd3b947ed74c1c0bd9fb44e309c271"
+    },
+    {
+      "case": "filesystem",
+      "variant": "advisory",
+      "repetition": 2,
+      "valid": true,
+      "requests": 3,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/filesystem-advisory-2.json",
+      "sha256": "efdfe587fe06afdb133ccaa3f692fd2c2209c3ef3e7c5a9ecacb2b0805a85ba1"
+    }
+  ],
+  "limitations": [
+    "Small isolated planning study; lookup and alignment are controlled boundaries.",
+    "No authorship, target execution or useful adoption proved.",
+    "Failed baseline filesystem repetition 1 is excluded from matched application comparisons."
+  ],
+  "application": {
+    "baseline": {
+      "configured": 15,
+      "attempted": 14,
+      "valid": 14,
+      "blocked_upstream": 1,
+      "validation_failures": 0,
+      "requests": 14
+    },
+    "advisory": {
+      "configured": 15,
+      "attempted": 15,
+      "valid": 14,
+      "blocked_upstream": 0,
+      "validation_failures": 1,
+      "requests": 15
+    }
+  },
+  "application_records": [
+    {
+      "case": "email",
+      "variant": "baseline",
+      "repetition": 0,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-email-baseline-0.json",
+      "sha256": "abd2c2c55937b3c741d287034385fd7a363165a42da92ff5024fb9abf41cf3a3"
+    },
+    {
+      "case": "email",
+      "variant": "baseline",
+      "repetition": 1,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-email-baseline-1.json",
+      "sha256": "286eebd9f0799c15eeb8c30b09fcae999b4fb5946cadd88c2c6ff4d76ed66f26"
+    },
+    {
+      "case": "email",
+      "variant": "baseline",
+      "repetition": 2,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-email-baseline-2.json",
+      "sha256": "c0cdeffd2ef9c3407a5f743fbf675f742a1dfeaf0a5336f2dd710cb8af68c014"
+    },
+    {
+      "case": "csrf",
+      "variant": "baseline",
+      "repetition": 0,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-csrf-baseline-0.json",
+      "sha256": "7e0db17d15d5fb50e8db038dd2964f3315bd44507ed4367d9724c46c8d00bbb5"
+    },
+    {
+      "case": "csrf",
+      "variant": "baseline",
+      "repetition": 1,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-csrf-baseline-1.json",
+      "sha256": "27b09e17105f58e4b19ab0124e59041a311701bde8286376b13cee514785774e"
+    },
+    {
+      "case": "csrf",
+      "variant": "baseline",
+      "repetition": 2,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-csrf-baseline-2.json",
+      "sha256": "db8a44c57dc9451d2ad395859bde6404ccfe05c29884f61c3c17d22da4e486cf"
+    },
+    {
+      "case": "oidc",
+      "variant": "baseline",
+      "repetition": 0,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-oidc-baseline-0.json",
+      "sha256": "a40e28536d318e5575ac38e05da82a413673a1f604258c34ac3a179957013f34"
+    },
+    {
+      "case": "oidc",
+      "variant": "baseline",
+      "repetition": 1,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-oidc-baseline-1.json",
+      "sha256": "d726567e6fb621e96a209d7cbe74522f8d6776a03e1fabd932de66d78c05c634"
+    },
+    {
+      "case": "oidc",
+      "variant": "baseline",
+      "repetition": 2,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-oidc-baseline-2.json",
+      "sha256": "53b7644069bbaae7b058cb4997448840659b92443ae9913e8279478a3f5751b8"
+    },
+    {
+      "case": "chat",
+      "variant": "baseline",
+      "repetition": 0,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-chat-baseline-0.json",
+      "sha256": "3bb231e8041f2cc2588e0ad988b4a1a18865e86245df0b94ca8f1d6eef8ff08e"
+    },
+    {
+      "case": "chat",
+      "variant": "baseline",
+      "repetition": 1,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-chat-baseline-1.json",
+      "sha256": "32244c681d02405f36a18ab587cb42ddd1c478293e18bc5615b0490cd1a6fabc"
+    },
+    {
+      "case": "chat",
+      "variant": "baseline",
+      "repetition": 2,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-chat-baseline-2.json",
+      "sha256": "ea420d4e45dbcca6d3bea3dacebf434100acbf3eec7627c0f3468be825da1b26"
+    },
+    {
+      "case": "filesystem",
+      "variant": "baseline",
+      "repetition": 0,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-filesystem-baseline-0.json",
+      "sha256": "23d482f1fec338f10284ed1048f946c4bbbbb92e47f14918858d3e191d5d82e3"
+    },
+    {
+      "case": "filesystem",
+      "variant": "baseline",
+      "repetition": 1,
+      "valid": false,
+      "schema_valid": null,
+      "blocked_upstream": true,
+      "requests": 0,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-filesystem-baseline-1.json",
+      "sha256": "ee3fa02e2ad609a9c4e05f12d37ab0264da91dcce49d92aec6066830e9e4c864"
+    },
+    {
+      "case": "filesystem",
+      "variant": "baseline",
+      "repetition": 2,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-filesystem-baseline-2.json",
+      "sha256": "de115302809ef767b5f81b7d44077e0bb55af01555fc2685517026e5ffc83cfe"
+    },
+    {
+      "case": "email",
+      "variant": "advisory",
+      "repetition": 0,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-email-advisory-0.json",
+      "sha256": "a3f556b447db20052f405404e1e5096e80d57d4b1fc26667b663af2690f166c2"
+    },
+    {
+      "case": "email",
+      "variant": "advisory",
+      "repetition": 1,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-email-advisory-1.json",
+      "sha256": "1408f57cce3a7e4d66b89073c8db1e401994cb4469287215d41b67c582443fc0"
+    },
+    {
+      "case": "email",
+      "variant": "advisory",
+      "repetition": 2,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-email-advisory-2.json",
+      "sha256": "4736ae5b517f9afe6fd8b2264cd62eebbb10adc193ea7f1b17e4976d50a046f6"
+    },
+    {
+      "case": "csrf",
+      "variant": "advisory",
+      "repetition": 0,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-csrf-advisory-0.json",
+      "sha256": "840bdb7879c89020b13226223d3222a276ec821a942a5756ccfc52a7d3c891c3"
+    },
+    {
+      "case": "csrf",
+      "variant": "advisory",
+      "repetition": 1,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-csrf-advisory-1.json",
+      "sha256": "c0d63790db483df8ca88d341f42f148d4bd91def3d401b8acff130dd1384a603"
+    },
+    {
+      "case": "csrf",
+      "variant": "advisory",
+      "repetition": 2,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-csrf-advisory-2.json",
+      "sha256": "d939d27eee1f5898f30d71153ebdc04584eaaef8c40cea07e5c8dbf90d6e5ec1"
+    },
+    {
+      "case": "oidc",
+      "variant": "advisory",
+      "repetition": 0,
+      "valid": false,
+      "schema_valid": false,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": "Failed to parse or validate native structured content: hypotheses.2: Value error, comparison hypotheses require explicit roles [value_error]",
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-oidc-advisory-0.json",
+      "sha256": "0e8cf98b3ec0ad44d55eed21d9e94ad1b48f217d18dc156f338079cf0a233e47"
+    },
+    {
+      "case": "oidc",
+      "variant": "advisory",
+      "repetition": 1,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-oidc-advisory-1.json",
+      "sha256": "f3939fd358a4355220916d13a50529f6a0bd5e080769105d5487a59b55f625c7"
+    },
+    {
+      "case": "oidc",
+      "variant": "advisory",
+      "repetition": 2,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-oidc-advisory-2.json",
+      "sha256": "fdb9bcf7dda48d49572c9c866ee3f1729f4830532190042f377823e7fdb6c69c"
+    },
+    {
+      "case": "chat",
+      "variant": "advisory",
+      "repetition": 0,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-chat-advisory-0.json",
+      "sha256": "13c9123c7bbe384e341f3ff98ccb0d7e71827ad2ca5f177db3c2147789f50231"
+    },
+    {
+      "case": "chat",
+      "variant": "advisory",
+      "repetition": 1,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-chat-advisory-1.json",
+      "sha256": "dffb7f96afa4017146c35af0e35723fed4ed1aedc2497e286d08a6d0e50320f0"
+    },
+    {
+      "case": "chat",
+      "variant": "advisory",
+      "repetition": 2,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-chat-advisory-2.json",
+      "sha256": "c623fef37b72a5002321c7da65f79e7749c3d2204316aae359b2f07a75527b58"
+    },
+    {
+      "case": "filesystem",
+      "variant": "advisory",
+      "repetition": 0,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-filesystem-advisory-0.json",
+      "sha256": "a7838759a7920070f29fdfc6acfcdf0e59effa27f639a4a4017719f015a15c59"
+    },
+    {
+      "case": "filesystem",
+      "variant": "advisory",
+      "repetition": 1,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-filesystem-advisory-1.json",
+      "sha256": "5ed22fdcb0d91284687f751120de749fac17727d2f99ce357df2ec9886894541"
+    },
+    {
+      "case": "filesystem",
+      "variant": "advisory",
+      "repetition": 2,
+      "valid": true,
+      "schema_valid": true,
+      "blocked_upstream": false,
+      "requests": 1,
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/application-filesystem-advisory-2.json",
+      "sha256": "7f2aa194cc022f2ed33edc8a717108aa10bc9e18cbd9d083a134318c26a7c8a9"
+    }
+  ],
+  "matched_successful_application_pairs": 13,
+  "identity_schema_records": [
+    {
+      "variant": "legacy",
+      "repetition": 0,
+      "valid": true,
+      "requests": 1,
+      "native_format_present": true,
+      "identity_description_present": false,
+      "declared_roles": [
+        {
+          "comparison": "none",
+          "roles": []
+        }
+      ],
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/identity-legacy-0.json",
+      "sha256": "7f1787330917f24842cd10dbf91c4273e1b01721d29dabe94d689e93c72e1aba"
+    },
+    {
+      "variant": "legacy",
+      "repetition": 1,
+      "valid": false,
+      "requests": 1,
+      "native_format_present": true,
+      "identity_description_present": false,
+      "declared_roles": [],
+      "error": "Failed to parse or validate native structured content: hypotheses.2: Value error, comparison hypotheses require explicit roles [value_error]",
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/identity-legacy-1.json",
+      "sha256": "b69adc75c881138677210735c5d504fe57b900ce32edeb1a1e6bfed8765c94c9"
+    },
+    {
+      "variant": "legacy",
+      "repetition": 2,
+      "valid": false,
+      "requests": 1,
+      "native_format_present": true,
+      "identity_description_present": false,
+      "declared_roles": [],
+      "error": "Failed to parse or validate native structured content: hypotheses.0: Value error, comparison hypotheses require explicit roles [value_error]",
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/identity-legacy-2.json",
+      "sha256": "4cfacda7b3d5a47dfc46b6977f65f0cd9a4e1906f07a3c4202f4684ef6ef220b"
+    },
+    {
+      "variant": "described",
+      "repetition": 0,
+      "valid": true,
+      "requests": 1,
+      "native_format_present": true,
+      "identity_description_present": true,
+      "declared_roles": [
+        {
+          "comparison": "none",
+          "roles": []
+        },
+        {
+          "comparison": "none",
+          "roles": []
+        }
+      ],
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/identity-described-0.json",
+      "sha256": "a5eaa95e95104d66b589eb937f4a8db7665009b26762da519e179834506d4382"
+    },
+    {
+      "variant": "described",
+      "repetition": 1,
+      "valid": true,
+      "requests": 1,
+      "native_format_present": true,
+      "identity_description_present": true,
+      "declared_roles": [
+        {
+          "comparison": "none",
+          "roles": []
+        }
+      ],
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/identity-described-1.json",
+      "sha256": "2fdcb7488f670035b13dddf7dec85d0542c61e1900e2fbb54b72284c4cdd2b8e"
+    },
+    {
+      "variant": "described",
+      "repetition": 2,
+      "valid": true,
+      "requests": 1,
+      "native_format_present": true,
+      "identity_description_present": true,
+      "declared_roles": [
+        {
+          "comparison": "none",
+          "roles": []
+        }
+      ],
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/identity-described-2.json",
+      "sha256": "7e339db5fd017e5ed9a938152a5d1dce4f180db7fbd30bcb054c6a673b566070"
+    },
+    {
+      "variant": "oidc-smoke",
+      "repetition": 0,
+      "valid": true,
+      "requests": 1,
+      "native_format_present": true,
+      "identity_description_present": true,
+      "declared_roles": [
+        {
+          "comparison": "none",
+          "roles": []
+        },
+        {
+          "comparison": "none",
+          "roles": []
+        },
+        {
+          "comparison": "none",
+          "roles": []
+        }
+      ],
+      "error": null,
+      "raw_path": "outputs/technique_review_trials/advisory-20261121/identity-oidc-smoke-0.json",
+      "sha256": "1030e449f40869fcc38821549477561fb3b0e287b9a359855b0b22a554679b8f"
+    }
+  ],
+  "identity_schema_summary": {
+    "legacy_valid": 1,
+    "described_valid": 3,
+    "trials_per_arm": 3,
+    "oidc_smoke_valid": true,
+    "requests": 7,
+    "native_formats_verified": true,
+    "authenticated_role_declaration_improvement_established": false
+  },
+  "total_model_requests": 140
+}

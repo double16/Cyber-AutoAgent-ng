@@ -65,7 +65,7 @@
 - If `.uv-cache` is not present, create it before running commands. Keep it project-local and persistent between agent
   turns; do not use a temporary directory unless the project-local path is unavailable.
 
-## JavaScript Best Practices
+## TypeScript/JavaScript Best Practices
 - Follow ESLint and Prettier configurations
 - Use ES6+ features (arrow functions, destructuring, etc.)
 - Prefer const over let, avoid var

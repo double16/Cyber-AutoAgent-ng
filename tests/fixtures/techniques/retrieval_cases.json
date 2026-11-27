@@ -1,0 +1,58 @@
+[
+  {
+    "request": "Generate hypotheses about shell metacharacters and argument injection when a web feature invokes a system utility.",
+    "phases": ["hypothesis_generation"],
+    "relevant_lineages": ["module:web:techniques/os-command-injection.md"],
+    "observation": "The assigned feature invokes a system utility and accepts a command argument from a query parameter.",
+    "recommendation_lineages": ["module:web:techniques/os-command-injection.md"]
+  },
+  {
+    "request": "Design future validation for database query manipulation through SQL predicates and bound parameters.",
+    "phases": ["hypothesis_generation"],
+    "relevant_lineages": ["module:web:techniques/sql-injection.md"],
+    "observation": "The assigned search endpoint accepts user input that may become part of a SQL query predicate.",
+    "recommendation_lineages": ["module:web:techniques/sql-injection.md"]
+  },
+  {
+    "request": "Develop hypotheses for server-side request forgery through a user-controlled URL fetched by the backend.",
+    "phases": ["hypothesis_generation"],
+    "relevant_lineages": ["module:web:techniques/ssrf.md"],
+    "observation": "The assigned backend URL-fetch feature accepts an attacker-controlled destination URL.",
+    "recommendation_lineages": ["module:web:techniques/ssrf.md"]
+  },
+  {
+    "request": "Generate future tests for directory traversal and local file inclusion through a file path parameter.",
+    "phases": ["hypothesis_generation"],
+    "relevant_lineages": ["module:web:techniques/path-traversal-file-inclusion.md"],
+    "observation": "A download feature joins a caller-controlled relative path to a filesystem root.",
+    "recommendation_lineages": ["module:web:techniques/path-traversal-file-inclusion.md"]
+  },
+  {
+    "request": "Generate hypotheses for account existence disclosure through different login responses.",
+    "phases": ["hypothesis_generation"],
+    "relevant_lineages": ["module:web:techniques/account-enumeration.md"],
+    "observation": "The login interaction accepts an account identifier and returns distinguishable unknown-account responses.",
+    "recommendation_lineages": ["module:web:techniques/account-enumeration.md"]
+  },
+  {
+    "request": "Map HTTP routes, methods, forms, headers and cookies from observed request-response interactions.",
+    "phases": ["reconnaissance"],
+    "relevant_lineages": ["module:web_recon:techniques/entrypoint-mapping.md"],
+    "observation": "Captured HTTP interactions expose routes, methods, forms, headers, cookies and request parameters.",
+    "recommendation_lineages": ["module:web_recon:techniques/entrypoint-mapping.md"]
+  },
+  {
+    "request": "Produce hypotheses about GraphQL resolver authorization and query resource consumption.",
+    "phases": ["hypothesis_generation"],
+    "relevant_lineages": ["module:web:techniques/graphql.md"],
+    "observation": "The assigned endpoint accepts GraphQL operations and resolves caller-controlled field selections.",
+    "recommendation_lineages": ["module:web:techniques/graphql.md"]
+  },
+  {
+    "request": "Describe a methodology for assessing mechanical pin tumbler door locks.",
+    "phases": ["analysis"],
+    "relevant_lineages": [],
+    "observation": "A physical door has a mechanical pin tumbler lock.",
+    "recommendation_lineages": []
+  }
+]

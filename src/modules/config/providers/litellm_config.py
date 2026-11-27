@@ -182,7 +182,7 @@ def get_context_window_fallbacks(provider: str) -> list[dict[str, list[str]]] | 
 
 
 def align_litellm_defaults(
-    defaults: dict[str, Any], env_reader: EnvironmentReader
+    defaults: dict[str, Any], env_reader: EnvironmentReader, *, discover_limits: bool = True
 ) -> None:
     """Ensure LiteLLM configuration components stay aligned with the selected model.
 
@@ -212,40 +212,41 @@ def align_litellm_defaults(
 
     # Use LiteLLM's model database to get max_output_tokens for this model
     # This handles all providers and updates automatically with LiteLLM
-    try:
-        # Query LiteLLM's model database for max output tokens
-        model_max_tokens = litellm.get_max_tokens(base_model)
+    if discover_limits:
+        try:
+            # Query LiteLLM's model database for max output tokens
+            model_max_tokens = litellm.get_max_tokens(base_model)
 
-        if model_max_tokens and llm_cfg.max_tokens > model_max_tokens:
-            logger.info(
-                "Capping max_tokens from %d to %d for model '%s' (model limit from LiteLLM database)",
-                llm_cfg.max_tokens,
-                model_max_tokens,
-                llm_cfg.model_id,
-            )
-            llm_cfg.max_tokens = model_max_tokens
-            llm_cfg.parameters["max_tokens"] = model_max_tokens
-        elif model_max_tokens:
+            if model_max_tokens and llm_cfg.max_tokens > model_max_tokens:
+                logger.info(
+                    "Capping max_tokens from %d to %d for model '%s' (model limit from LiteLLM database)",
+                    llm_cfg.max_tokens,
+                    model_max_tokens,
+                    llm_cfg.model_id,
+                )
+                llm_cfg.max_tokens = model_max_tokens
+                llm_cfg.parameters["max_tokens"] = model_max_tokens
+            elif model_max_tokens:
+                logger.debug(
+                    "Model '%s' max_tokens=%d is within limit (model max: %d)",
+                    llm_cfg.model_id,
+                    llm_cfg.max_tokens,
+                    model_max_tokens,
+                )
+            else:
+                logger.debug(
+                    "Model '%s' not in LiteLLM database, using configured max_tokens=%d",
+                    llm_cfg.model_id,
+                    llm_cfg.max_tokens,
+                )
+        except Exception as e:
+            # If LiteLLM doesn't know about this model, log and continue
+            # The API call will fail with a clear error if max_tokens is invalid
             logger.debug(
-                "Model '%s' max_tokens=%d is within limit (model max: %d)",
+                "Could not query max_tokens for model '%s': %s (will use configured value)",
                 llm_cfg.model_id,
-                llm_cfg.max_tokens,
-                model_max_tokens,
+                str(e),
             )
-        else:
-            logger.debug(
-                "Model '%s' not in LiteLLM database, using configured max_tokens=%d",
-                llm_cfg.model_id,
-                llm_cfg.max_tokens,
-            )
-    except Exception as e:
-        # If LiteLLM doesn't know about this model, log and continue
-        # The API call will fail with a clear error if max_tokens is invalid
-        logger.debug(
-            "Could not query max_tokens for model '%s': %s (will use configured value)",
-            llm_cfg.model_id,
-            str(e),
-        )
 
     embed_override = env_reader.get("CYBER_AGENT_EMBEDDING_MODEL")
 

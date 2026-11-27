@@ -1,0 +1,663 @@
+{
+  "document": "src/modules/operation_plugins/web/techniques/openapi-documentation-exposure.md",
+  "sha256": "73ba7169aeaa6192f677d7bbf731d1e3df62a0135501d01628fb75b3592cdc59",
+  "requirements": [
+    {
+      "id": "method",
+      "description": "Full lifecycle assessment of assigned Swagger/OpenAPI documentation audience, sensitive spec content, effective security inheritance/overrides and real operation authorization. Include prerequisites, baselines, isolated variations, negative controls, cleanup, phase-specific semantic triggers and false positives. Public documentation and declarations alone do not prove a vulnerability.",
+      "kind": "authored_deliverable",
+      "grounding": "knowledge_allowed",
+      "origins": []
+    }
+  ],
+  "restrictions": [],
+  "contract": {
+    "acceptance_criteria": [
+      {
+        "id": "core:correctness",
+        "obligation": "Identify concrete technical errors, contradictions or consequential procedural flaws; model knowledge and reasoning are allowed without retrieved support.",
+        "origin": "shared_review_policy"
+      },
+      {
+        "id": "core:interpretation",
+        "obligation": "Outcome interpretations distinguish legitimate behavior from boundary violations.",
+        "origin": "shared_review_policy"
+      },
+      {
+        "id": "core:operational_sufficiency",
+        "obligation": "The requested method can be followed with explicit necessary prerequisites and controls.",
+        "origin": "shared_review_policy"
+      },
+      {
+        "id": "core:attribution",
+        "obligation": "Attribution accurately describes retained sources and limitations in the document, including metadata; body placement is required only when explicitly requested.",
+        "origin": "shared_review_policy"
+      },
+      {
+        "id": "core:restrictions",
+        "obligation": "The method complies with supplied restrictions and document policies.",
+        "origin": "shared_review_policy"
+      },
+      {
+        "grounding": "knowledge_allowed",
+        "id": "requirement:method",
+        "kind": "authored_deliverable",
+        "obligation": "Full lifecycle assessment of assigned Swagger/OpenAPI documentation audience, sensitive spec content, effective security inheritance/overrides and real operation authorization. Include prerequisites, baselines, isolated variations, negative controls, cleanup, phase-specific semantic triggers and false positives. Public documentation and declarations alone do not prove a vulnerability.",
+        "origin": "validated_request",
+        "requirement_id": "method"
+      }
+    ],
+    "reference_fields": {
+      "criterion_id": {
+        "allowed_values": [
+          "core:correctness",
+          "core:interpretation",
+          "core:operational_sufficiency",
+          "core:attribution",
+          "core:restrictions",
+          "requirement:method"
+        ]
+      },
+      "requirement_ids": {
+        "allowed_values": [
+          "method"
+        ],
+        "empty_list_allowed": true
+      }
+    }
+  },
+  "snapshot": {
+    "draft_references": [
+      {
+        "reference": "d73ba7169aeaa:m1",
+        "path": "metadata.schema_version",
+        "value": 1
+      },
+      {
+        "reference": "d73ba7169aeaa:m2",
+        "path": "metadata.title",
+        "value": "OpenAPI documentation exposure and declared authorization"
+      },
+      {
+        "reference": "d73ba7169aeaa:m3",
+        "path": "metadata.purpose",
+        "value": "Assess assigned API documentation against its intended audience and distinguish specification disclosure from actual operation authorization failures."
+      },
+      {
+        "reference": "d73ba7169aeaa:m4",
+        "path": "metadata.applicability[0]",
+        "value": "An assigned surface supplies Swagger UI, an OpenAPI specification, or an explicit reference to one."
+      },
+      {
+        "reference": "d73ba7169aeaa:m5",
+        "path": "metadata.phases[0]",
+        "value": "reconnaissance"
+      },
+      {
+        "reference": "d73ba7169aeaa:m6",
+        "path": "metadata.phases[1]",
+        "value": "hypothesis_generation"
+      },
+      {
+        "reference": "d73ba7169aeaa:m7",
+        "path": "metadata.phases[2]",
+        "value": "vulnerability_verification"
+      },
+      {
+        "reference": "d73ba7169aeaa:m8",
+        "path": "metadata.phases[3]",
+        "value": "execution"
+      },
+      {
+        "reference": "d73ba7169aeaa:m9",
+        "path": "metadata.phases[4]",
+        "value": "analysis"
+      },
+      {
+        "reference": "d73ba7169aeaa:m10",
+        "path": "metadata.triggers[0].phases[0]",
+        "value": "reconnaissance"
+      },
+      {
+        "reference": "d73ba7169aeaa:m11",
+        "path": "metadata.triggers[0].phases[1]",
+        "value": "hypothesis_generation"
+      },
+      {
+        "reference": "d73ba7169aeaa:m12",
+        "path": "metadata.triggers[0].phases[2]",
+        "value": "vulnerability_verification"
+      },
+      {
+        "reference": "d73ba7169aeaa:m13",
+        "path": "metadata.triggers[0].phases[3]",
+        "value": "execution"
+      },
+      {
+        "reference": "d73ba7169aeaa:m14",
+        "path": "metadata.triggers[0].phases[4]",
+        "value": "analysis"
+      },
+      {
+        "reference": "d73ba7169aeaa:m15",
+        "path": "metadata.triggers[0].when",
+        "value": "An assigned API surface supplies OpenAPI documentation whose audience, sensitive contents, or declared operation authorization needs assessment."
+      },
+      {
+        "reference": "d73ba7169aeaa:m16",
+        "path": "metadata.triggers[0].request",
+        "value": "OpenAPI documentation exposure and declared authorization"
+      },
+      {
+        "reference": "d73ba7169aeaa:m17",
+        "path": "metadata.triggers[0].signals_any",
+        "value": []
+      },
+      {
+        "reference": "d73ba7169aeaa:m18",
+        "path": "metadata.sources[0].url",
+        "value": "https://spec.openapis.org/oas/v3.1.1.html"
+      },
+      {
+        "reference": "d73ba7169aeaa:m19",
+        "path": "metadata.sources[0].title",
+        "value": "OpenAPI Specification v3.1.1"
+      },
+      {
+        "reference": "d73ba7169aeaa:m20",
+        "path": "metadata.sources[0].retrieved_at",
+        "value": "2026-11-12"
+      },
+      {
+        "reference": "d73ba7169aeaa:m21",
+        "path": "metadata.sources[0].selection_reason",
+        "value": "Defines specification structure and root/operation security requirement semantics, including overrides and alternatives."
+      },
+      {
+        "reference": "d73ba7169aeaa:m22",
+        "path": "metadata.sources[1].url",
+        "value": "https://cheatsheetseries.owasp.org/cheatsheets/REST_Security_Cheat_Sheet.html"
+      },
+      {
+        "reference": "d73ba7169aeaa:m23",
+        "path": "metadata.sources[1].title",
+        "value": "OWASP REST Security Cheat Sheet"
+      },
+      {
+        "reference": "d73ba7169aeaa:m24",
+        "path": "metadata.sources[1].retrieved_at",
+        "value": "2026-11-12"
+      },
+      {
+        "reference": "d73ba7169aeaa:m25",
+        "path": "metadata.sources[1].selection_reason",
+        "value": "Supplies authorization, sensitive request data, and management endpoint protection background."
+      },
+      {
+        "reference": "d73ba7169aeaa:m26",
+        "path": "metadata.active",
+        "value": true
+      },
+      {
+        "reference": "d73ba7169aeaa:m27",
+        "path": "metadata.source_coverage",
+        "value": "OpenAPI defines declarations, not actual enforcement or documentation confidentiality. OWASP supplies security control background. The numbered comparison procedures, baselines, cleanup, and policy interpretation are original knowledge-allowed methodology, not individually source-verified. Neither reference establishes target applicability or vulnerability."
+      },
+      {
+        "reference": "d73ba7169aeaa:b1",
+        "path": "body.line[1]",
+        "value": ""
+      },
+      {
+        "reference": "d73ba7169aeaa:b2",
+        "path": "body.line[2]",
+        "value": "# OpenAPI documentation exposure and declared authorization"
+      },
+      {
+        "reference": "d73ba7169aeaa:b3",
+        "path": "body.line[3]",
+        "value": ""
+      },
+      {
+        "reference": "d73ba7169aeaa:b4",
+        "path": "body.line[4]",
+        "value": "## Applicability and prerequisites"
+      },
+      {
+        "reference": "d73ba7169aeaa:b5",
+        "path": "body.line[5]",
+        "value": ""
+      },
+      {
+        "reference": "d73ba7169aeaa:b6",
+        "path": "body.line[6]",
+        "value": "Use only an assigned documentation surface and explicitly authorized related operations. Establish"
+      },
+      {
+        "reference": "d73ba7169aeaa:b7",
+        "path": "body.line[7]",
+        "value": "whether the UI and specification are intended for public, customer, internal, or role-restricted use."
+      },
+      {
+        "reference": "d73ba7169aeaa:b8",
+        "path": "body.line[8]",
+        "value": "Obtain test identities and synthetic objects for any authorization comparison. Identify permitted"
+      },
+      {
+        "reference": "d73ba7169aeaa:b9",
+        "path": "body.line[9]",
+        "value": "hosts, methods, request rates, and state changes; a specification's server list does not extend scope."
+      },
+      {
+        "reference": "d73ba7169aeaa:b10",
+        "path": "body.line[10]",
+        "value": "Use HTTP capture/replay, browser inspection, and JSON/YAML parsing capabilities or equivalents."
+      },
+      {
+        "reference": "d73ba7169aeaa:b11",
+        "path": "body.line[11]",
+        "value": "Preserve configured HTTP/HTTPS proxy use where supported. Do not run a specification through a"
+      },
+      {
+        "reference": "d73ba7169aeaa:b12",
+        "path": "body.line[12]",
+        "value": "bulk scanner or automatically execute its operations."
+      },
+      {
+        "reference": "d73ba7169aeaa:b13",
+        "path": "body.line[13]",
+        "value": ""
+      },
+      {
+        "reference": "d73ba7169aeaa:b14",
+        "path": "body.line[14]",
+        "value": "## Accepted baselines and controls"
+      },
+      {
+        "reference": "d73ba7169aeaa:b15",
+        "path": "body.line[15]",
+        "value": ""
+      },
+      {
+        "reference": "d73ba7169aeaa:b16",
+        "path": "body.line[16]",
+        "value": "An entitled actor can obtain the expected documentation or synthetic operation result. An excluded"
+      },
+      {
+        "reference": "d73ba7169aeaa:b17",
+        "path": "body.line[17]",
+        "value": "actor uses an isolated cookie jar and no copied privileged tokens. Compare the same representation,"
+      },
+      {
+        "reference": "d73ba7169aeaa:b18",
+        "path": "body.line[18]",
+        "value": "operation, object, and parameters. Include a known denied request and an ordinary reachable resource"
+      },
+      {
+        "reference": "d73ba7169aeaa:b19",
+        "path": "body.line[19]",
+        "value": "where available. A login shell, generic fallback page, or cached public specification is not a"
+      },
+      {
+        "reference": "d73ba7169aeaa:b20",
+        "path": "body.line[20]",
+        "value": "successful protected operation. Missing audience policy or suitable identities leaves the affected"
+      },
+      {
+        "reference": "d73ba7169aeaa:b21",
+        "path": "body.line[21]",
+        "value": "comparison unresolved."
+      },
+      {
+        "reference": "d73ba7169aeaa:b22",
+        "path": "body.line[22]",
+        "value": ""
+      },
+      {
+        "reference": "d73ba7169aeaa:b23",
+        "path": "body.line[23]",
+        "value": "## Reconnaissance"
+      },
+      {
+        "reference": "d73ba7169aeaa:b24",
+        "path": "body.line[24]",
+        "value": ""
+      },
+      {
+        "reference": "d73ba7169aeaa:b25",
+        "path": "body.line[25]",
+        "value": "1. Inspect assigned captures for the actual UI configuration or specification reference. Record"
+      },
+      {
+        "reference": "d73ba7169aeaa:b26",
+        "path": "body.line[26]",
+        "value": "   final URL, status, content type, authentication context, and response provenance. Follow only"
+      },
+      {
+        "reference": "d73ba7169aeaa:b27",
+        "path": "body.line[27]",
+        "value": "   authorized references; do not enumerate common documentation paths without an assigned task."
+      },
+      {
+        "reference": "d73ba7169aeaa:b28",
+        "path": "body.line[28]",
+        "value": "2. Validate the document's declared version and structure rather than identifying it by filename."
+      },
+      {
+        "reference": "d73ba7169aeaa:b29",
+        "path": "body.line[29]",
+        "value": "   Resolve only needed local references or explicitly authorized remote references, with bounded"
+      },
+      {
+        "reference": "d73ba7169aeaa:b30",
+        "path": "body.line[30]",
+        "value": "   parsing and no arbitrary URL or filesystem fetching. Preserve unresolved references as gaps."
+      },
+      {
+        "reference": "d73ba7169aeaa:b31",
+        "path": "body.line[31]",
+        "value": "3. Record declared servers, paths, methods, parameters, examples, and security requirements. Treat"
+      },
+      {
+        "reference": "d73ba7169aeaa:b32",
+        "path": "body.line[32]",
+        "value": "   internal-looking names and schema fields as leads; a field named password is not a leaked password."
+      },
+      {
+        "reference": "d73ba7169aeaa:b33",
+        "path": "body.line[33]",
+        "value": "4. Compute effective security per operation using its declared specification version. For OpenAPI"
+      },
+      {
+        "reference": "d73ba7169aeaa:b34",
+        "path": "body.line[34]",
+        "value": "   3.1, an operation's security value replaces the root value; an empty array removes inherited"
+      },
+      {
+        "reference": "d73ba7169aeaa:b35",
+        "path": "body.line[35]",
+        "value": "   requirements. An empty requirement object permits an anonymous alternative. Requirement objects"
+      },
+      {
+        "reference": "d73ba7169aeaa:b36",
+        "path": "body.line[36]",
+        "value": "   in the array are alternatives; schemes within one object must all be satisfied. Preserve OAuth"
+      },
+      {
+        "reference": "d73ba7169aeaa:b37",
+        "path": "body.line[37]",
+        "value": "   scopes. A securitySchemes definition alone does not apply a requirement to any operation."
+      },
+      {
+        "reference": "d73ba7169aeaa:b38",
+        "path": "body.line[38]",
+        "value": ""
+      },
+      {
+        "reference": "d73ba7169aeaa:b39",
+        "path": "body.line[39]",
+        "value": "## Hypothesis generation"
+      },
+      {
+        "reference": "d73ba7169aeaa:b40",
+        "path": "body.line[40]",
+        "value": ""
+      },
+      {
+        "reference": "d73ba7169aeaa:b41",
+        "path": "body.line[41]",
+        "value": "1. Use recorded evidence only; send no new requests or execute documented operations in this phase."
+      },
+      {
+        "reference": "d73ba7169aeaa:b42",
+        "path": "body.line[42]",
+        "value": "2. Separate hypotheses for restricted documentation disclosure, genuinely sensitive example values,"
+      },
+      {
+        "reference": "d73ba7169aeaa:b43",
+        "path": "body.line[43]",
+        "value": "   and inconsistent authorization on one assigned deployed operation. Establish the expected audience,"
+      },
+      {
+        "reference": "d73ba7169aeaa:b44",
+        "path": "body.line[44]",
+        "value": "   actor, object, and prohibited result for each. Public API descriptions can be intentional."
+      },
+      {
+        "reference": "d73ba7169aeaa:b45",
+        "path": "body.line[45]",
+        "value": "3. Plan entitled/excluded comparisons, a known denied control, and expected permitted, prohibited,"
+      },
+      {
+        "reference": "d73ba7169aeaa:b46",
+        "path": "body.line[46]",
+        "value": "   and inconclusive outcomes. Treat spec accuracy, token validity, object ownership, and missing"
+      },
+      {
+        "reference": "d73ba7169aeaa:b47",
+        "path": "body.line[47]",
+        "value": "   references as explicit future checks. A declaration without runtime evidence cannot prove bypass."
+      },
+      {
+        "reference": "d73ba7169aeaa:b48",
+        "path": "body.line[48]",
+        "value": ""
+      },
+      {
+        "reference": "d73ba7169aeaa:b49",
+        "path": "body.line[49]",
+        "value": "## Vulnerability verification"
+      },
+      {
+        "reference": "d73ba7169aeaa:b50",
+        "path": "body.line[50]",
+        "value": ""
+      },
+      {
+        "reference": "d73ba7169aeaa:b51",
+        "path": "body.line[51]",
+        "value": "1. Capture an entitled baseline for the assigned UI and specification separately. Repeat the same"
+      },
+      {
+        "reference": "d73ba7169aeaa:b52",
+        "path": "body.line[52]",
+        "value": "   authorized read as the excluded actor; retain redirect chains and actual body content. Check"
+      },
+      {
+        "reference": "d73ba7169aeaa:b53",
+        "path": "body.line[53]",
+        "value": "   whether the UI is public while the spec remains protected or vice versa."
+      },
+      {
+        "reference": "d73ba7169aeaa:b54",
+        "path": "body.line[54]",
+        "value": "2. For a disclosure hypothesis, identify a concrete protected synthetic value or policy-restricted"
+      },
+      {
+        "reference": "d73ba7169aeaa:b55",
+        "path": "body.line[55]",
+        "value": "   content actually returned. Compare to the public/redacted view if available. Do not validate real"
+      },
+      {
+        "reference": "d73ba7169aeaa:b56",
+        "path": "body.line[56]",
+        "value": "   credentials by trying them or infer sensitivity from endpoint names alone."
+      },
+      {
+        "reference": "d73ba7169aeaa:b57",
+        "path": "body.line[57]",
+        "value": "3. For an operation hypothesis, choose one read-only assigned operation with known test-object"
+      },
+      {
+        "reference": "d73ba7169aeaa:b58",
+        "path": "body.line[58]",
+        "value": "   ownership. Capture its legitimate result, then repeat as the excluded actor without inherited"
+      },
+      {
+        "reference": "d73ba7169aeaa:b59",
+        "path": "body.line[59]",
+        "value": "   privileged context. Preserve the documented method and required inputs; replacing POST with GET"
+      },
+      {
+        "reference": "d73ba7169aeaa:b60",
+        "path": "body.line[60]",
+        "value": "   does not test the documented operation. Do not execute mutations without separate authorization."
+      },
+      {
+        "reference": "d73ba7169aeaa:b61",
+        "path": "body.line[61]",
+        "value": "4. Inspect actual protected data or an agreed harmless effect, not just status or response length."
+      },
+      {
+        "reference": "d73ba7169aeaa:b62",
+        "path": "body.line[62]",
+        "value": "   Repeat the excluded comparison with an invalid credential control and then restore the entitled"
+      },
+      {
+        "reference": "d73ba7169aeaa:b63",
+        "path": "body.line[63]",
+        "value": "   baseline. Distinguish stale specs, gateway policy, validation failures, and service errors."
+      },
+      {
+        "reference": "d73ba7169aeaa:b64",
+        "path": "body.line[64]",
+        "value": ""
+      },
+      {
+        "reference": "d73ba7169aeaa:b65",
+        "path": "body.line[65]",
+        "value": "## Execution"
+      },
+      {
+        "reference": "d73ba7169aeaa:b66",
+        "path": "body.line[66]",
+        "value": ""
+      },
+      {
+        "reference": "d73ba7169aeaa:b67",
+        "path": "body.line[67]",
+        "value": "1. After verification and authorization, preserve one minimal synthetic example of the restricted"
+      },
+      {
+        "reference": "d73ba7169aeaa:b68",
+        "path": "body.line[68]",
+        "value": "   documentation value or protected operation result delivered to the excluded actor. Avoid bulk"
+      },
+      {
+        "reference": "d73ba7169aeaa:b69",
+        "path": "body.line[69]",
+        "value": "   extraction, unrelated endpoints, and collecting other users' data."
+      },
+      {
+        "reference": "d73ba7169aeaa:b70",
+        "path": "body.line[70]",
+        "value": "2. Remove any approved temporary test objects, invalidate disposable sessions, and verify normal"
+      },
+      {
+        "reference": "d73ba7169aeaa:b71",
+        "path": "body.line[71]",
+        "value": "   behavior remains available. If restoration fails, stop and preserve the limitation."
+      },
+      {
+        "reference": "d73ba7169aeaa:b72",
+        "path": "body.line[72]",
+        "value": ""
+      },
+      {
+        "reference": "d73ba7169aeaa:b73",
+        "path": "body.line[73]",
+        "value": "## Analysis, evidence, and limitations"
+      },
+      {
+        "reference": "d73ba7169aeaa:b74",
+        "path": "body.line[74]",
+        "value": ""
+      },
+      {
+        "reference": "d73ba7169aeaa:b75",
+        "path": "body.line[75]",
+        "value": "Retain the audience policy, exact specification revision/hash, relevant declaration pointers,"
+      },
+      {
+        "reference": "d73ba7169aeaa:b76",
+        "path": "body.line[76]",
+        "value": "isolated actor contexts, request/response comparisons, actual protected value/effect, controls, and"
+      },
+      {
+        "reference": "d73ba7169aeaa:b77",
+        "path": "body.line[77]",
+        "value": "cleanup outcome. Keep secrets in sensitive internal evidence and redact report/shareable records."
+      },
+      {
+        "reference": "d73ba7169aeaa:b78",
+        "path": "body.line[78]",
+        "value": ""
+      },
+      {
+        "reference": "d73ba7169aeaa:b79",
+        "path": "body.line[79]",
+        "value": "Classify documentation exposure and operation enforcement independently. A public specification,"
+      },
+      {
+        "reference": "d73ba7169aeaa:b80",
+        "path": "body.line[80]",
+        "value": "missing security declaration, sensitive-sounding property, or 200 response alone is not a finding."
+      },
+      {
+        "reference": "d73ba7169aeaa:b81",
+        "path": "body.line[81]",
+        "value": "A correctly restricted operation may coexist with intentionally public documentation; a declaration"
+      },
+      {
+        "reference": "d73ba7169aeaa:b82",
+        "path": "body.line[82]",
+        "value": "may be stricter or looser than the deployed policy. Interpret supported, refuted-for-this-case, and"
+      },
+      {
+        "reference": "d73ba7169aeaa:b83",
+        "path": "body.line[83]",
+        "value": "inconclusive outcomes without claiming complete API coverage."
+      },
+      {
+        "reference": "d73ba7169aeaa:b84",
+        "path": "body.line[84]",
+        "value": ""
+      },
+      {
+        "reference": "d73ba7169aeaa:b85",
+        "path": "body.line[85]",
+        "value": "## Trigger examples and non-examples"
+      },
+      {
+        "reference": "d73ba7169aeaa:b86",
+        "path": "body.line[86]",
+        "value": ""
+      },
+      {
+        "reference": "d73ba7169aeaa:b87",
+        "path": "body.line[87]",
+        "value": "Matching: assigned Swagger UI references a spec whose intended audience needs checking, or an"
+      },
+      {
+        "reference": "d73ba7169aeaa:b88",
+        "path": "body.line[88]",
+        "value": "assigned operation has a declared authorization rule requiring comparison. Select the section for"
+      },
+      {
+        "reference": "d73ba7169aeaa:b89",
+        "path": "body.line[89]",
+        "value": "the structured phase. Non-matching: OpenAPI terminology in unrelated prose, a spec URL elsewhere in"
+      },
+      {
+        "reference": "d73ba7169aeaa:b90",
+        "path": "body.line[90]",
+        "value": "a shared bundle, or an unassigned server listed in a specification. Recommendations do not establish"
+      },
+      {
+        "reference": "d73ba7169aeaa:b91",
+        "path": "body.line[91]",
+        "value": "prerequisites, expand scope, or prove findings."
+      }
+    ]
+  }
+}

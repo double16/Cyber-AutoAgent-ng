@@ -1,0 +1,9 @@
+{
+  "user_message": "yes",
+  "provider_request_cap": 30,
+  "role_invocation_cap": 30,
+  "execution": "sequential",
+  "prior_experiment_live_requests": 98,
+  "unused_prior_requests_transferred": false,
+  "human_adjudication": "Pending exact real output hashes"
+}

@@ -1,0 +1,8 @@
+{
+  "summary": "The draft provides a reusable header-selector authorization test with explicit prerequisites, controls, a step-by-step procedure, interpretation conditions, evidence requirements and future-check limitations. The method establishes policy/prerequisite establishment, a legitimate baseline, header processing confirmation, baseline vs variant comparison with unchanged authentication, and requires negative and entitlement controls before labeling an authorization violation. The interpretation correctly ties a violation to policy-established lack of authorization for the object referenced by the variant header, continued authentication as principal A, and observable selection of the unauthorized object via the header with supporting evidence. The structure aligns with the requested deliverable of describing a reusable test and explaining when a comparison establishes an authorization violation, including controls and evidence requirements, without requesting target execution.",
+  "issues": [],
+  "suggestions": [
+    "Add an explicit citation to the retained PortSwigger IDOR passage for the statement in Limitations about bypassing access controls to view records of other customers and the conditional nature when no other controls are in place, e.g., reference passage_id d1d15aec23f3d9f9bc4e85bd8596a5ff6d1e53458817ebfd57af6f30a35b636a to satisfy attribution clarity.",
+    "Consider clarifying the header-processing confirmation step to distinguish a deterministic change due to server-side use of the header from an incidental error response, and to note that observing a different object on an invalid token may itself indicate a selector and should be treated as a finding rather than mere confirmation."
+  ]
+}

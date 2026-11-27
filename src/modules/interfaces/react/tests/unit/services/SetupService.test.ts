@@ -211,3 +211,37 @@ describe('SetupService', () => {
     }));
   });
 });
+
+it.each([true, false])('sets up the complete service stack with progress callback=%s', async withProgress => {
+  jest.useFakeTimers();
+  try {
+    const {SetupService} = await loadService(); const progress = jest.fn();
+    execResponses.clear();
+    execResponses.set('docker images', {stdout: 'langfuse/langfuse:3\nlangfuse/langfuse-worker:3\npostgres:15-alpine\nredis:7\nminio/minio\nclickhouse/clickhouse-server'});
+    const service = new SetupService();
+    const result = service.setupDeploymentMode('full-stack', withProgress ? progress : undefined);
+    await jest.runAllTimersAsync();
+    await expect(result).resolves.toEqual({success: true, deploymentMode: 'full-stack'});
+    expect(containerManager.listenerCount('progressMeta')).toBe(0);
+    if (withProgress) expect(progress).toHaveBeenLastCalledWith(expect.objectContaining({stepName: 'observability'}));
+  } finally {jest.useRealTimers();}
+});
+it('fails full-stack preflight when docker is unavailable', async () => {
+  jest.useFakeTimers();
+  try {
+    execResponses.set('docker info', {error: new Error('offline')});
+    const {SetupService} = await loadService(); const result = new SetupService().setupDeploymentMode('full-stack');
+    await jest.runAllTimersAsync();
+    await expect(result).resolves.toMatchObject({success: false, error: expect.stringContaining('Docker Desktop')});
+  } finally {jest.useRealTimers();}
+});
+
+it('supports missing Python diagnostics without a provider error string', async () => {
+  jest.useFakeTimers();
+  try {
+    pythonService.checkPythonVersion.mockResolvedValueOnce({installed: false} as any);
+    const {SetupService} = await loadService(); const result = new SetupService().setupDeploymentMode('local-cli');
+    await jest.runAllTimersAsync();
+    await expect(result).resolves.toMatchObject({success: false, error: 'Python 3.12+ is required'});
+  } finally {jest.useRealTimers();}
+});

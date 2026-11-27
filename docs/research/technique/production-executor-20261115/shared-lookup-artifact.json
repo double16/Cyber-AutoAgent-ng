@@ -1,0 +1,96 @@
+{
+  "decision": {
+    "classification": "no_violation_observed",
+    "evidence_ids": [
+      "obs-1",
+      "obs-2",
+      "obs-3",
+      "obs-4",
+      "obs-5",
+      "obs-6"
+    ],
+    "explanation": "Identity mapping shows session-red maps to A and session-blue maps to B. Policy permits A to access A and B, B only B. All four account requests returned status 200 with body error 'not authorized'. No object data was returned for unauthorized attempts, and no successful disclosure of cross-account data was observed. The evidence supports no violation observed within the tested selector combinations."
+  },
+  "observations": [
+    {
+      "id": "obs-1",
+      "kind": "identity",
+      "response": {
+        "session-red": "A",
+        "session-blue": "B"
+      }
+    },
+    {
+      "id": "obs-2",
+      "kind": "policy",
+      "response": {
+        "available": true,
+        "permissions": {
+          "A": [
+            "A",
+            "B"
+          ],
+          "B": [
+            "B"
+          ]
+        }
+      }
+    },
+    {
+      "id": "obs-3",
+      "principal": "session-red",
+      "selector": "A",
+      "response": {
+        "status": 200,
+        "body": {
+          "error": "not authorized",
+          "object": {
+            "owner": "A",
+            "value": "record-A"
+          }
+        }
+      }
+    },
+    {
+      "id": "obs-4",
+      "principal": "session-red",
+      "selector": "B",
+      "response": {
+        "status": 200,
+        "body": {
+          "error": "not authorized",
+          "object": {
+            "owner": "B",
+            "value": "record-B"
+          }
+        }
+      }
+    },
+    {
+      "id": "obs-5",
+      "principal": "session-blue",
+      "selector": "A",
+      "response": {
+        "status": 200,
+        "body": {
+          "error": "not authorized"
+        }
+      }
+    },
+    {
+      "id": "obs-6",
+      "principal": "session-blue",
+      "selector": "B",
+      "response": {
+        "status": 200,
+        "body": {
+          "error": "not authorized",
+          "object": {
+            "owner": "B",
+            "value": "record-B"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+import runpy
+
+_BaseBudget = runpy.run_path('/Users/double/Workspace/Cyber-AutoAgent-ng/src/modules/techniques/calibration_budget.py')["CalibrationBudget"]
+
+
+def CalibrationBudget(path):
+    return _BaseBudget(path, limit=21)

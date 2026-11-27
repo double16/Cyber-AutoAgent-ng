@@ -32,18 +32,19 @@ module.exports = {
   ],
   setupFilesAfterEnv: ['<rootDir>/tests/unit/setup.ts'],
   collectCoverageFrom: [
-    'src/**/*.{ts,tsx}',
+    'src/**/*.{js,jsx,ts,tsx}',
     '!src/**/*.d.ts',
     '!src/index.tsx',
     '!src/**/__mocks__/**',
     '!src/**/test-utils.tsx'
   ],
+  collectCoverage: true,
   coverageThreshold: {
-  global: {
-      branches: 0,
-      functions: 0,
-      lines: 0,
-      statements: 0
+    [require('node:path').resolve(__dirname, '../src/**/*.{js,jsx,ts,tsx}')]: {
+      branches: 80,
+      functions: 80,
+      lines: 80,
+      statements: 80
     }
   },
   coverageReporters: ['text', 'lcov', 'html'],

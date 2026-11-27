@@ -1,0 +1,100 @@
+[
+  {
+    "id": "navigation",
+    "kind": "endpoint",
+    "value": "https://owned.fixture.invalid/navigate",
+    "objective": "Develop conditional future tests for the assigned navigation helper and its destination handling.",
+    "assigned": "The assigned client call is GET /navigate?next=value. The response is used by the browser navigation flow. The next input comes from the current URL. Server destination checks and redirect emission are unobserved.",
+    "shared": "Other unrelated bundle helpers implement login, password reset and a backend preview fetch. No source relationship connects these helpers to the assigned navigation call.",
+    "expected_file": "open-redirects.md"
+  },
+  {
+    "id": "preview",
+    "kind": "endpoint",
+    "value": "https://owned.fixture.invalid/preview",
+    "objective": "Develop conditional future tests for the assigned preview helper and how it obtains remote content.",
+    "assigned": "Assigned server function preview(req) invokes networkClient.get(req.body.url) and returns preview bytes. URL destination validation and network policy checks are unobserved.",
+    "shared": "Unrelated client functions perform location.assign(next), validate login fields and render an admin shell; no call relationship connects them to preview.",
+    "expected_file": "ssrf.md"
+  },
+  {
+    "id": "map-title",
+    "kind": "client_route",
+    "value": "/map",
+    "objective": "Develop conditional future tests for the assigned map title rendering behavior.",
+    "assigned": "Assigned map component reads new URLSearchParams(location.search).get(\"title\") and concatenates it into element.outerHTML. Browser source demonstrates the local query-to-markup flow; server reflection is unobserved.",
+    "shared": "The bundle also defines an unrelated cookie-bearing settings POST and a template server echo helper. Neither is called by this component.",
+    "expected_file": "xss-dom-message-trust.md"
+  },
+  {
+    "id": "signed-context",
+    "kind": "endpoint",
+    "value": "https://owned.fixture.invalid/session-check",
+    "objective": "Develop conditional future tests for the assigned signed session context and verifier behavior.",
+    "assigned": "The assigned request carries a signed compact token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJmaXh0dXJlLXVzZXIiLCJleHAiOjQxMDI0NDQ4MDB9.Zml4dHVyZS1zaWduYXR1cmU. Server signature verification, accepted algorithms and claim validation are unobserved.",
+    "shared": "An unrelated SAML parser and OAuth redirect helper are bundled but are not referenced by the assigned session-check request.",
+    "expected_file": "jwt-verification.md"
+  },
+  {
+    "id": "record-reader",
+    "kind": "service",
+    "value": "tcp://owned.fixture.invalid:9000",
+    "objective": "Develop conditional future tests for the assigned record reader and principal-to-record ownership handling.",
+    "assigned": "The assigned TCP listener accepts a principal and record selector and returns the selected record. Two same-role users own distinct records. Ownership enforcement is unobserved.",
+    "shared": "Unrelated application routes use a login form and a file download helper. No connection from those routes to the TCP record handler is recorded.",
+    "expected_file": "object-level-authorization.md"
+  },
+  {
+    "id": "export-reader",
+    "kind": "source_function",
+    "value": "/owned/source/export_reader.py",
+    "objective": "Develop conditional future tests for the assigned export reader and its filename containment boundary.",
+    "assigned": "The assigned source function joins an externally supplied filename to the configured export root and opens the resulting file. Policy permits only in-root reads. A fixture owner can supply a harmless outside marker; containment checks are unobserved.",
+    "shared": "A separate unused module contains multipart upload processing and XML parsing; there is no observed call from the export reader to it.",
+    "expected_file": "path-traversal-file-inclusion.md"
+  },
+  {
+    "id": "static-health",
+    "kind": "endpoint",
+    "value": "https://owned.fixture.invalid/health",
+    "objective": "Assess whether the assigned health observation supports a conditional future security test; a reasoned empty result is allowed.",
+    "assigned": "Assigned GET /health returns fixed public text ready. No request input, credentials, protected data, state change or source-to-sink flow is recorded.",
+    "shared": "Other bundle routes use signed session tokens and redirect helpers, but no route or call relationship connects them to /health.",
+    "expected_file": null
+  },
+  {
+    "id": "constant-banner",
+    "kind": "source_function",
+    "value": "/owned/source/banner.py",
+    "objective": "Assess whether the assigned constant banner function supports a conditional future security test; a reasoned empty result is allowed.",
+    "assigned": "Assigned function defines a constant BANNER=\"ready\" and returns it. It takes no external input and performs no file access, network request or privileged action in the recorded source.",
+    "shared": "A separate uncalled archive helper handles external filenames and an unrelated function performs network requests. No call relationship from the banner function is recorded.",
+    "expected_file": null
+  },
+  {
+    "id": "opaque-navigation",
+    "kind": "endpoint",
+    "value": "https://owned.fixture.invalid/api/goto",
+    "objective": "Develop conditional future tests for redirect destination handling and server-side URL retrieval at the assigned API helper. These are investigation questions, not observed server behavior.",
+    "assigned": "Assigned client source declares only the path constant apiGoto=\"/api/goto\". GET is inferred, not exhaustive. Inputs are unrecorded, not absent. No request construction, response, server implementation or destination behavior has been observed.",
+    "shared": "The same bundle contains unrelated login constants and a token refresh helper, without a recorded source link to apiGoto.",
+    "expected_file": "open-redirects.md",
+    "additional_expected_files": [
+      "ssrf.md",
+      "captured-ssrf.md"
+    ]
+  },
+  {
+    "id": "opaque-authentication",
+    "kind": "endpoint",
+    "value": "https://owned.fixture.invalid/api/authenticate",
+    "objective": "Develop conditional future credential-validation test hypotheses for the assigned authentication helper using recorded minimal client evidence. Preserve unknown inputs and implementation.",
+    "assigned": "Assigned client source declares only the authentication path constant apiAuthenticate=\"/api/authenticate\". Method is inferred as GET; no parameters, body schema, request construction or server response are recorded. The task explicitly assigns credential-validation investigation to this helper.",
+    "shared": "Unrelated navigation and backend preview helpers take a URL; no call relationship connects them to the assigned authentication helper.",
+    "expected_file": "captured-authentication.md",
+    "additional_expected_files": [
+      "login-bypass.md",
+      "default-and-weak-credentials.md"
+    ]
+  }
+]

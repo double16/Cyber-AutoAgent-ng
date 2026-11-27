@@ -1,0 +1,126 @@
+[
+  {
+    "id": "check-01",
+    "kind": "endpoint",
+    "title": "Review conditional fetch plan",
+    "url": "https://fixture.invalid/preview",
+    "source_ref": "artifact:check-evidence.txt",
+    "observation": "Current isolated fixture contract: POST /preview accepts JSON url and intentionally fetches owned public URLs. Private owned destinations are forbidden by destination policy. The retained synthetic trace has a successful public-canary control and a private-canary timeout. No policy decision reason, private-canary receipt or reachability diagnosis was recorded for that timeout. Source configuration describes the fetch boundary but its enforcement implementation is unresolved. Future probes may use only owned, authorized fixture canaries; no probes may be executed during this task.",
+    "objective": "The conditional future plan distinguishes private retrieval from policy-compliant denial and inconclusive transport/resource failure. A timeout alone cannot establish policy enforcement. No execution or completed future result is required. Use only retained current-operation fixture evidence.",
+    "criterion": "The conditional future plan distinguishes private retrieval from policy-compliant denial and inconclusive transport/resource failure. A timeout alone cannot establish policy enforcement. No execution or completed future result is required.",
+    "interaction": {
+      "interface": "http",
+      "operations": [
+        "POST"
+      ],
+      "operation_provenance": "observed",
+      "inputs": [
+        {
+          "name": "url",
+          "location": "body"
+        }
+      ]
+    },
+    "hypotheses": [
+      {
+        "authentication_requirement": {
+          "comparison": "none",
+          "roles": []
+        },
+        "observed_basis": "Current isolated fixture contract: POST /preview accepts JSON url and intentionally fetches owned public URLs. Private owned destinations are forbidden by destination policy. The retained synthetic trace has a successful public-canary control and a private-canary timeout. No policy decision reason, private-canary receipt or reachability diagnosis was recorded for that timeout. Source configuration describes the fetch boundary but its enforcement implementation is unresolved. Future probes may use only owned, authorized fixture canaries; no probes may be executed during this task.",
+        "preconditions": [
+          "Authorized isolated fixture with private canary reachable only from server network",
+          "Policy documentation confirms public URLs permitted and private network destinations prohibited",
+          "POST /preview fetches user-supplied URL server-side"
+        ],
+        "suspected_mechanism": "Server-side request forgery allowing retrieval from prohibited private network destinations via user-controlled URL in POST /preview",
+        "attacker_controlled_input": "URL parameter supplied in POST /preview request body",
+        "safe_test_steps": [
+          "Send POST /preview with URL pointing to owned public canary and record response",
+          "Send POST /preview with URL pointing to owned private canary in prohibited private range and record response",
+          "Compare private probe response to public canary control and to a no-op control"
+        ],
+        "positive_expectations": [
+          "Server returns content from private canary indicating server-side fetch succeeded from a prohibited private destination",
+          "Response contains private canary data not reachable from the client and differs from the public canary response"
+        ],
+        "negative_expectations": [
+          "Public canary request returns expected public content with no private data",
+          "Control request with no URL or invalid URL returns error without private retrieval",
+          "Private canary probe under intended policy returns error/denial/timeout with no private canary data returned, indicating the private destination is blocked per policy and distinguishing legitimate denial from successful private retrieval"
+        ],
+        "required_evidence": [
+          "Saved response bodies for public canary probe and private canary probe",
+          "Evidence that private canary is only reachable from server network and that response originates from server-side fetch"
+        ],
+        "supporting_refs": [
+          "artifact:check-evidence.txt"
+        ],
+        "research_refs": []
+      }
+    ],
+    "expected": "revise"
+  },
+  {
+    "id": "check-02",
+    "kind": "endpoint",
+    "title": "Review conditional fetch plan",
+    "url": "https://fixture.invalid/preview",
+    "source_ref": "artifact:check-evidence.txt",
+    "observation": "Current isolated fixture contract: POST /preview accepts JSON url and intentionally fetches owned public URLs. Private owned destinations are forbidden by destination policy. The retained synthetic trace has a successful public-canary control and a private-canary timeout. No policy decision reason, private-canary receipt or reachability diagnosis was recorded for that timeout. Source configuration describes the fetch boundary but its enforcement implementation is unresolved. Future probes may use only owned, authorized fixture canaries; no probes may be executed during this task.",
+    "objective": "The conditional future plan distinguishes private retrieval from policy-compliant denial and inconclusive transport/resource failure. A timeout alone cannot establish policy enforcement. No execution or completed future result is required. Use only retained current-operation fixture evidence.",
+    "criterion": "The conditional future plan distinguishes private retrieval from policy-compliant denial and inconclusive transport/resource failure. A timeout alone cannot establish policy enforcement. No execution or completed future result is required.",
+    "interaction": {
+      "interface": "http",
+      "operations": [
+        "POST"
+      ],
+      "operation_provenance": "observed",
+      "inputs": [
+        {
+          "name": "url",
+          "location": "body"
+        }
+      ]
+    },
+    "hypotheses": [
+      {
+        "authentication_requirement": {
+          "comparison": "none",
+          "roles": []
+        },
+        "observed_basis": "Current isolated fixture contract: POST /preview accepts JSON url and intentionally fetches owned public URLs. Private owned destinations are forbidden by destination policy. The retained synthetic trace has a successful public-canary control and a private-canary timeout. No policy decision reason, private-canary receipt or reachability diagnosis was recorded for that timeout. Source configuration describes the fetch boundary but its enforcement implementation is unresolved. Future probes may use only owned, authorized fixture canaries; no probes may be executed during this task.",
+        "preconditions": [
+          "Authorized isolated fixture with private canary reachable only from server network",
+          "Policy documentation confirms public URLs permitted and private network destinations prohibited",
+          "POST /preview fetches user-supplied URL server-side"
+        ],
+        "suspected_mechanism": "Server-side request forgery allowing retrieval from prohibited private network destinations via user-controlled URL in POST /preview",
+        "attacker_controlled_input": "URL parameter supplied in POST /preview request body",
+        "safe_test_steps": [
+          "Send POST /preview with URL pointing to owned public canary and record response",
+          "Send POST /preview with URL pointing to owned private canary in prohibited private range and record response",
+          "Compare private probe response to public canary control and to a no-op control"
+        ],
+        "positive_expectations": [
+          "Server returns content from private canary indicating server-side fetch succeeded from a prohibited private destination",
+          "Response contains private canary data not reachable from the client and differs from the public canary response"
+        ],
+        "negative_expectations": [
+          "The permitted public control succeeds.",
+          "The same private-canary probe reaches the fetch enforcement boundary and is explicitly denied by the destination rule, with a correlated policy decision and no private retrieval. A timeout, reset or generic error without that evidence remains inconclusive about enforcement."
+        ],
+        "required_evidence": [
+          "Saved response bodies for public canary probe and private canary probe",
+          "Evidence that private canary is only reachable from server network and that response originates from server-side fetch",
+          "Correlated boundary/policy decision and server-origin canary records; distinguish transport failures."
+        ],
+        "supporting_refs": [
+          "artifact:check-evidence.txt"
+        ],
+        "research_refs": []
+      }
+    ],
+    "expected": "retain"
+  }
+]

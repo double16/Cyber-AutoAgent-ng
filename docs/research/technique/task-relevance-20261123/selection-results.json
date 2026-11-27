@@ -1,0 +1,25 @@
+{
+  "requests": 48,
+  "promotion_gate_passed": false,
+  "arms": {
+    "baseline": {
+      "decisions": 24,
+      "valid": 24,
+      "correct": 13,
+      "mismatches_delivered": 11,
+      "valid_guidance_rejected": 0
+    },
+    "candidate": {
+      "decisions": 24,
+      "valid": 24,
+      "correct": 23,
+      "mismatches_delivered": 0,
+      "valid_guidance_rejected": 1
+    }
+  },
+  "limitations": [
+    "Baseline includes optional task_relevance field in the current common schema; baseline has no task-local input.",
+    "Only web techniques tested.",
+    "No selective reruns or prompt tuning; one valid candidate rejected."
+  ]
+}

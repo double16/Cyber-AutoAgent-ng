@@ -1463,7 +1463,8 @@ def test_secret_exposure_manifest_accepts_versionless_fresh_reexposure_artifact(
 
     with (
         patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
-        patch("src.modules.tools.memory._assertion_matches_artifact", return_value=True),
+        patch("src.modules.tools.memory.detect_secret_exposures",
+              return_value=[mod.SecretExposure("api_key", "digest", 1, 1, 10)]),
     ):
         attestation = mod._validate_confirmation_manifest(candidate, str(manifest))
 
@@ -2499,3 +2500,52 @@ def test_finalize_rejected_confirmation_becomes_validation_failure(operation_ids
     metadata = store_entry.call_args.args[2]
     assert metadata["claimed_severity"] == "CRITICAL"
     assert metadata["validation_reason"] == "Artifact did not support the claim"
+
+
+def test_bound_secret_comparison_eligibility_schema_and_invocation(monkeypatch, tmp_path):
+    task = Task(task_uid="verify-task", title="Verify", objective="Verify",
+                acceptance=make_acceptance("verify").to_dict(), phase=1, status="active",
+                kind="finding_validation", reference_id="finding-1")
+    source = tmp_path / "source.txt"
+    fresh = tmp_path / "fresh.txt"
+    source.write_text('password="synthetic-secret-123"')
+    fresh.write_text('\npassword="synthetic-secret-123"')
+    monkeypatch.setattr(mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(mod, "_operation_id", lambda: "test_op")
+    exposure = mod.detect_secret_exposures(str(source))[0]
+    candidate = {"finding_uid": "finding-1", "evidence_assertions": [
+        {"type": "secret_exposure", "kind": exposure.kind, "digest": exposure.digest, "artifact": str(source)}]}
+    store = MagicMock()
+    record = {"verification_task_uid": task.task_uid, "candidate_data": candidate}
+    store.get_finding.return_value = record
+    store.get_tasks.return_value = [task]
+    monkeypatch.setattr(mod, "_get_database_store", lambda: store)
+    comparison = mod.build_compare_secret_exposure_tool(task)
+    schema = get_tool_spec(comparison)["inputSchema"]["json"]
+    assert set(schema["properties"]) == {"artifact_ref"}
+    assert json.loads(comparison(str(fresh)))["all_predicates_reproduced"]
+    with pytest.raises(ValueError, match="fresh artifact"):
+        comparison(str(source))
+    with pytest.raises(ValueError):
+        comparison(str(tmp_path.parent / "outside.txt"))
+    store.get_tasks.return_value = []
+    with pytest.raises(ValueError, match="active bound"):
+        comparison(str(fresh))
+    store.get_tasks.return_value = [task]
+    record["verification_task_uid"] = "other"
+    with pytest.raises(ValueError, match="binding mismatch"):
+        comparison(str(fresh))
+    record["verification_task_uid"] = ""
+    with pytest.raises(ValueError, match="controller-bound"):
+        mod.build_compare_secret_exposure_tool(task)
+    record["verification_task_uid"] = task.task_uid
+    candidate["evidence_assertions"] = []
+    assert mod.build_compare_secret_exposure_tool(task) is None
+    with pytest.raises(ValueError, match="active bound"):
+        comparison(str(fresh))
+    from dataclasses import replace
+
+    assert mod.build_compare_secret_exposure_tool(replace(task, kind="standard")) is None
+    monkeypatch.setattr(mod, "_operation_id", lambda: "other_op")
+    with pytest.raises(ValueError, match="bound operation"):
+        comparison(str(fresh))

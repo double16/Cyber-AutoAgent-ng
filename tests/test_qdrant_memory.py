@@ -87,6 +87,35 @@ def test_local_client_creates_collection_without_ineffective_indexes(
     assert backend.indexed == []
 
 
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        (None, "cyber_autoagent_memories"),
+        ("", "cyber_autoagent_memories"),
+        (" \t\n", "cyber_autoagent_memories"),
+        ("custom_memories", "custom_memories"),
+        (" custom_memories ", "custom_memories"),
+    ],
+)
+def test_collection_name_normalized_before_qdrant_lookup(monkeypatch, configured, expected):
+    backend = FakeQdrant()
+    backend.collection_exists = Mock(return_value=False)
+    monkeypatch.setattr(memory.QdrantMemoryClient, "_build_client", lambda self: backend)
+    client = memory.QdrantMemoryClient(
+        {
+            "target_values": ["target.example"],
+            "operation_id": "OP-1",
+            "embeddings": FakeEmbeddings(),
+            "collection_name": configured,
+        },
+        silent=True,
+    )
+
+    assert client.collection_name == expected
+    backend.collection_exists.assert_called_once_with(expected)
+    assert backend.created[0]["collection_name"] == expected
+
+
 def test_service_client_uses_url_and_api_key(monkeypatch, tmp_path):
     backend = FakeQdrant(collection_exists=True)
     constructor = Mock(return_value=backend)

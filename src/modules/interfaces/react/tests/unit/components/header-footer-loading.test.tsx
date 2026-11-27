@@ -66,6 +66,23 @@ describe('header and footer components', () => {
         expect(asciiFrame).toContain('Exiting Cyber-AutoAgent');
     });
 
+    it('renders default props with gradients disabled', async () => {
+        const {render, Header} = await load();
+        const {themeManager} = await import('../../../src/themes/theme-manager.js');
+        const config = themeManager.getConfig();
+        const gradientsEnabled = config.enableGradients;
+
+        try {
+            config.enableGradients = false;
+            const frame = render(<Header/>).lastFrame();
+
+            expect(frame).toContain('v0.11.0');
+            expect(frame).toContain('Cyber-AutoAgent');
+        } finally {
+            config.enableGradients = gradientsEnabled;
+        }
+    });
+
     it('renders footer status, metrics, debug state, and truncation', async () => {
         const {render, Footer} = await load();
         const originalColumns = process.stdout.columns;

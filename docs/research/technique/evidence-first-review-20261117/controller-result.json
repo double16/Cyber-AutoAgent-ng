@@ -1,0 +1,157 @@
+{
+  "status": "completed",
+  "requests": 30,
+  "task_status": "done",
+  "supported_correct": true,
+  "accepted": {
+    "payload": {
+      "decision": {
+        "classification": "no_violation_observed",
+        "evidence_ids": [
+          "obs-3",
+          "obs-4",
+          "obs-5",
+          "obs-6",
+          "obs-2",
+          "obs-1"
+        ],
+        "explanation": "Own-account and cross-account accesses for both sessions match the observed permission policy. Session-red (identity A) accessed selector A and selector B with object data returned for both, consistent with policy permissions A: [A,B]. Session-blue (identity B) accessed selector B with object data returned, consistent with policy B: [B], and accessed selector A with no object returned, consistent with denial. Policy obtained from inspect_context and identity bindings confirm session-to-account mapping."
+      },
+      "observations": [
+        {
+          "id": "obs-1",
+          "kind": "identity",
+          "response": {
+            "session-red": "A",
+            "session-blue": "B"
+          }
+        },
+        {
+          "id": "obs-2",
+          "kind": "policy",
+          "response": {
+            "available": true,
+            "permissions": {
+              "A": [
+                "A",
+                "B"
+              ],
+              "B": [
+                "B"
+              ]
+            }
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "session-red",
+          "selector": "A",
+          "request": {
+            "protocol": "HTTP",
+            "method": "GET",
+            "path": "/account",
+            "headers": {
+              "X-Account": "A"
+            },
+            "credential_handle": "session-red"
+          },
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "A",
+                "value": "record-A"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "session-red",
+          "selector": "B",
+          "request": {
+            "protocol": "HTTP",
+            "method": "GET",
+            "path": "/account",
+            "headers": {
+              "X-Account": "B"
+            },
+            "credential_handle": "session-red"
+          },
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-5",
+          "principal": "session-blue",
+          "selector": "B",
+          "request": {
+            "protocol": "HTTP",
+            "method": "GET",
+            "path": "/account",
+            "headers": {
+              "X-Account": "B"
+            },
+            "credential_handle": "session-blue"
+          },
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-6",
+          "principal": "session-blue",
+          "selector": "A",
+          "request": {
+            "protocol": "HTTP",
+            "method": "GET",
+            "path": "/account",
+            "headers": {
+              "X-Account": "A"
+            },
+            "credential_handle": "session-blue"
+          },
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized"
+            }
+          }
+        }
+      ]
+    },
+    "references": [
+      "artifact:artifacts/task_evidence/94253de173650cac/result-4b59af1849a5c05d.json"
+    ]
+  },
+  "feedback": [
+    {
+      "type": "technique_evaluated",
+      "operation_id": "OP_EXECUTOR_PILOT",
+      "task_uid": "pilot-task",
+      "revision_id": "73c8a6b9-8c05-5aaa-9345-029736792841",
+      "score": 1,
+      "reason": "The delivered method\u2019s purpose is to compare client-controlled object-selector headers against established access policy using stable identities and controlled evidence. The task evidence shows identity binding obs-1, policy availability obs-2, and header-based request_account observations obs-3 obs-4 obs-5 obs-6 with object attribution, and publishes an evidence-backed classification. This is a demonstrated methodological contribution in the vulnerability_verification phase. The delivery snapshot unmet prerequisites are methodology metadata, not verified target conditions, and the task provides established policy and identity binding. Missing invalid-value behavior does not negate the demonstrated core comparison contribution.",
+      "sentiment_count": 1,
+      "sentiment_mean": 1.0,
+      "snapshot_path": "techniques/73c8a6b9-8c05-5aaa-9345-029736792841.evaluated-94253de173650cac.md"
+    }
+  ],
+  "limitation": "One synthetic full-controller case, not general effectiveness proof."
+}

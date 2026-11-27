@@ -1,0 +1,221 @@
+[
+  {
+    "id": "selector",
+    "title": "Repair selector proposal",
+    "url": "https://fixture.invalid/records",
+    "source_ref": "artifact:selector.txt",
+    "observation": "Current isolated fixture contract: the protected operation is GET /records with required query parameter record_id (string). No /records/{id} route is declared. Owners and explicit shared readers may access a record. Two future same-role test-account sessions A and B compare the same record with established ownership and absent sharing. No current execution credentials qualify. No role names are declared; future comparison=account with roles=[] remains required. Do not execute requests or provision credentials in this generation task.",
+    "objective": "Future account comparison preserves account/empty roles and uses the exact recorded GET /records query interface with entitlement controls. Use only retained current-operation fixture evidence; do not execute future tests.",
+    "criterion": "Future account comparison preserves account/empty roles and uses the exact recorded GET /records query interface with entitlement controls.",
+    "interaction": {
+      "interface": "http",
+      "operations": [
+        "GET"
+      ],
+      "operation_provenance": "observed",
+      "inputs": [
+        {
+          "name": "record_id",
+          "location": "query"
+        }
+      ]
+    },
+    "hypotheses": [
+      {
+        "authentication_requirement": {
+          "comparison": "account",
+          "roles": []
+        },
+        "observed_basis": "Current isolated fixture contract: the protected operation is GET /records with required query parameter record_id (string). No /records/{id} route is declared. Owners and explicit shared readers may access a record. Two future same-role test-account sessions A and B compare the same record with established ownership and absent sharing. No current execution credentials qualify. No role names are declared; future comparison=account with roles=[] remains required. Do not execute requests or provision credentials in this generation task.",
+        "preconditions": [
+          "Isolated test fixture with record R owned exclusively by account A",
+          "Account B has no sharing or ownership of R",
+          "Authenticated sessions for A and B with the same role can be established in future",
+          "Policy documentation or configuration confirms owner-only access for R"
+        ],
+        "suspected_mechanism": "Account authorization bypass allowing cross-account read of a record",
+        "attacker_controlled_input": "Record identifier supplied in GET /records request by account B",
+        "safe_test_steps": [
+          "Provision accounts A and B with same role and create record R owned by A",
+          "Verify ownership metadata shows A as owner and no shared readers for R",
+          "Issue GET /records/{id_of_R} from authenticated session A and record response as baseline",
+          "Issue GET /records/{id_of_R} from authenticated session B and record response",
+          "Compare responses for the same record identifier across A and B"
+        ],
+        "positive_expectations": [
+          "Session B receives full record content for R that is owned exclusively by A with no sharing",
+          "Response status indicates successful read for B despite lack of ownership or sharing"
+        ],
+        "negative_expectations": [
+          "Session B receives access denied, 404, or empty response for R",
+          "Session A receives R correctly, confirming record exists and baseline access works"
+        ],
+        "required_evidence": [
+          "Record ownership metadata showing A as owner and no shared readers for R",
+          "Authenticated request logs for A and B showing same record identifier",
+          "Response status codes and bodies for both sessions for the same identifier"
+        ],
+        "supporting_refs": [
+          "artifact:selector.txt"
+        ],
+        "research_refs": []
+      }
+    ],
+    "advisory_seed_origin": "outputs/technique_review_trials/identity-corrections-replicated-20261125/authorization-unnamed-candidate-0/result.json"
+  },
+  {
+    "id": "mechanisms",
+    "title": "Repair mechanisms proposal",
+    "url": "https://fixture.invalid/render",
+    "source_ref": "artifact:mechanisms.txt",
+    "observation": "Current isolated fixture contract: POST /render has JSON body fields user_text and url. The documented LLM renderer receives user_text; its retrieval capability receives url. Policy protects literal template header/footer and permits user_text only in the content region. Destination policy permits public URLs and forbids private destinations. Independent instruction override and destination-policy hypotheses need separate test controls and evidence. Enforcement is unresolved; future owned canaries and template comparisons may establish policy violations. No target test has run. Do not request arbitrary internal services or metadata endpoints.",
+    "objective": "Preserve independently grounded instruction-override and destination-policy mechanisms with separate test steps, controls and evidence for each consequence. Use only retained current-operation fixture evidence; do not execute future tests.",
+    "criterion": "Preserve independently grounded instruction-override and destination-policy mechanisms with separate test steps, controls and evidence for each consequence.",
+    "interaction": {
+      "interface": "http",
+      "operations": [
+        "POST"
+      ],
+      "operation_provenance": "observed",
+      "inputs": [
+        {
+          "name": "user_text",
+          "location": "body"
+        },
+        {
+          "name": "url",
+          "location": "body"
+        }
+      ]
+    },
+    "hypotheses": [
+      {
+        "authentication_requirement": {
+          "comparison": "none",
+          "roles": []
+        },
+        "observed_basis": "Current isolated fixture contract: POST /render has JSON body fields user_text and url. The documented LLM renderer receives user_text; its retrieval capability receives url. Policy protects literal template header/footer and permits user_text only in the content region. Destination policy permits public URLs and forbids private destinations. Independent instruction override and destination-policy hypotheses need separate test controls and evidence. Enforcement is unresolved; future owned canaries and template comparisons may establish policy violations. No target test has run. Do not request arbitrary internal services or metadata endpoints.",
+        "preconditions": [
+          "Authorized isolated fixture; future execution identities and policy must be established"
+        ],
+        "suspected_mechanism": "Private destination retrieval",
+        "attacker_controlled_input": "Assigned input",
+        "safe_test_steps": [
+          "Compare a harmless probe with a control"
+        ],
+        "positive_expectations": [
+          "A future controlled test must show server retrieval of a policy-prohibited destination"
+        ],
+        "negative_expectations": [
+          "Control remains unchanged"
+        ],
+        "required_evidence": [
+          "Saved probe and control"
+        ],
+        "supporting_refs": [
+          "artifact:mechanisms.txt"
+        ],
+        "research_refs": []
+      },
+      {
+        "authentication_requirement": {
+          "comparison": "none",
+          "roles": []
+        },
+        "observed_basis": "Current isolated fixture contract: POST /render has JSON body fields user_text and url. The documented LLM renderer receives user_text; its retrieval capability receives url. Policy protects literal template header/footer and permits user_text only in the content region. Destination policy permits public URLs and forbids private destinations. Independent instruction override and destination-policy hypotheses need separate test controls and evidence. Enforcement is unresolved; future owned canaries and template comparisons may establish policy violations. No target test has run. Do not request arbitrary internal services or metadata endpoints.",
+        "preconditions": [
+          "Authorized isolated fixture with known template header/footer",
+          "Confirmed renderer configuration selects LLM renderer with URL retrieval capability",
+          "Policy documentation confirming header/footer protected and URL retrieval limited to public destinations"
+        ],
+        "suspected_mechanism": "LLM renderer follows user-supplied instructions embedded in user_text to modify protected template header/footer or to perform URL retrieval beyond policy",
+        "attacker_controlled_input": "user_text field in POST /render",
+        "safe_test_steps": [
+          "Render control user_text with benign content and record header/footer and content region",
+          "Render probe user_text containing an instruction to change header/footer or to retrieve a test URL and record rendered output",
+          "Compare probe output to control output for changes outside the permitted content region"
+        ],
+        "positive_expectations": [
+          "Probe rendering shows header or footer text deviating from the protected template",
+          "Probe rendering places instruction-following marker or retrieved content outside the permitted content region",
+          "Probe rendering demonstrates retrieval of a destination outside the public allowlist"
+        ],
+        "negative_expectations": [
+          "Control rendering preserves original header/footer text and contains user content only within the content region",
+          "Control rendering does not perform URL retrieval or shows only literal echo of user_text within the content region"
+        ],
+        "required_evidence": [
+          "Saved rendered output for probe and control",
+          "Template configuration showing protected header/footer",
+          "Renderer configuration showing URL retrieval capability",
+          "Policy documentation"
+        ],
+        "supporting_refs": [
+          "artifact:mechanisms.txt"
+        ],
+        "research_refs": []
+      }
+    ],
+    "advisory_seed_origin": "outputs/technique_review_trials/identity-corrections-replicated-20261125/rendering-candidate-1/result.json"
+  },
+  {
+    "id": "refutation",
+    "title": "Repair refutation proposal",
+    "url": "https://fixture.invalid/preview",
+    "source_ref": "artifact:refutation.txt",
+    "observation": "Current isolated fixture contract: POST /preview accepts JSON field url and intentionally fetches public URLs. Public callbacks are allowed. Private destinations are prohibited. Future tests may use only owned, authorized fixture public/private canaries. A private-probe success and the corresponding blocked private-probe outcome must address the same destination-policy consequence; public/invalid-URL controls alone do not refute private access. Evidence must differentiate server-side private retrieval from ordinary callbacks and transport errors. No target test has run; do not execute probes in this correction task.",
+    "objective": "Future destination-policy test has permitted public baseline, positive private access evidence and a matching negative private-probe outcome; no execution is required now. Use only retained current-operation fixture evidence; do not execute future tests.",
+    "criterion": "Future destination-policy test has permitted public baseline, positive private access evidence and a matching negative private-probe outcome; no execution is required now.",
+    "interaction": {
+      "interface": "http",
+      "operations": [
+        "POST"
+      ],
+      "operation_provenance": "observed",
+      "inputs": [
+        {
+          "name": "url",
+          "location": "body"
+        }
+      ]
+    },
+    "hypotheses": [
+      {
+        "authentication_requirement": {
+          "comparison": "none",
+          "roles": []
+        },
+        "observed_basis": "Current isolated fixture contract: POST /preview accepts JSON field url and intentionally fetches public URLs. Public callbacks are allowed. Private destinations are prohibited. Future tests may use only owned, authorized fixture public/private canaries. A private-probe success and the corresponding blocked private-probe outcome must address the same destination-policy consequence; public/invalid-URL controls alone do not refute private access. Evidence must differentiate server-side private retrieval from ordinary callbacks and transport errors. No target test has run; do not execute probes in this correction task.",
+        "preconditions": [
+          "Authorized isolated fixture with private canary reachable only from server network",
+          "Policy documentation confirms public URLs permitted and private network destinations prohibited",
+          "POST /preview fetches user-supplied URL server-side"
+        ],
+        "suspected_mechanism": "Server-side request forgery allowing retrieval from prohibited private network destinations via user-controlled URL in POST /preview",
+        "attacker_controlled_input": "URL parameter supplied in POST /preview request body",
+        "safe_test_steps": [
+          "Send POST /preview with URL pointing to owned public canary and record response",
+          "Send POST /preview with URL pointing to owned private canary in prohibited private range and record response",
+          "Compare private probe response to public canary control and to a no-op control"
+        ],
+        "positive_expectations": [
+          "Server returns content from private canary indicating server-side fetch succeeded from a prohibited private destination",
+          "Response contains private canary data not reachable from the client and differs from the public canary response"
+        ],
+        "negative_expectations": [
+          "Public canary request returns expected public content with no private data",
+          "Control request with no URL or invalid URL returns error without private retrieval"
+        ],
+        "required_evidence": [
+          "Saved response bodies for public canary probe and private canary probe",
+          "Evidence that private canary is only reachable from server network and that response originates from server-side fetch"
+        ],
+        "supporting_refs": [
+          "artifact:refutation.txt"
+        ],
+        "research_refs": []
+      }
+    ],
+    "advisory_seed_origin": "outputs/technique_review_trials/identity-corrections-replicated-20261125/permitted-fetch-candidate-1/result.json"
+  }
+]

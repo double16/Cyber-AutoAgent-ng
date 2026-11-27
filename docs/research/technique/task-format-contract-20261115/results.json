@@ -1,0 +1,115 @@
+{
+  "counts": {
+    "requests": 8,
+    "limit": 12
+  },
+  "outcomes": [
+    {
+      "mode": "unknown",
+      "arm": "guidance",
+      "index": 0,
+      "status": "completed",
+      "answer": {
+        "classification": "inconclusive",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4",
+          "obs-5",
+          "obs-6"
+        ],
+        "explanation": "Identity mapping shows session-red maps to A and session-blue maps to B (obs-1). Policy context is unavailable (obs-2), so the access-control policy prerequisite required to determine authorized vs unauthorized object access cannot be established. Endpoint responses for all principal/selector combinations return status 200 with body error \"not authorized\" and an object whose owner matches the selector value: session-red with selector A returns owner A record-A (obs-3); session-red with selector B returns owner B record-B (obs-4); session-blue with selector A returns owner A record-A (obs-5); session-blue with selector B returns owner B record-B (obs-6). The header selector is processed, changing the returned object, but no request yields a legitimate authorized baseline and the policy mapping needed to confirm principal A is not authorized for object B is missing. Without a documented policy and a legitimate baseline, an authorization violation cannot be established under the required controls, so the finding is inconclusive."
+      },
+      "correct_classification": true,
+      "valid_evidence_ids": true,
+      "decisive_probe": true,
+      "discovery_evidence": true,
+      "supported_correct": true,
+      "requests": 8,
+      "observations": [
+        {
+          "id": "obs-1",
+          "kind": "identity",
+          "response": {
+            "session-red": "A",
+            "session-blue": "B"
+          }
+        },
+        {
+          "id": "obs-2",
+          "kind": "policy",
+          "response": {
+            "available": false,
+            "reason": "Policy record unavailable"
+          }
+        },
+        {
+          "id": "obs-3",
+          "principal": "session-red",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "A",
+                "value": "record-A"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-4",
+          "principal": "session-red",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-5",
+          "principal": "session-blue",
+          "selector": "A",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "A",
+                "value": "record-A"
+              }
+            }
+          }
+        },
+        {
+          "id": "obs-6",
+          "principal": "session-blue",
+          "selector": "B",
+          "response": {
+            "status": 200,
+            "body": {
+              "error": "not authorized",
+              "object": {
+                "owner": "B",
+                "value": "record-B"
+              }
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "prior_generation_requests": 118,
+  "cumulative_requests": 126,
+  "total_authorized_requests": 130,
+  "unused_requests": 4,
+  "scope": "Separate format-alignment check; no replacement of earlier primary or exploratory outcomes."
+}

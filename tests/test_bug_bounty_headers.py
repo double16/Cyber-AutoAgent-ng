@@ -2,6 +2,10 @@ import os
 import sys
 from unittest.mock import Mock, patch
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("isolated_technique_service")
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from modules.agents.cyber_autoagent import AgentConfig, create_agent

@@ -1,0 +1,260 @@
+--- a/src/modules/techniques/critique.py
++++ b/src/modules/techniques/critique.py
+@@ -525,6 +525,12 @@
+ 
+ 
+ def assess(service, prompt, markdown, requirements, documents, selected_urls, *, correctness=False, review_contract=None):
++    from modules.techniques.review_corrections import (
++        AssessmentCorrection,
++        CriticCorrection,
++        merge_assessment,
++        merge_critic,
++    )
+     from modules.techniques.roles import DeferredReviewPrompt
+ 
+     lookup = RetainedSources(documents)
+@@ -539,6 +545,7 @@
+     prompt += "\n" + json_payload("retained_sources", [
+         {"url": url, "characters": len(text)} for url, text in lookup.texts.items()
+     ])
++    correction_subject = prompt
+     prompt += (
+         "\nPython has already parsed and validated the metadata schema. Evaluate decoded values and "
+         "their meaning, not YAML syntax, escaping, indentation, or serialization.\n"
+@@ -580,13 +587,29 @@
+     )
+     correction_used = False
+     previous_blockers = {}
++    critic_base = None
++    independent_findings = {}
++    disputed_indices = []
++    correction_responses = {}
+     for _correction in range(2):
+         candidate = None
+         try:
+-            candidate = service._json(
+-                "technique_critic", bind_review_prompt(prompt, required_records), Critique,
+-                [] if correction_used else [lookup.tool()],
+-            )
++            if critic_base is None:
++                candidate = service._json(
++                    "technique_critic", bind_review_prompt(prompt, required_records), Critique,
++                    [] if correction_used else [lookup.tool()],
++                )
++            else:
++                patch = service._json("technique_critic", bind_review_prompt(prompt, required_records),
++                                      CriticCorrection, [])
++                candidate = merge_critic(critic_base, patch, independent_findings, disputed_indices)
++                correction_responses = {"finding_responses": [row.model_dump() for row in patch.finding_responses],
++                                        "interpretation_changes": [row.model_dump() for row in patch.interpretation_changes],
++                                        "added_interpretations": [row.model_dump() for row in patch.added_interpretations],
++                                        "baseline_interpretation_count": len(critic_base.interpretations)}
++                service.events.emit("technique_build_progress", stage="critique", status="correction_merged",
++                                    snapshot_id=snapshot.identifier, correction=patch.model_dump(),
++                                    merged_interpretation_count=len(candidate.interpretations))
+             contract_errors = []
+             if candidate.decision_origin == "controller_findings":
+                 try:
+@@ -752,16 +775,27 @@
+                     + "\nArchived research receipt, not a procedural control or approval:\n"
+                     + snapshot.render(research_notes=True)
+                 )
++                comparison += "\n" + json_payload("critic_correction_responses", correction_responses)
++                comparison += ("\nJudge every finding response and interpretation retention or revision semantically. "
++                               "Controller retention establishes continuity only, never support or approval.")
+                 assessment_subject = investigation_instructions + assessment_evidence
+                 assessment_prompt = DeferredReviewPrompt(assessment_subject, comparison)
++                assessment_base = None
+                 for assessor_attempt in range(2):
+                     assessment = None
+                     try:
+-                        assessment = service._json(
+-                            "technique_critique_assessor", bind_review_prompt(assessment_prompt, required_records),
+-                            IssueAssessment,
+-                            [lookup.tool()] if not assessor_attempt else [],
+-                        )
++                        if assessment_base is None:
++                            assessment = service._json(
++                                "technique_critique_assessor", bind_review_prompt(assessment_prompt, required_records),
++                                IssueAssessment, [lookup.tool()] if not assessor_attempt else [],
++                            )
++                        else:
++                            patch = service._json("technique_critique_assessor",
++                                bind_review_prompt(assessment_prompt, required_records), AssessmentCorrection, [])
++                            assessment = merge_assessment(assessment_base, patch)
++                            service.events.emit("technique_build_progress", stage="critique_assessment",
++                                                status="correction_merged", snapshot_id=snapshot.identifier,
++                                                correction=patch.model_dump())
+                         if assessment.approved == bool(assessment.findings):
+                             raise ValueError("Agreement forbids findings; disagreement needs referenced findings")
+                         reviews = assessment.interpretation_reviews
+@@ -831,9 +865,27 @@
+                             error.rejected_response = assessment.model_dump_json()
+                         retained = "\n" + json_payload("retained_lookup_passages", lookup.retained_passages())
+                         retained += "\n" + json_payload("source_inspection", lookup.inspection())
++                        if (candidate.decision_origin == "controller_findings" and assessment is not None
++                                and not correctness
++                                and sorted(row.interpretation_index for row in assessment.interpretation_reviews)
++                                == list(range(len(candidate.interpretations)))):
++                            assessment_base = assessment.model_copy(deep=True)
++                            comparison = "Correct the retained assessment against the complete unchanged subject. "
++                            comparison += json_payload("critic_assessment", candidate.model_dump())
++                            comparison += "\n" + json_payload("retained_assessment", assessment_base.model_dump())
++                            comparison += "\n" + json_payload("critic_correction_responses", correction_responses)
++                            comparison += ("\nReturn AssessmentCorrection: explicit aggregate critic_supported, reason, "
++                                           "complete findings and indexed review_changes only. Omit unchanged review "
++                                           "rows; Python retains and revalidates them. Do not return a full assessment.")
+                         comparison = service._repair_prompt(comparison + retained, error)
+                         assessment_prompt = DeferredReviewPrompt(assessment_subject + retained, comparison)
+                 if not assessment.approved:
++                    if candidate.decision_origin == "controller_findings" and not correctness:
++                        critic_base = candidate.model_copy(deep=True)
++                        independent_findings = {f"finding:{index}": row.model_dump()
++                                                for index, row in enumerate(assessment.findings, 1)}
++                        disputed_indices = [row.interpretation_index for row in assessment.interpretation_reviews
++                                            if not row.critic_correct]
+                     raise ValueError("Critique disagreement: " + assessment.model_dump_json())
+             return candidate
+         except ValueError as error:
+@@ -846,6 +898,18 @@
+                 error.rejected_response = candidate.model_dump_json()
+                 previous_blockers = {f"previous-blocker:{index}": row.model_dump()
+                                      for index, row in enumerate(candidate.issues, 1)}
++            if critic_base is not None:
++                prompt = correction_subject + "\n" + json_payload("retained_critic", critic_base.model_dump())
++                prompt += "\n" + json_payload("independent_findings", independent_findings)
++                prompt += "\n" + json_payload("disputed_interpretation_indices", disputed_indices)
++                prompt += ("\nReturn CriticCorrection, not a full critique. Return complete replacement issues, "
++                           "issue_dispositions, explicit finding_responses for EVERY finding, and indexed "
++                           "interpretation_changes for EVERY disputed interpretation. Explicit retention needs "
++                           "an evidence-grounded reason; revision needs a replacement; withdrawal needs a reason. "
++                           "Appended check indices begin at the retained table length. Withdrawing all checks "
++                           "requires no_security_checks_reason. Python retains unchanged "
++                           "interpretations on this identical subject and the assessor reviews the merged result. "
++                           "Do not regenerate the full interpretation table or silently approve a disputed row.")
+             prompt += "\n" + json_payload("previous_blockers", previous_blockers)
+             prompt += ("\nFor each previous blocker return exactly one issue_dispositions entry: controller "
+                        "previous_issue_reference, retained/revised/withdrawn action, current replacement_issue_ids "
+--- /dev/null
++++ b/src/modules/techniques/review_corrections.py
+@@ -0,0 +1,120 @@
++"""Controller-owned review merges; models explain every disputed retention or change."""
++
++from typing import Literal
++
++from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
++
++from modules.techniques.critique import (
++    BlockingIssue,
++    ClassifiedInterpretation,
++    ClassifiedInterpretationReview,
++    Critique,
++    IssueAssessment,
++    IssueDisposition,
++    MaterialAssessmentFinding,
++    Suggestion,
++)
++
++
++class InterpretationChange(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++    interpretation_index: StrictInt = Field(ge=0)
++    action: Literal["retained", "revised", "withdrawn"]
++    reason: str = Field(min_length=1)
++    replacement: ClassifiedInterpretation | None = None
++
++
++class FindingResponse(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++    finding_reference: str = Field(description="Copy one exact controller finding:N key from independent_findings")
++    action: Literal["accepted", "rejected"]
++    reason: str = Field(min_length=1)
++    issue_ids: list[str] = Field(default_factory=list)
++    interpretation_indices: list[StrictInt] = Field(
++        default_factory=list, description="Baseline interpretation indices explicitly disposed in interpretation_changes, "
++        "or appended indices beginning at the baseline table length. These are not reindexed merged-table positions.",
++    )
++
++
++class CriticCorrection(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++    reason: str = Field(min_length=1)
++    issues: list[BlockingIssue]
++    issue_dispositions: list[IssueDisposition]
++    interpretation_changes: list[InterpretationChange]
++    finding_responses: list[FindingResponse]
++    added_interpretations: list[ClassifiedInterpretation] = Field(default_factory=list)
++    suggestions: list[Suggestion] | None = None
++    no_security_checks_reason: str | None = Field(
++        default=None, description="Required when withdrawing every interpretation leaves no checks. "
++        "Explain why this unchanged subject has no security-relevant checks.",
++    )
++
++
++class ReviewChange(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++    interpretation_index: StrictInt = Field(ge=0)
++    replacement: ClassifiedInterpretationReview
++
++
++class AssessmentCorrection(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++    critic_supported: StrictBool
++    reason: str = Field(min_length=1, max_length=2000)
++    findings: list[MaterialAssessmentFinding]
++    review_changes: list[ReviewChange]
++
++
++def merge_critic(base, patch, findings, disputed_indices):
++    """Keep untouched interpretations; disputed ones require explicit justified dispositions."""
++    indices = [row.interpretation_index for row in patch.interpretation_changes]
++    if len(indices) != len(set(indices)) or not set(disputed_indices) <= set(indices):
++        raise ValueError("Every disputed interpretation requires one explicit change or retention")
++    rows = [row.model_copy(deep=True) for row in base.interpretations]
++    removed = set()
++    for change in patch.interpretation_changes:
++        if change.interpretation_index >= len(rows):
++            raise ValueError("Unknown interpretation change index")
++        if (change.action == "revised") != (change.replacement is not None):
++            raise ValueError("Revised interpretations require replacements; retained interpretations forbid them")
++        if change.action == "withdrawn":
++            removed.add(change.interpretation_index)
++        if change.replacement is not None:
++            rows[change.interpretation_index] = change.replacement
++    rows.extend(patch.added_interpretations)
++    references = [row.finding_reference for row in patch.finding_responses]
++    if len(references) != len(set(references)) or set(references) != set(findings):
++        raise ValueError("Every independent finding requires one explicit response")
++    issue_ids = {row.id for row in patch.issues}
++    changed = set(indices) | set(range(len(base.interpretations), len(rows)))
++    revised = {row.interpretation_index for row in patch.interpretation_changes if row.action != "retained"}
++    revised |= set(range(len(base.interpretations), len(rows)))
++    for response in patch.finding_responses:
++        if not set(response.issue_ids) <= issue_ids or not set(response.interpretation_indices) <= changed:
++            raise ValueError("Finding response references unknown issues or untouched interpretations")
++        if response.action == "accepted" and not (response.issue_ids or set(response.interpretation_indices) & revised):
++            raise ValueError("Accepted findings require an issue or actual interpretation revision/withdrawal")
++    rows = [row for index, row in enumerate(rows) if index not in removed]
++    reason = base.no_security_checks_reason if patch.no_security_checks_reason is None else patch.no_security_checks_reason
++    return Critique(approved=not patch.issues, decision_origin="controller_findings", reason=patch.reason,
++                    category=base.category, issues=patch.issues, issue_dispositions=patch.issue_dispositions,
++                    interpretations=rows, suggestions=base.suggestions if patch.suggestions is None else patch.suggestions,
++                    no_security_checks_reason="" if rows else reason)
++
++
++def merge_assessment(base, patch):
++    rows = sorted((row.model_copy(deep=True) for row in base.interpretation_reviews),
++                  key=lambda row: row.interpretation_index)
++    if [row.interpretation_index for row in rows] != list(range(len(rows))):
++        raise ValueError("Retained reviews require contiguous unique indices")
++    indices = [row.interpretation_index for row in patch.review_changes]
++    if len(indices) != len(set(indices)):
++        raise ValueError("Duplicate interpretation review changes")
++    for change in patch.review_changes:
++        if change.interpretation_index >= len(rows):
++            raise ValueError("Unknown interpretation review change index")
++        if change.replacement.interpretation_index != change.interpretation_index:
++            raise ValueError("Review replacement must retain its interpretation index")
++        rows[change.interpretation_index] = change.replacement
++    return IssueAssessment(critic_supported=patch.critic_supported, reason=patch.reason,
++                           findings=patch.findings, interpretation_reviews=rows)

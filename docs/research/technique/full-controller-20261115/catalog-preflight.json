@@ -1,0 +1,16 @@
+{
+  "revisions": 64,
+  "query": "Compare header selector authorization with identity binding, established policy, and positive and negative controls",
+  "top_result": {
+    "revision_id": "73c8a6b9-8c05-5aaa-9345-029736792841",
+    "lineage": "module:web:techniques/header-selector-authorization.md",
+    "source_sha256": "2ced46a1262fa7e83ff8a1f156fb24f5609efa0155319f106c9b6e82a107dca6",
+    "origin": "module:web",
+    "active": 1
+  },
+  "score": 0.7727432250201773,
+  "embedding_endpoint": "http://192.168.253.101:11434",
+  "embedding_model": "mxbai-embed-large:latest",
+  "authorization": "Explicit user approval before execution",
+  "scope": "Isolated catalog; module Markdown and query only; no active-operation data"
+}

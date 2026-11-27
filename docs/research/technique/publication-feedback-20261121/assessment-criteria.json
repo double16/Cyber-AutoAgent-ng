@@ -1,0 +1,19 @@
+{
+  "purpose": "Assess reasons independently of helpful-score direction or schema validity",
+  "dom": {
+    "current_version": "The final publication includes a concrete maptitle-to-outerHTML data-flow claim; absence of that claim in earlier publications must not be attributed to the final version.",
+    "discrimination": "Ordinary iframe title rendering and HTML element creation do not alone establish the claimed script execution. Lack of raw server reflection does not refute a client-side mechanism.",
+    "limitation": "Replay does not supply underlying source inspections and cannot independently verify the source mapping."
+  },
+  "admin": {
+    "current_version": "The final publication marks server authorization unknown and proposes later checks; do not say it asserts observed server non-enforcement.",
+    "identity": "The future steps require an authenticated admin baseline while the declared requirement is comparison=none, roles=[].",
+    "discrimination": "A public SPA shell and client component mounting do not alone establish unauthorized access to protected backend data.",
+    "identity_contract_note": "comparison=none can legitimately support a single authenticated identity. Empty roles means unrestricted role selection, not necessarily anonymous execution. The defect under review is failure to declare the required admin baseline, not a universal requirement to encode an anonymous-versus-admin test as a two-credential role comparison."
+  },
+  "empty": {
+    "current_version": "The publication contains a reasoned empty disposition, not executed authentication tests.",
+    "contribution": "Judge a demonstrated methodological correspondence to the exclusion, without requiring execution or copied tables.",
+    "limitation": "The frozen publication's statements about inspected inputs are not independently revalidated during this replay."
+  }
+}

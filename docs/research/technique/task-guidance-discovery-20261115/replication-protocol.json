@@ -1,0 +1,30 @@
+{
+  "limit": 25,
+  "model": "muse-glimmer:30b-mlx",
+  "plans": [
+    {
+      "mode": "unknown",
+      "arm": "none"
+    },
+    {
+      "mode": "unknown",
+      "arm": "guidance"
+    }
+  ],
+  "guidance_sha256": "7f91190f9cc73efb226698bf0bffb086f7144f6f9aa5ee33bebac4289dd32d74",
+  "prior_generation_requests": 105,
+  "total_authorized_requests": 130,
+  "design": "Three opaque behaviors, paired arms, one repeat. Shared case reverses arm order.",
+  "grading": "Fixture-owned classification, cited request evidence, and cited identity/policy discovery records.",
+  "executed_script_sha256": "6142e310c66730930f9ca582c188b9bf664d4bf92f33bb8d360cda4f716e00ac",
+  "corrected_proposal_is_experiment_input": false,
+  "limits": [
+    "One run per arm/case",
+    "No context-length or seed control",
+    "Synthetic tools, not operation executor",
+    "No retrieval/adoption measurement"
+  ],
+  "authorization": "User explicitly approved up to 30 additional requests to complete the interrupted comparison.",
+  "restart_policy": "Fresh run of the single budget-interrupted case; prior attempt retained. No completed case rerun.",
+  "scope": "One exploratory repetition of the unknown-policy pair in reversed arm order. Primary outcomes remain fixed; no replacement of earlier results."
+}

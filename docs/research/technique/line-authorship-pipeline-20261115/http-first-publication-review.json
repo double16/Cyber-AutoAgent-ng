@@ -1,0 +1,34 @@
+{
+  "summary": "The draft provides a reusable header-selector authorization test with prerequisites, controls, a step-by-step procedure, interpretation conditions, evidence requirements and future checks. The structure covers policy establishment, baseline and entitlement controls, header processing confirmation and a comparison workflow. The methodology is largely aligned with the request to describe a reusable test and explain when a baseline vs variant comparison establishes an authorization violation, with controls and evidence requirements included.",
+  "issues": [
+    {
+      "criterion_id": "core:correctness",
+      "problem": "Interpretation condition 3 is internally inconsistent with the comparison steps. The procedure records a response body hash for baseline and variant and compares status code, response body hash and object identifier, implying a difference is expected. Interpretation then requires the variant to return the object referenced by H_variant with the same status code and content shape as the baseline, which conflates detecting a change with requiring sameness and misstates the observable that demonstrates selection by header.",
+      "material_impact": "The contradictory description of the expected variant observation can lead practitioners to misclassify legitimate behavior as a violation or miss a real violation, undermining the reliability of the authorization-violation decision rule.",
+      "requested_correction": "Clarify that a violation is indicated when the variant request, under the same authentication as the baseline, returns a different object attributable to the header value, e.g., a different object identifier and data attributable to principal B, while the status code and response shape remain consistent with a successful selection. Align the comparison step and interpretation to require a change in object identifier/data, not identical content.",
+      "draft_references": [
+        "dcf959e0c30c6:b69",
+        "dcf959e0c30c6:b55",
+        "dcf959e0c30c6:b48"
+      ],
+      "passage_ids": []
+    },
+    {
+      "criterion_id": "core:interpretation",
+      "problem": "The interpretation rule for unauthorized disclosure relies on 'same status code and content shape as the baseline' as evidence that the server selected the object based on the header. Same shape alone does not distinguish header-based selection from legitimate principal-based access, and the rule does not explicitly require demonstrating that the returned data is attributable to the unauthorized principal under the established policy.",
+      "material_impact": "Without an explicit requirement to verify that the variant response contains data attributable to the unauthorized principal and that the policy prohibits access, the method risks labeling legitimate behavior as a violation.",
+      "requested_correction": "Require explicit evidence that the variant response contains an object identifier and data attributable to the unauthorized principal, and that the policy prerequisite confirms principal A is not authorized for that object. Keep the status code/shape consistency as a control for server processing, not as proof of violation.",
+      "draft_references": [
+        "dcf959e0c30c6:b69",
+        "dcf959e0c30c6:b70",
+        "dcf959e0c30c6:b63"
+      ],
+      "passage_ids": []
+    }
+  ],
+  "suggestions": [
+    "Add an explicit future check to confirm the header value is client-controlled and not derived server-side from the authenticated principal, e.g., by testing with a different session or by code review, before labeling selection as header-based.",
+    "Make the negative control outcome explicit in the interpretation checklist, e.g., document the expected rejection/error for an invalid header and require that observation before concluding the header is a selector.",
+    "Clarify evidence requirements for policy establishment, such as a citation to documentation or configuration showing the allow/deny mapping for the specific endpoint and object identifiers."
+  ]
+}

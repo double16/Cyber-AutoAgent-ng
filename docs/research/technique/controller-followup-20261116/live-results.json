@@ -1,0 +1,361 @@
+{
+  "generation_requests": {
+    "total_followup": 446,
+    "final_cohort": 168,
+    "authorization": "User approved as many requests as needed",
+    "runs": [
+      {
+        "run": "controller-followup-20261116",
+        "requests": 1
+      },
+      {
+        "run": "controller-followup-final-20261116",
+        "requests": 12
+      },
+      {
+        "run": "controller-fixture-ready-20261116",
+        "requests": 21
+      },
+      {
+        "run": "controller-comparison-20261116",
+        "requests": 0
+      },
+      {
+        "run": "controller-comparison-ready-20261116",
+        "requests": 100
+      },
+      {
+        "run": "controller-remaining-20261116",
+        "requests": 47
+      },
+      {
+        "run": "controller-postfix-20261116",
+        "requests": 88
+      },
+      {
+        "run": "controlled-delivery-20261116",
+        "requests": 7
+      },
+      {
+        "run": "phase-recommendation-preflight-20261116",
+        "requests": 1
+      },
+      {
+        "run": "network-recommendation-preflight-20261116",
+        "requests": 1
+      },
+      {
+        "run": "controller-network-ready-20261116",
+        "requests": 168
+      }
+    ]
+  },
+  "cases": [
+    {
+      "mode": "unknown",
+      "arm": "lookup",
+      "status": "completed",
+      "requests": 20,
+      "task_status": "partial_failure",
+      "task_reason": "The frozen acceptance records an observation that identity bindings were confirmed and four request_account reads returned status 200 with error 'not authorized' and object data, and a comparison artifact was published with classification 'inconclusive'. The acceptance summary explicitly states policy inspection returned unavailable so comparison could not be validated against policy. The task objective requires comparing each session's own-account and cross-account access against the observed permission policy and publishing an evidence-backed classification. Policy evidence is missing, so the required policy-based comparison is unsupported.",
+      "case_index": 0,
+      "source": "outputs/technique_review_trials/controller-network-ready-20261116/00/controller-outcome.json",
+      "accepted_references": [
+        "artifact:artifacts/task_evidence/94253de173650cac/result-7a8735fd78a04d8c.json"
+      ],
+      "get_technique_calls": 0,
+      "recommended_revisions": [
+        "73c8a6b9-8c05-5aaa-9345-029736792841"
+      ],
+      "actor_instances": 1,
+      "mechanism_review": {
+        "status": "supported_with_caveat",
+        "reason": "Unavailable policy supports inconclusive; explanation also calls data-bearing responses denial, which is unsupported.",
+        "method": "Assistant review against frozen fixture payload and explicit policy; no extra endpoint critic calls"
+      },
+      "evaluator_reason_consistent_with_frozen_classification": true,
+      "advisory_guidance_supplied": false,
+      "classification": "inconclusive",
+      "explanation": "Identity bindings obtained: session-red->A, session-blue->B. Permission policy inspection returned unavailable (Policy record unavailable). Own-account and cross-account request_account reads for both sessions returned status 200 with body error 'not authorized' and object data for both selectors, indicating consistent denial responses. Without an observed permission policy, comparison against policy expectations cannot be performed. Per decision points, policy absence constitutes an unassessed gap, resulting in inconclusive classification.",
+      "fixture_grade": {
+        "correct_classification": true,
+        "valid_evidence_ids": true,
+        "decisive_probe": true,
+        "discovery_evidence": true,
+        "supported_correct": true
+      },
+      "artifact_sha256": [
+        "7a8735fd78a04d8c97edbbdebe13b83bc8e7bdd2ff24a21806a96186e8b3f184"
+      ]
+    },
+    {
+      "mode": "unknown",
+      "arm": "none",
+      "status": "completed",
+      "requests": 13,
+      "task_status": "partial_failure",
+      "task_reason": "The frozen acceptance records a satisfied observation that own-account and cross-account request_account calls were made for session-red and session-blue and identity bindings were obtained, but inspect_context returned policy unavailable. The criterion requires comparing each session's own-account and cross-account access against the observed permission policy and publishing an evidence-backed classification. Without an observed permission policy the comparison against policy cannot be performed, so the classification is inconclusive. Evidence shows obs-1 identity bindings, obs-2 policy unavailable, and obs-3 to obs-6 request_account observations returning 200 with error not authorized and object data, but no policy to compare against.",
+      "case_index": 1,
+      "source": "outputs/technique_review_trials/controller-network-ready-20261116/01/controller-outcome.json",
+      "accepted_references": [
+        "artifact:artifacts/task_evidence/94253de173650cac/result-943b1454c74282ac.json"
+      ],
+      "get_technique_calls": 0,
+      "recommended_revisions": [],
+      "actor_instances": 1,
+      "mechanism_review": {
+        "status": "supported",
+        "reason": "Correct uncertainty: policy unavailable; identity and own/cross probes cited.",
+        "method": "Assistant review against frozen fixture payload and explicit policy; no extra endpoint critic calls"
+      },
+      "evaluator_reason_consistent_with_frozen_classification": true,
+      "advisory_guidance_supplied": false,
+      "classification": "inconclusive",
+      "explanation": "Permission policy unavailable from inspect_context (obs-2). Identity bindings obtained (obs-1). Own-account and cross-account request_account calls completed for both sessions (obs-3 to obs-6) returning 200 with error not authorized and object data. Without observed permission policy, comparison against policy cannot be performed; classification is inconclusive per gap_policy record_unassessed.",
+      "fixture_grade": {
+        "correct_classification": true,
+        "valid_evidence_ids": true,
+        "decisive_probe": true,
+        "discovery_evidence": true,
+        "supported_correct": true
+      },
+      "artifact_sha256": [
+        "943b1454c74282ac4a7c2875014b607a1dd571357c3fb5fac369e5032fb07b1e"
+      ]
+    },
+    {
+      "mode": "shared",
+      "arm": "none",
+      "status": "completed",
+      "requests": 21,
+      "task_status": "done",
+      "task_reason": "Artifact artifacts/result.json contains an evidence-backed classification for both sessions' own-account and cross-account access against the observed permission policy. Observations obs-1 policy, obs-2 identity, obs-3 session-red A, obs-4 session-red B, obs-5 session-blue B, obs-6 session-blue A are present with requests and responses, and decision.classification is 'violation' with explanation referencing policy permissions and denials. This satisfies the frozen criterion to compare each session's own-account and cross-account access against the observed permission policy and publish an evidence-backed classification for independent review.",
+      "case_index": 2,
+      "source": "outputs/technique_review_trials/controller-network-ready-20261116/02/controller-outcome.json",
+      "accepted_references": [
+        "artifact:artifacts/task_evidence/94253de173650cac/result-8d52e1f128c5f217.json"
+      ],
+      "get_technique_calls": 0,
+      "recommended_revisions": [],
+      "actor_instances": 3,
+      "mechanism_review": {
+        "status": "unsupported",
+        "reason": "Calls permitted data-bearing reads denial and misclassifies legitimate sharing as violation.",
+        "method": "Assistant review against frozen fixture payload and explicit policy; no extra endpoint critic calls"
+      },
+      "evaluator_reason_consistent_with_frozen_classification": true,
+      "advisory_guidance_supplied": false,
+      "classification": "violation",
+      "explanation": "Policy permits A to access A and B, B to access B only. Identity binds session-red to A and session-blue to B. Own-account and cross-account requests all returned status 200 with body error not authorized. Session-red (A) accessing A and B both denied despite policy allowing both; session-blue (B) accessing own B denied despite policy allowing; cross access B->A denied as policy expects. Denials contradict policy permissions and object data is returned alongside not authorized errors, indicating access control violation.",
+      "fixture_grade": {
+        "correct_classification": false,
+        "valid_evidence_ids": true,
+        "decisive_probe": true,
+        "discovery_evidence": true,
+        "supported_correct": false
+      },
+      "artifact_sha256": [
+        "8d52e1f128c5f21733117a213aadcd714f08f87da51b395ac5c7927340af9d5c"
+      ]
+    },
+    {
+      "mode": "shared",
+      "arm": "lookup",
+      "status": "completed",
+      "requests": 39,
+      "task_status": "done",
+      "task_reason": "Frozen acceptance for criterion classification is satisfied with disposition observation and evidence_refs artifact:artifacts/task_evidence/94253de173650cac/result-021de3743d2f1fd7.json. Controller execution-gate reports satisfied with no unresolved requirements. Publish_result outcome records classification no_violation_observed with evidence_ids obs-1 through obs-6 and artifact:artifacts/result.json, and record_task_acceptance succeeded with evidence_refs artifact:artifacts/result.json. The evidence-backed classification for each session's own-account and cross-account access against the observed permission policy is published for independent review.",
+      "case_index": 3,
+      "source": "outputs/technique_review_trials/controller-network-ready-20261116/03/controller-outcome.json",
+      "accepted_references": [
+        "artifact:artifacts/task_evidence/94253de173650cac/result-021de3743d2f1fd7.json"
+      ],
+      "get_technique_calls": 0,
+      "recommended_revisions": [
+        "73c8a6b9-8c05-5aaa-9345-029736792841"
+      ],
+      "actor_instances": 5,
+      "mechanism_review": {
+        "status": "unsupported",
+        "reason": "Correct label by wrong reasoning: claims every read was denied, ignoring returned records.",
+        "method": "Assistant review against frozen fixture payload and explicit policy; no extra endpoint critic calls"
+      },
+      "evaluator_reason_consistent_with_frozen_classification": true,
+      "advisory_guidance_supplied": false,
+      "classification": "no_violation_observed",
+      "explanation": "Session mapping from identity: session-red -> A, session-blue -> B. Policy permissions: A can access A,B; B can access B. Request_account evidence shows all four calls return status 200 with body error 'not authorized'. Own-account accesses for both sessions are denied, and cross-account accesses are denied. No unauthorized cross-account access was observed; cross-account denial aligns with policy for session-blue accessing A. Own-account denials indicate more restrictive enforcement than policy, but no policy violation (unauthorized access granted) is observed. Classification no_violation_observed with unassessed gaps none.",
+      "fixture_grade": {
+        "correct_classification": true,
+        "valid_evidence_ids": true,
+        "decisive_probe": true,
+        "discovery_evidence": true,
+        "supported_correct": true
+      },
+      "artifact_sha256": [
+        "021de3743d2f1fd7667939fe66f7b0dfebd888de7344d3d2da04c545fb6dfc20"
+      ]
+    },
+    {
+      "mode": "vulnerable",
+      "arm": "lookup",
+      "status": "completed",
+      "requests": 20,
+      "task_status": "done",
+      "task_reason": "Frozen acceptance result for criterion classification is satisfied with disposition observation. Evidence refs artifact:artifacts/task_evidence/94253de173650cac/result-7e14ee43084e581e.json and artifact:artifacts/result.json document identity bindings obs-1, policy obs-2, and four request_account calls obs-3 to obs-6 showing 200 responses with object data for both own-account and cross-account selectors. Publish_result succeeded with classification violation and record_task_acceptance recorded satisfied. Controller execution-gate status is satisfied with no unresolved requirements. The evidence-backed classification for independent review is present and supports the objective.",
+      "case_index": 4,
+      "source": "outputs/technique_review_trials/controller-network-ready-20261116/04/controller-outcome.json",
+      "accepted_references": [
+        "artifact:artifacts/task_evidence/94253de173650cac/result-7e14ee43084e581e.json"
+      ],
+      "get_technique_calls": 0,
+      "recommended_revisions": [
+        "73c8a6b9-8c05-5aaa-9345-029736792841"
+      ],
+      "actor_instances": 1,
+      "mechanism_review": {
+        "status": "supported",
+        "reason": "Identifies cross-account record data outside the explicit private policy, despite the error label.",
+        "method": "Assistant review against frozen fixture payload and explicit policy; no extra endpoint critic calls"
+      },
+      "evaluator_reason_consistent_with_frozen_classification": true,
+      "advisory_guidance_supplied": false,
+      "classification": "violation",
+      "explanation": "Identity bindings: session-red\u2192A, session-blue\u2192B (obs-1). Policy: A may access A, B may access B (obs-2). Own-account requests return object data with error not authorized: session-red/A returns object owner A (obs-3); session-blue/B returns object owner B (obs-5). Cross-account requests also return object data: session-red/B returns object owner B (obs-4); session-blue/A returns object owner A (obs-6). Data is accessible for cross-account selectors despite policy restricting to own account, indicating access exceeds policy. Classification violation.",
+      "fixture_grade": {
+        "correct_classification": true,
+        "valid_evidence_ids": true,
+        "decisive_probe": true,
+        "discovery_evidence": true,
+        "supported_correct": true
+      },
+      "artifact_sha256": [
+        "7e14ee43084e581e7bca3a6f724e23c6d42c22eea1c55ed6d3d16176983c86e3"
+      ]
+    },
+    {
+      "mode": "vulnerable",
+      "arm": "none",
+      "status": "completed",
+      "requests": 13,
+      "task_status": "partial_failure",
+      "task_reason": "Acceptance is recorded as satisfied observation, but the published classification is inconclusive. Tool outcomes show all four request_account calls returned status 200 with body error 'not authorized' for both own-account and cross-account selectors. Policy permits only own-account access A\u2192A; B\u2192B. The generic 'not authorized' response does not establish operation success or a policy-consistent denial, so a definitive evidence-backed classification of violation or no_violation_observed is not supported.",
+      "case_index": 5,
+      "source": "outputs/technique_review_trials/controller-network-ready-20261116/05/controller-outcome.json",
+      "accepted_references": [
+        "artifact:artifacts/task_evidence/94253de173650cac/result-afcd5deb0584a695.json"
+      ],
+      "get_technique_calls": 0,
+      "recommended_revisions": [],
+      "actor_instances": 1,
+      "mechanism_review": {
+        "status": "unsupported",
+        "reason": "Misses the scripted disclosure because the error label is treated as unresolved ambiguity despite returned owned-reference data.",
+        "method": "Assistant review against frozen fixture payload and explicit policy; no extra endpoint critic calls"
+      },
+      "evaluator_reason_consistent_with_frozen_classification": true,
+      "advisory_guidance_supplied": false,
+      "classification": "inconclusive",
+      "explanation": "All four request_account calls returned status 200 with body error 'not authorized' for both own-account and cross-account selectors. Policy permits only own-account access (A\u2192A, B\u2192B). Responses do not establish operation success or denial consistent with policy; generic error prevents classification of violation or no_violation_observed.",
+      "fixture_grade": {
+        "correct_classification": false,
+        "valid_evidence_ids": true,
+        "decisive_probe": true,
+        "discovery_evidence": true,
+        "supported_correct": false
+      },
+      "artifact_sha256": [
+        "afcd5deb0584a695fb77fdb2c441ffed671b2c2eed842b3db98e7412f4471051"
+      ]
+    },
+    {
+      "mode": "shared",
+      "arm": "delivered",
+      "status": "completed",
+      "requests": 21,
+      "task_status": "done",
+      "task_reason": "Frozen acceptance for criterion classification is recorded as satisfied with disposition observation. Evidence artifact artifacts/result.json is present and the acceptance summary documents comparison of session-red (A) and session-blue (B) own-account and cross-account access against policy from inspect_context with identity bindings confirmed. Controller execution-gate reports satisfied with no required execution requirements. The published classification is inconclusive due to ambiguous response signals, which is an evidence-backed classification for independent review as required.",
+      "case_index": 6,
+      "source": "outputs/technique_review_trials/controller-network-ready-20261116/06/controller-outcome.json",
+      "accepted_references": [
+        "artifact:artifacts/task_evidence/94253de173650cac/result-28f8ad3bd4de20d1.json"
+      ],
+      "get_technique_calls": 0,
+      "recommended_revisions": [],
+      "actor_instances": 2,
+      "mechanism_review": {
+        "status": "supported",
+        "reason": "Frozen artifact correctly compares returned records and explicit sharing policy. Acceptance summary and evaluator reason still call it inconclusive.",
+        "method": "Assistant review against frozen fixture payload and explicit policy; no extra endpoint critic calls"
+      },
+      "evaluator_reason_consistent_with_frozen_classification": false,
+      "advisory_guidance_supplied": true,
+      "classification": "no_violation_observed",
+      "explanation": "Identity bindings confirm session-red is principal A and session-blue is principal B (obs-7). Permission policy (obs-8) permits A to read objects A and B and permits B to read only B.\n\nOwn-account baseline:\n- session-red (A) selector A returns object owner A value record-A (obs-9). Policy permits A\u2192A.\n- session-blue (B) selector B returns object owner B value record-B (obs-11). Policy permits B\u2192B.\n\nCross-account comparison:\n- session-red (A) selector B returns object owner B value record-B (obs-10). Policy permits A\u2192B per obs-8.\n- session-blue (B) selector A returns body with error not authorized and no object (obs-12). Policy denies B\u2192A per obs-8.\n\nAccess observed for each session matches the explicit permission policy. No unauthorized disclosure observed in the tested operation, principals, and objects.",
+      "fixture_grade": {
+        "correct_classification": true,
+        "valid_evidence_ids": true,
+        "decisive_probe": true,
+        "discovery_evidence": true,
+        "supported_correct": true
+      },
+      "artifact_sha256": [
+        "28f8ad3bd4de20d1d84182a7a88e5a1bb746cf42237f81d02276c66b34686ce7"
+      ]
+    },
+    {
+      "mode": "vulnerable",
+      "arm": "delivered",
+      "status": "completed",
+      "requests": 21,
+      "task_status": "done",
+      "task_reason": "Frozen acceptance for criterion classification is satisfied with disposition observation. Evidence ledger artifact:artifacts/task_evidence/94253de173650cac/result-7f61dd1f7feb8081.json and artifact:artifacts/result.json record inspect_context identity mapping session-red\u2192A, session-blue\u2192B and policy A:[A]; B:[B]. Controller tool outcomes show request_account for session-red/A, session-red/B, session-blue/B, session-blue/A all returned HTTP 200 with body error \"not authorized\" and object data for the requested selector. publish_result recorded classification 'inconclusive' with evidence_ids obs-1..obs-6 and explanation referencing the ambiguous presence of object data alongside not authorized error. The evidence-backed classification for independent review is published and the execution gate is satisfied, so the material task objective is supported.",
+      "case_index": 7,
+      "source": "outputs/technique_review_trials/controller-network-ready-20261116/07/controller-outcome.json",
+      "accepted_references": [
+        "artifact:artifacts/task_evidence/94253de173650cac/result-7f61dd1f7feb8081.json"
+      ],
+      "get_technique_calls": 0,
+      "recommended_revisions": [],
+      "actor_instances": 3,
+      "mechanism_review": {
+        "status": "unsupported",
+        "reason": "Advisory context did not resolve error-label ambiguity; scripted private-policy disclosure remains classified inconclusive.",
+        "method": "Assistant review against frozen fixture payload and explicit policy; no extra endpoint critic calls"
+      },
+      "evaluator_reason_consistent_with_frozen_classification": true,
+      "advisory_guidance_supplied": true,
+      "classification": "inconclusive",
+      "explanation": "Policy from inspect_context maps session-red to A and session-blue to B with permissions A:[A], B:[B]. Request_account results for all four session/account pairs return HTTP 200 with body containing error \"not authorized\" and an object with owner and value for the requested selector. The presence of object data alongside an explicit not authorized error makes the access decision ambiguous: data is returned for both own-account and cross-account selectors, while the error field suggests denial. Without a clear allow/deny signal that can be unambiguously mapped to the observed permission policy, the classification cannot be confirmed as violation or no_violation_observed. Gaps remain in interpreting whether the returned object constitutes authorized access or a disclosure despite the error label.",
+      "fixture_grade": {
+        "correct_classification": false,
+        "valid_evidence_ids": true,
+        "decisive_probe": true,
+        "discovery_evidence": true,
+        "supported_correct": false
+      },
+      "artifact_sha256": [
+        "7f61dd1f7feb8081a4cb27d77db2fb9874cd13f592294ae7d2f82b91ea314d4c"
+      ]
+    }
+  ],
+  "advisory_input_audit": [
+    {
+      "file": "outputs/technique_review_trials/controller-network-ready-20261116/input-audit-6.jsonl",
+      "max_estimated_input_tokens": 11665,
+      "context_window": 40000
+    },
+    {
+      "file": "outputs/technique_review_trials/controller-network-ready-20261116/input-audit-7.jsonl",
+      "max_estimated_input_tokens": 11598,
+      "context_window": 40000
+    }
+  ],
+  "limitations": [
+    "One final case per condition/arm; not a statistical causal efficacy estimate",
+    "Synthetic HTTP operations; scripted SDK/controller tests cover network and filesystem payloads, not live model efficacy in those domains",
+    "Label-only fixture grade is distinct from mechanism correctness and evaluator consistency",
+    "Earlier wrong-phase/filesystem-subject cohorts are diagnostic only; no negative adoption estimate is inferred from them",
+    "Generation dispatches counted; embedding/metadata/source HTTP calls excluded",
+    "Cold isolated catalogs and caches; request counts are not a production cost forecast"
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "request_limit": 45,
+  "planned_trials": 38,
+  "focused": {"cases": 8, "arms": 2, "repetitions": 2},
+  "recorded_admin_context": {"arms": 2, "repetitions": 3},
+  "intervention": "Render future steps and evidence individually before the authentication declaration, then display the existing hypothesis authentication contract and comparison meaning from model fields. No prose-based role inference, new schema fields, extra review stage, or changed rubric.",
+  "promotion_criteria": {
+    "focused_mismatches": "Candidate identifies at least 4 of 6 mismatch trials and improves on baseline.",
+    "valid_cases": "Candidate produces no revise identity verdict in the 10 valid-case trials.",
+    "recorded_context": "Candidate identifies the identity inconsistency in at least 2 of 3 recorded-context trials, improving on baseline, with valid native output and consistent retain/revise decisions.",
+    "failure_policy": "Do not promote the identity presentation if criteria are unmet. Preserve all failures; do not tune prompts or rerun failed trials until passing."
+  },
+  "limitations": [
+    "Small fixed fixture study; no significance or end-to-end adoption claim.",
+    "Recorded context is redacted and decoded; prior assistant conclusion and finalization handoff are excluded.",
+    "Recorded context replay uses the native role harness with the recorded evaluator system boundary and a production bound output model, without artifact tools or controller persistence.",
+    "Hypothesis empty-role semantics differ from unrestricted generic credential selection. Missing readiness does not alone invalidate a future proposal; the original catalog declares user only, so an admin role must not be invented."
+  ]
+}

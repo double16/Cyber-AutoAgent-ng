@@ -1,0 +1,134 @@
+{
+  "natural_cases": [
+    {
+      "mode": "vulnerable",
+      "requests": 34,
+      "task_status": "done",
+      "recommendations": [
+        "Header-selector authorization comparison with policy, identity and invalid-value controls",
+        "Describe validation methods, controls, evidence requirements and criteria to confirm or reject a hypothesis; do not require completed target validation."
+      ],
+      "get_technique_calls": 0,
+      "accepted_references": [
+        "artifact:artifacts/task_evidence/94253de173650cac/result-8d4c89dbe014c443.json"
+      ],
+      "accepted_decision": {
+        "classification": "violation",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4",
+          "obs-5",
+          "obs-6"
+        ],
+        "explanation": "Identity bindings show session-red maps to A and session-blue maps to B. Policy permits A to access A and B to access B only. All four request_account observations returned status 200 with body error \"not authorized\" yet included object data for the requested selector. Own-account requests for session-red/A (obs-3) and session-blue/B (obs-5) should be allowed per policy but are reported not authorized while still returning object data. Cross-account requests session-red/B (obs-4) and session-blue/A (obs-6) should be denied per policy and are reported not authorized but also return object data, indicating data exposure despite authorization error. This mismatch between policy expectations and observed responses constitutes a violation."
+      },
+      "accepted_payload_sha256": "ff23ada95f4dba92260c0d6061770ad67fec8709e22422c24d490a130b6cc196",
+      "explanation_review": {
+        "supported": true,
+        "reason": "Identifies returned cross-account private data against established policy despite error label"
+      },
+      "acceptance_tool_results": [
+        false,
+        true
+      ],
+      "tool_catalog_calls": 10
+    },
+    {
+      "mode": "shared",
+      "requests": 32,
+      "task_status": "done",
+      "recommendations": [
+        "Header-selector authorization comparison with policy, identity and invalid-value controls",
+        "Describe validation methods, controls, evidence requirements and criteria to confirm or reject a hypothesis; do not require completed target validation.",
+        "Object-level authorization/IDOR vulnerability verification"
+      ],
+      "get_technique_calls": 0,
+      "accepted_references": [
+        "artifact:artifacts/task_evidence/94253de173650cac/result-d39c8821f1015b7f.json"
+      ],
+      "accepted_decision": {
+        "classification": "violation",
+        "evidence_ids": [
+          "obs-1",
+          "obs-2",
+          "obs-3",
+          "obs-4",
+          "obs-5",
+          "obs-6"
+        ],
+        "explanation": "Policy shows session-red (A) permitted A,B and session-blue (B) permitted B only. Observed request_account responses for all four session/account pairs return status 200 with body error \"not authorized\" and in three cases also return object data (owner/value). Own-account access for session-red/A (obs-3) and session-blue/B (obs-5) is denied despite policy allowing access, and cross-account access for session-red/B (obs-4) is denied despite policy allowing A to access B. This divergence between policy and observed access constitutes a violation."
+      },
+      "accepted_payload_sha256": "624491fc0aaf3c3d06a16f27a78ec9333cb933df101397e5ebb6fd955f46534e",
+      "explanation_review": {
+        "supported": false,
+        "reason": "Claims permitted reads were denied despite returned authorized object data; error label overrides content"
+      },
+      "acceptance_tool_results": [
+        false,
+        true
+      ],
+      "tool_catalog_calls": 8
+    }
+  ],
+  "seed": {
+    "revision": "2159bd6c-9d4b-59f0-b99b-f03420ab3b90",
+    "sha256": "5b1a9843ad7cb46f7f891722e7f74520924f9e07b8d58f76f35365512b10f193",
+    "requests": 12,
+    "active": 1
+  },
+  "requests": 78,
+  "study_scope": "Two unpaired synthetic task-controller observations; no causal benefit estimate",
+  "explicit_lookup": {
+    "status": "delivered",
+    "requests": 8,
+    "natural_adoption": false,
+    "selected_revisions": [
+      "2159bd6c-9d4b-59f0-b99b-f03420ab3b90"
+    ],
+    "resolved_components": 1,
+    "unresolved_components": 0,
+    "new_authorship_calls": 0
+  },
+  "author_inspection": {
+    "scope": "Manual inspection of frozen generated guidance before reviewing task outcomes; no mutation or gate",
+    "revision": "2159bd6c-9d4b-59f0-b99b-f03420ab3b90",
+    "observations": [
+      {
+        "topic": "Policy-denied baseline",
+        "passage": "Denied baseline: request with Identity A and a header value for an object known to be authorized for Identity B or otherwise prohibited per documented policy.",
+        "concern": "Being authorized for B does not establish denial for A; legitimate sharing is a counterexample. Policy language elsewhere reduces but does not eliminate this ambiguity."
+      },
+      {
+        "topic": "Invalid-value prerequisite",
+        "passage": "Invalid-value controls behave as expected and do not produce the same data.",
+        "concern": "An invalid value returning the same prohibited data does not invalidate a demonstrated valid-selector policy violation. This unnecessary condition can suppress a supported finding."
+      },
+      {
+        "topic": "Error/body consistency",
+        "passage": "Error page or generic denial consistent with documented policy.",
+        "concern": "Elsewhere content checks are required; a denial label in a body containing protected data must not override the actual disclosure. Review task reasoning, not only its final label."
+      }
+    ],
+    "interpretation": "Single guide; improved authorship completion is not broad semantic-quality evidence. Preserve the guide unchanged for observation."
+  },
+  "accounting": {
+    "failed_source_title_adapter_attempt": 9,
+    "completed_seed_and_natural_cases": 78,
+    "explicit_lookup": 8,
+    "total_generation_attempts": 95,
+    "excluded": [
+      "embedding calls",
+      "source fetches",
+      "model metadata calls"
+    ]
+  },
+  "limitations": [
+    "Two unpaired synthetic HTTP cases; no causal efficacy or real target estimate",
+    "Initial generation intentionally suppressed search to exercise cold-start authorship without catalog examples",
+    "Explicit lookup is investigator requested and does not count as voluntary adoption",
+    "No guide was delivered to natural tasks; contribution feedback was therefore not exercised",
+    "No production behavior or global catalog/feedback state was changed"
+  ]
+}

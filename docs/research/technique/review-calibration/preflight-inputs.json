@@ -1,0 +1,19 @@
+{
+  "fixtures_valid": true,
+  "ready_for_live": true,
+  "pending_adjudications": [],
+  "subjects": [
+    {
+      "id": "network-policy",
+      "sha256": "53ce293dceaba102e39f4ede2657dcd39a4223a3f387a53d3ed586f654d2d694"
+    },
+    {
+      "id": "filesystem-policy",
+      "sha256": "d35b47e91dbcc3b888f1b7e826069cafa097b10c7ec5a069c425b821b26e44f0"
+    },
+    {
+      "id": "http-selector",
+      "sha256": "8256461295337490dd96397b11569debd5dc46d372e616e7ae92502219197978"
+    }
+  ]
+}

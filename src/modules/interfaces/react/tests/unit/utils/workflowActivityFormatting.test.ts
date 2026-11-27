@@ -65,4 +65,29 @@ describe('formatWorkflowActivityEvent', () => {
       prompt: 'secret prompt content',
     })).toBe('🔄 Plan creation started');
   });
+
+  it.each([
+    ['duplicate_submission', 'repeated rejected submission'],
+    ['attempts_exhausted', 'attempts exhausted'],
+  ])('shows the task creation failure and %s stop reason', (stopReason, label) => {
+    expect(formatWorkflowActivityEvent({
+      type: 'workflow_activity',
+      label: 'Task creation',
+      phase_id: 4,
+      status: 'failed',
+      failure_summary: 'tasks.0.task_role: invalid role',
+      stop_reason: stopReason,
+      rejected_response: 'must never be displayed',
+    })).toBe(`⚠️ Task creation phase 4 failed: tasks.0.task_role: invalid role (${label})`);
+  });
+
+  it('bounds diagnostics to one line and omits them from successful events', () => {
+    const event = {
+      type: 'workflow_activity', label: 'Task creation', failure_summary: 'first\nsecond\rthird ' + 'x'.repeat(2000),
+    };
+    expect(formatWorkflowActivityEvent({...event, status: 'completed'})).toBe('✅ Task creation completed');
+    const failure = formatWorkflowActivityEvent({...event, status: 'failed'});
+    expect(failure).toContain('first second third');
+    expect(failure?.length).toBeLessThan(1100);
+  });
 });

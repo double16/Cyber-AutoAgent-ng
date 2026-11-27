@@ -192,6 +192,12 @@ The compose stack automatically provides:
 
 ## Architecture
 
+Reusable security guidance is available through `get_technique` and the standalone
+`uv run caa-technique "JWT trust-boundary hypothesis generation"` command. Techniques are global,
+source-backed Markdown documents with phase-aware lookup recommendations and independent usefulness
+evaluation. See [Techniques](docs/techniques.md) for authoring, lifecycle, and CLI usage.
+Operations save produced and evaluated technique copies under their own `techniques/` directory.
+
 > **[Full Architecture Guide](docs/architecture.md)** - Complete technical deep dive into Strands framework, tools, and metacognitive design
 
 ### System Architecture

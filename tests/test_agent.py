@@ -27,6 +27,33 @@ from modules.config.manager import (
 )
 
 
+@pytest.fixture(autouse=True)
+def isolate_technique_bootstrap(monkeypatch):
+    """Agent construction tests isolate storage; real technique integration has dedicated tests."""
+    from strands import tool
+
+    @tool
+    def get_technique(request: str) -> str:
+        """Return isolated guidance."""
+        return "guidance"
+
+    from modules.techniques.events import TechniqueEvents
+
+    service = SimpleNamespace(
+        tool=lambda: get_technique,
+        runner=SimpleNamespace(),
+        events=TechniqueEvents(),
+        private_values=(),
+        synchronize_module=None,
+    )
+    def synchronize(loader, module):
+        assert callable(service.events.callback)
+        assert service.events.private_values == service.private_values
+
+    service.synchronize_module = synchronize
+    monkeypatch.setattr("modules.techniques.bootstrap.operation_techniques", lambda *args, **kwargs: service)
+
+
 @pytest.mark.asyncio
 async def test_tavily_web_search_provider_adapts_wrapper_arguments(monkeypatch):
     calls = []

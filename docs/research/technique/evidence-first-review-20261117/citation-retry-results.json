@@ -1,0 +1,295 @@
+{
+  "promotion": "pending",
+  "dispatches": 36,
+  "limitation": "Decision agreement is not semantic or citation validation.",
+  "rows": [
+    {
+      "case": "bare-route",
+      "arm": "baseline",
+      "expected_revision": false,
+      "decision": "retain",
+      "error": null,
+      "reason": "Publication disposition is supported by inspected source showing only a route name with no request, implementation, input or behavior available and inputs unrecorded."
+    },
+    {
+      "case": "bare-route",
+      "arm": "revised",
+      "expected_revision": false,
+      "decision": "retain",
+      "error": null,
+      "reason": "Publication disposition is supported by frozen evidence. The assigned source records only a route name with no request, implementation, input or observed behavior, and the investigation shows inputs_unrecorded with empty operations and inputs. No grounded, safe security-relevant test can be derived from the inspected evidence."
+    },
+    {
+      "case": "bare-route",
+      "arm": "baseline",
+      "expected_revision": false,
+      "decision": "retain",
+      "error": null,
+      "reason": "Publication contains a reasoned no_testable_hypotheses disposition for the assigned subject with inspected evidence showing only a route name and no request, implementation, input or behavior available. The disposition is supported by the frozen investigation record and diagnostic inputs_unrecorded, satisfying the hypothesis_set requirement."
+    },
+    {
+      "case": "bare-route",
+      "arm": "revised",
+      "expected_revision": false,
+      "decision": "retain",
+      "error": null,
+      "reason": "Publication contains a reasoned no_testable_hypotheses disposition for the assigned subject. Frozen investigation shows only a route name with no request, implementation, inputs or behavior available, and inputs_unrecorded diagnostic. This supports no grounded safe security-relevant test."
+    },
+    {
+      "case": "bare-route",
+      "arm": "baseline",
+      "expected_revision": false,
+      "decision": "retain",
+      "error": null,
+      "reason": "Publication contains a reasoned no_testable_hypotheses disposition for the assigned subject with inspected evidence showing only a route name and no request, implementation, input or behavior available. The frozen acceptance criteria for a hypothesis set are satisfied by the published disposition."
+    },
+    {
+      "case": "bare-route",
+      "arm": "revised",
+      "expected_revision": false,
+      "decision": "retain",
+      "error": null,
+      "reason": "Publication disposition is supported by frozen evidence. The assigned subject has only a route name recorded with no request, implementation, input or observed behavior available, and inputs_unrecorded diagnostic is present. No reconciled input candidates exist to ground a conditional security test, so a reasoned no_testable_hypotheses disposition satisfies the hypothesis_set requirement."
+    },
+    {
+      "case": "filesystem-access",
+      "arm": "baseline",
+      "expected_revision": true,
+      "decision": "retain",
+      "error": null,
+      "reason": "The frozen publication provides a reasoned no_testable_hypotheses disposition for the assigned subject. Inspected source evidence shows a handler joining an attacker-supplied filename to an export directory with path containment unobserved, and the worker context states no safe probe in current scope. With no reconciled input candidates and no grounded safe testable hypothesis supported by the retained inspection, the empty disposition satisfies the hypothesis_set requirement and the frozen acceptance criteria."
+    },
+    {
+      "case": "filesystem-access",
+      "arm": "revised",
+      "expected_revision": true,
+      "decision": "revise",
+      "error": null,
+      "reason": "Publication claims no_testable_hypotheses but retained inspection describes a source handler that joins an attacker-supplied filename to an export directory and opens the result with path containment unobserved. This observed file-join behavior grounds a conditional path-traversal test, contradicting the empty disposition."
+    },
+    {
+      "case": "filesystem-access",
+      "arm": "baseline",
+      "expected_revision": true,
+      "decision": "retain",
+      "error": null,
+      "reason": "Publication contains a reasoned no_testable_hypotheses disposition for the assigned subject with hypothesis_set artifact present; frozen observations show inputs unrecorded and no recorded operations, supporting the empty disposition under current scope."
+    },
+    {
+      "case": "filesystem-access",
+      "arm": "revised",
+      "expected_revision": true,
+      "decision": "revise",
+      "error": null,
+      "reason": "Publication claims no_testable_hypotheses but retained inspection shows a source handler joins an attacker-supplied filename to an export directory and opens the result with path containment unobserved. This observed file-path handling grounds a conditional path-traversal test, contradicting the empty disposition."
+    },
+    {
+      "case": "filesystem-access",
+      "arm": "baseline",
+      "expected_revision": true,
+      "decision": "revise",
+      "error": null,
+      "reason": "Publication claims no testable hypotheses for subject, but inspected source shows a handler joining attacker-supplied filename to an export directory and opening the result with path containment unobserved. A harmless sibling fixture is noted as able to test containment, providing a grounded conditional path-traversal test. The no_testable_hypotheses disposition is therefore unsupported."
+    },
+    {
+      "case": "filesystem-access",
+      "arm": "revised",
+      "expected_revision": true,
+      "decision": "revise",
+      "error": null,
+      "reason": "Publication claims no_testable_hypotheses but retained inspection shows a source handler joins an attacker-supplied filename to an export directory and opens the result with path containment unobserved. This observed file-path join with attacker control supports a grounded, safe conditional test for path traversal, contradicting the empty disposition."
+    },
+    {
+      "case": "network-access",
+      "arm": "baseline",
+      "expected_revision": true,
+      "decision": "retain",
+      "error": null,
+      "reason": "Publication contains a reasoned no_testable_hypotheses disposition for the frozen subject with inspected source evidence showing no safe probe in scope; hypothesis_set min_count is satisfied by the published disposition."
+    },
+    {
+      "case": "network-access",
+      "arm": "revised",
+      "expected_revision": true,
+      "decision": "revise",
+      "error": null,
+      "reason": "Publication claims no_testable_hypotheses with reason 'No safe probe in current scope'. Retained inspection shows a listener accepts a supplied principal and record selector and returns that record, ownership enforcement is unobserved, and two same-role accounts own separate records. This observed access boundary with unobserved ownership enforcement supports a conditional IDOR / unauthorized record access hypothesis. The empty disposition is not supported by the inspected evidence."
+    },
+    {
+      "case": "network-access",
+      "arm": "baseline",
+      "expected_revision": true,
+      "decision": "retain",
+      "error": null,
+      "reason": "Publication contains a reasoned no_testable_hypotheses disposition for the frozen subject with inspected source evidence; hypothesis_set artifact requirement is satisfied by the published disposition."
+    },
+    {
+      "case": "network-access",
+      "arm": "revised",
+      "expected_revision": true,
+      "decision": "revise",
+      "error": null,
+      "reason": "Publication claims no_testable_hypotheses but retained inspection shows a listener that accepts a principal and record selector and returns that record with ownership enforcement unobserved and two same-role accounts owning separate records. This provides a grounded conditional access-control test for unauthorized record access across same-role accounts, contradicting the no-testable disposition."
+    },
+    {
+      "case": "network-access",
+      "arm": "baseline",
+      "expected_revision": true,
+      "decision": "retain",
+      "error": null,
+      "reason": "Publication contains a reasoned no_testable_hypotheses disposition for the frozen subject with inspected evidence showing a listener that accepts a principal and record selector and returns the record, ownership enforcement unobserved and two same-role accounts owning separate records. No reconciled input candidates are supplied and inspected observations support no grounded safe conditional security test within scope."
+    },
+    {
+      "case": "network-access",
+      "arm": "revised",
+      "expected_revision": true,
+      "decision": null,
+      "error": "Failed to parse or validate native structured content: subject_reviews.0.no_hypothesis_basis.kind: Field required [missing]",
+      "reason": null
+    },
+    {
+      "case": "storage-identity",
+      "arm": "baseline",
+      "expected_revision": true,
+      "decision": "retain",
+      "error": null,
+      "reason": "The frozen publication records a reasoned no_testable_hypotheses disposition for the assigned subject. The inspected source indicates the admin route reads an editable browser storage email and uses a client-side isAdmin flag to control view rendering with backend enforcement unobserved, and the investigation records inputs_unrecorded with no reconciled input candidates. With no recorded inputs, no observable server-side enforcement, and no safe probe scope established in the frozen evidence, the empty disposition is consistent with the available inspected evidence."
+    },
+    {
+      "case": "storage-identity",
+      "arm": "revised",
+      "expected_revision": true,
+      "decision": "revise",
+      "error": null,
+      "reason": "Publication claims no testable hypotheses, but retained inspection shows admin route reads editable browser storage email and passes it to fetchUser, with returned isAdmin flag controlling admin view and backend enforcement unobserved. This observed client-side trust of mutable storage with a privilege decision is a grounded, conditional security test about client-side authorization bypass. The no_testable_hypotheses disposition is therefore unsupported by the inspected evidence."
+    },
+    {
+      "case": "storage-identity",
+      "arm": "baseline",
+      "expected_revision": true,
+      "decision": "retain",
+      "error": null,
+      "reason": "The frozen publication provides a reasoned no_testable_hypotheses disposition for the assigned subject with inspected evidence showing client-side admin view control and unobserved backend enforcement. The disposition is consistent with the available investigation context and satisfies the hypothesis_set coverage requirement."
+    },
+    {
+      "case": "storage-identity",
+      "arm": "revised",
+      "expected_revision": true,
+      "decision": "revise",
+      "error": null,
+      "reason": "The publication claims no_testable_hypotheses with reason 'No safe probe in current scope'. The retained inspection shows the admin route reads editable browser storage email and passes it to fetchUser(email) with the returned isAdmin flag controlling the admin view, and backend enforcement is unobserved. This client-side trust of mutable storage for an admin view is a grounded, safe conditional test for client-side authorization bypass / information disclosure. The disposition therefore contradicts inspected evidence and should be revised."
+    },
+    {
+      "case": "storage-identity",
+      "arm": "baseline",
+      "expected_revision": true,
+      "decision": "retain",
+      "error": null,
+      "reason": "Publication contains a reasoned no_testable_hypotheses disposition for the frozen subject with inspected evidence supporting no safe probe in current scope; hypothesis_set min_count is satisfied by the published disposition."
+    },
+    {
+      "case": "storage-identity",
+      "arm": "revised",
+      "expected_revision": true,
+      "decision": null,
+      "error": "Failed to parse or validate native structured content: subject_reviews.0.no_hypothesis_basis.kind: Field required [missing]",
+      "reason": null
+    },
+    {
+      "case": "unlinked-parameter",
+      "arm": "baseline",
+      "expected_revision": false,
+      "decision": "retain",
+      "error": null,
+      "reason": "Publication contains a reasoned no_testable_hypotheses disposition for the assigned subject with inspected evidence showing the query parameter is unused and no safe probe is supported."
+    },
+    {
+      "case": "unlinked-parameter",
+      "arm": "revised",
+      "expected_revision": false,
+      "decision": "retain",
+      "error": null,
+      "reason": "Publication reason aligns with frozen observations: route shows fixed map title with no query-driven behavior and no link to htmlRenderer library. Input candidate label is present but inspection shows no observed handling or reflection, so no grounded conditional security test is supported."
+    },
+    {
+      "case": "unlinked-parameter",
+      "arm": "baseline",
+      "expected_revision": false,
+      "decision": "retain",
+      "error": null,
+      "reason": "Publication disposition no_testable_hypotheses is supported by inspected route behavior showing a fixed map title with no observed connection between the query label input and rendering logic; the unused htmlRenderer library is not invoked, so no grounded conditional security test is supported."
+    },
+    {
+      "case": "unlinked-parameter",
+      "arm": "revised",
+      "expected_revision": false,
+      "decision": "retain",
+      "error": null,
+      "reason": "Publication reason aligns with frozen observations: route shows fixed map title with no query-driven behavior and no link to htmlRenderer library. Input candidate label is present but inspection shows no observed handling or reflection, so no grounded conditional security test is supported."
+    },
+    {
+      "case": "unlinked-parameter",
+      "arm": "baseline",
+      "expected_revision": false,
+      "decision": "retain",
+      "error": null,
+      "reason": "Publication disposition no_testable_hypotheses is consistent with inspected observations: route displays a fixed map title with no observed connection between the query label input and the unused htmlRenderer library, and no safe probe is supported in current scope."
+    },
+    {
+      "case": "unlinked-parameter",
+      "arm": "revised",
+      "expected_revision": false,
+      "decision": "retain",
+      "error": null,
+      "reason": "Publication disposition is supported by inspected evidence. The assigned source shows a fixed map title with no observed connection between the query label input and route handling, and the unused htmlRenderer library is not linked to the request. The reconciled input candidate label is present in inventory but inspection shows no observed processing, so no grounded conditional security test is supported."
+    },
+    {
+      "case": "whole-query",
+      "arm": "baseline",
+      "expected_revision": true,
+      "decision": "revise",
+      "error": null,
+      "reason": "The frozen publication records a no_testable_hypotheses disposition for subject, but the retained source inspection shows render() decodes window.location.search and passes it to createContextualFragment via htmlRenderer, with an input candidate label in query. This observed DOM sink with reflected input grounds a conditional reflected XSS test for the assigned endpoint, contradicting the no safe probe claim."
+    },
+    {
+      "case": "whole-query",
+      "arm": "revised",
+      "expected_revision": true,
+      "decision": "revise",
+      "error": null,
+      "reason": "Publication claims no_testable_hypotheses but retained source shows reflected DOM XSS via label query parameter decoded and rendered with createContextualFragment, which is a grounded safe testable hypothesis."
+    },
+    {
+      "case": "whole-query",
+      "arm": "baseline",
+      "expected_revision": true,
+      "decision": "revise",
+      "error": null,
+      "reason": "Publication claims no testable hypotheses for subject, but assigned source shows render() decodes window.location.search and passes it to htmlRenderer which assigns createContextualFragment(input) to the displayed footer. With reconciled input candidate label via query on the assigned endpoint, this provides a grounded DOM XSS mechanism and a conditional safe test. The empty disposition is therefore unsupported."
+    },
+    {
+      "case": "whole-query",
+      "arm": "revised",
+      "expected_revision": true,
+      "decision": "revise",
+      "error": null,
+      "reason": "Publication disposition no_testable_hypotheses contradicts inspected source evidence of DOM-based XSS via label query parameter rendered with createContextualFragment. A grounded, safe conditional test is supported."
+    },
+    {
+      "case": "whole-query",
+      "arm": "baseline",
+      "expected_revision": true,
+      "decision": "revise",
+      "error": null,
+      "reason": "Publication claims no testable hypotheses but inspected source shows decodeURIComponent of window.location.search fed to createContextualFragment, which grounds a conditional DOM XSS test for the label query input. The empty disposition is therefore unsupported."
+    },
+    {
+      "case": "whole-query",
+      "arm": "revised",
+      "expected_revision": true,
+      "decision": "revise",
+      "error": null,
+      "reason": "Publication claims no_testable_hypotheses but retained source shows DOM-based XSS via label query parameter rendered with createContextualFragment, which grounds a testable reflected DOM XSS hypothesis. The empty disposition is unsupported."
+    }
+  ]
+}

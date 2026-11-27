@@ -1,0 +1,1756 @@
+{
+  "dispatches": 106,
+  "summary": {
+    "baseline": {
+      "trials": 18,
+      "controller_valid": 0
+    },
+    "revised": {
+      "trials": 18,
+      "controller_valid": 0
+    }
+  },
+  "promotion": "not_promoted",
+  "conclusion": "No controller-valid completion in either arm; semantic improvement unproven.",
+  "rows": [
+    {
+      "case": "bare-route",
+      "arm": "baseline",
+      "expected_revision": false,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/e38cc971d2c3de76bdbb50a054b21e052fa37da980c18de037e5e3685faccb6a/bdb23873c0db60e8e1f9daf343f014def4be59faf4a77130f68142a4f8df485e.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/e38cc971d2c3de76bdbb50a054b21e052fa37da980c18de037e5e3685faccb6a/bdb23873c0db60e8e1f9daf343f014def4be59faf4a77130f68142a4f8df485e.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/e38cc971d2c3de76bdbb50a054b21e052fa37da980c18de037e5e3685faccb6a/bdb23873c0db60e8e1f9daf343f014def4be59faf4a77130f68142a4f8df485e.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "bare-route",
+      "arm": "revised",
+      "expected_revision": false,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/e38cc971d2c3de76bdbb50a054b21e052fa37da980c18de037e5e3685faccb6a/bdb23873c0db60e8e1f9daf343f014def4be59faf4a77130f68142a4f8df485e.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/e38cc971d2c3de76bdbb50a054b21e052fa37da980c18de037e5e3685faccb6a/bdb23873c0db60e8e1f9daf343f014def4be59faf4a77130f68142a4f8df485e.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/e38cc971d2c3de76bdbb50a054b21e052fa37da980c18de037e5e3685faccb6a/bdb23873c0db60e8e1f9daf343f014def4be59faf4a77130f68142a4f8df485e.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "bare-route",
+      "arm": "baseline",
+      "expected_revision": false,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/e38cc971d2c3de76bdbb50a054b21e052fa37da980c18de037e5e3685faccb6a/bdb23873c0db60e8e1f9daf343f014def4be59faf4a77130f68142a4f8df485e.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/e38cc971d2c3de76bdbb50a054b21e052fa37da980c18de037e5e3685faccb6a/bdb23873c0db60e8e1f9daf343f014def4be59faf4a77130f68142a4f8df485e.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/e38cc971d2c3de76bdbb50a054b21e052fa37da980c18de037e5e3685faccb6a/bdb23873c0db60e8e1f9daf343f014def4be59faf4a77130f68142a4f8df485e.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "bare-route",
+      "arm": "revised",
+      "expected_revision": false,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/e38cc971d2c3de76bdbb50a054b21e052fa37da980c18de037e5e3685faccb6a/bdb23873c0db60e8e1f9daf343f014def4be59faf4a77130f68142a4f8df485e.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/e38cc971d2c3de76bdbb50a054b21e052fa37da980c18de037e5e3685faccb6a/bdb23873c0db60e8e1f9daf343f014def4be59faf4a77130f68142a4f8df485e.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/e38cc971d2c3de76bdbb50a054b21e052fa37da980c18de037e5e3685faccb6a/bdb23873c0db60e8e1f9daf343f014def4be59faf4a77130f68142a4f8df485e.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "bare-route",
+      "arm": "baseline",
+      "expected_revision": false,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/e38cc971d2c3de76bdbb50a054b21e052fa37da980c18de037e5e3685faccb6a/bdb23873c0db60e8e1f9daf343f014def4be59faf4a77130f68142a4f8df485e.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/e38cc971d2c3de76bdbb50a054b21e052fa37da980c18de037e5e3685faccb6a/bdb23873c0db60e8e1f9daf343f014def4be59faf4a77130f68142a4f8df485e.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/e38cc971d2c3de76bdbb50a054b21e052fa37da980c18de037e5e3685faccb6a/bdb23873c0db60e8e1f9daf343f014def4be59faf4a77130f68142a4f8df485e.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "bare-route",
+      "arm": "revised",
+      "expected_revision": false,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/e38cc971d2c3de76bdbb50a054b21e052fa37da980c18de037e5e3685faccb6a/bdb23873c0db60e8e1f9daf343f014def4be59faf4a77130f68142a4f8df485e.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/e38cc971d2c3de76bdbb50a054b21e052fa37da980c18de037e5e3685faccb6a/bdb23873c0db60e8e1f9daf343f014def4be59faf4a77130f68142a4f8df485e.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/e38cc971d2c3de76bdbb50a054b21e052fa37da980c18de037e5e3685faccb6a/bdb23873c0db60e8e1f9daf343f014def4be59faf4a77130f68142a4f8df485e.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "filesystem-access",
+      "arm": "baseline",
+      "expected_revision": true,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/0ac88fc7c8544ba34292e2d5218925957aa1d6b77ccbf62a9be3b8504f3da74e/c3e2845e17393e2d4591f8fd5a523b0026d3abb1141e95c0bd9e2ea9ec7e260d.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/0ac88fc7c8544ba34292e2d5218925957aa1d6b77ccbf62a9be3b8504f3da74e/c3e2845e17393e2d4591f8fd5a523b0026d3abb1141e95c0bd9e2ea9ec7e260d.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/0ac88fc7c8544ba34292e2d5218925957aa1d6b77ccbf62a9be3b8504f3da74e/c3e2845e17393e2d4591f8fd5a523b0026d3abb1141e95c0bd9e2ea9ec7e260d.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "filesystem-access",
+      "arm": "revised",
+      "expected_revision": true,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/0ac88fc7c8544ba34292e2d5218925957aa1d6b77ccbf62a9be3b8504f3da74e/c3e2845e17393e2d4591f8fd5a523b0026d3abb1141e95c0bd9e2ea9ec7e260d.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/0ac88fc7c8544ba34292e2d5218925957aa1d6b77ccbf62a9be3b8504f3da74e/c3e2845e17393e2d4591f8fd5a523b0026d3abb1141e95c0bd9e2ea9ec7e260d.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/0ac88fc7c8544ba34292e2d5218925957aa1d6b77ccbf62a9be3b8504f3da74e/c3e2845e17393e2d4591f8fd5a523b0026d3abb1141e95c0bd9e2ea9ec7e260d.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "filesystem-access",
+      "arm": "baseline",
+      "expected_revision": true,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:3": "unavailable",
+            "artifact:4": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:3",
+            "artifact:4"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/0ac88fc7c8544ba34292e2d5218925957aa1d6b77ccbf62a9be3b8504f3da74e/c3e2845e17393e2d4591f8fd5a523b0026d3abb1141e95c0bd9e2ea9ec7e260d.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:3": "unavailable",
+            "artifact:4": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:3",
+            "artifact:4"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/0ac88fc7c8544ba34292e2d5218925957aa1d6b77ccbf62a9be3b8504f3da74e/c3e2845e17393e2d4591f8fd5a523b0026d3abb1141e95c0bd9e2ea9ec7e260d.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:3": "unavailable",
+            "artifact:4": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:3",
+            "artifact:4"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/0ac88fc7c8544ba34292e2d5218925957aa1d6b77ccbf62a9be3b8504f3da74e/c3e2845e17393e2d4591f8fd5a523b0026d3abb1141e95c0bd9e2ea9ec7e260d.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "filesystem-access",
+      "arm": "revised",
+      "expected_revision": true,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/0ac88fc7c8544ba34292e2d5218925957aa1d6b77ccbf62a9be3b8504f3da74e/c3e2845e17393e2d4591f8fd5a523b0026d3abb1141e95c0bd9e2ea9ec7e260d.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/0ac88fc7c8544ba34292e2d5218925957aa1d6b77ccbf62a9be3b8504f3da74e/c3e2845e17393e2d4591f8fd5a523b0026d3abb1141e95c0bd9e2ea9ec7e260d.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/0ac88fc7c8544ba34292e2d5218925957aa1d6b77ccbf62a9be3b8504f3da74e/c3e2845e17393e2d4591f8fd5a523b0026d3abb1141e95c0bd9e2ea9ec7e260d.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "filesystem-access",
+      "arm": "baseline",
+      "expected_revision": true,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/0ac88fc7c8544ba34292e2d5218925957aa1d6b77ccbf62a9be3b8504f3da74e/c3e2845e17393e2d4591f8fd5a523b0026d3abb1141e95c0bd9e2ea9ec7e260d.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/0ac88fc7c8544ba34292e2d5218925957aa1d6b77ccbf62a9be3b8504f3da74e/c3e2845e17393e2d4591f8fd5a523b0026d3abb1141e95c0bd9e2ea9ec7e260d.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/0ac88fc7c8544ba34292e2d5218925957aa1d6b77ccbf62a9be3b8504f3da74e/c3e2845e17393e2d4591f8fd5a523b0026d3abb1141e95c0bd9e2ea9ec7e260d.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "filesystem-access",
+      "arm": "revised",
+      "expected_revision": true,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/0ac88fc7c8544ba34292e2d5218925957aa1d6b77ccbf62a9be3b8504f3da74e/c3e2845e17393e2d4591f8fd5a523b0026d3abb1141e95c0bd9e2ea9ec7e260d.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/0ac88fc7c8544ba34292e2d5218925957aa1d6b77ccbf62a9be3b8504f3da74e/c3e2845e17393e2d4591f8fd5a523b0026d3abb1141e95c0bd9e2ea9ec7e260d.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/0ac88fc7c8544ba34292e2d5218925957aa1d6b77ccbf62a9be3b8504f3da74e/c3e2845e17393e2d4591f8fd5a523b0026d3abb1141e95c0bd9e2ea9ec7e260d.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "network-access",
+      "arm": "baseline",
+      "expected_revision": true,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/b57123f20ec6c4f196dd47dab416622a31f8b7478b38d20327b07fb0906dbbb6/84a51a638fb4578b0af0e1db8741e462d3848d6f0dcfef7bc542c6de3a6913de.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/b57123f20ec6c4f196dd47dab416622a31f8b7478b38d20327b07fb0906dbbb6/84a51a638fb4578b0af0e1db8741e462d3848d6f0dcfef7bc542c6de3a6913de.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/b57123f20ec6c4f196dd47dab416622a31f8b7478b38d20327b07fb0906dbbb6/84a51a638fb4578b0af0e1db8741e462d3848d6f0dcfef7bc542c6de3a6913de.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "network-access",
+      "arm": "revised",
+      "expected_revision": true,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/b57123f20ec6c4f196dd47dab416622a31f8b7478b38d20327b07fb0906dbbb6/84a51a638fb4578b0af0e1db8741e462d3848d6f0dcfef7bc542c6de3a6913de.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/b57123f20ec6c4f196dd47dab416622a31f8b7478b38d20327b07fb0906dbbb6/84a51a638fb4578b0af0e1db8741e462d3848d6f0dcfef7bc542c6de3a6913de.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/b57123f20ec6c4f196dd47dab416622a31f8b7478b38d20327b07fb0906dbbb6/84a51a638fb4578b0af0e1db8741e462d3848d6f0dcfef7bc542c6de3a6913de.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "network-access",
+      "arm": "baseline",
+      "expected_revision": true,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/b57123f20ec6c4f196dd47dab416622a31f8b7478b38d20327b07fb0906dbbb6/84a51a638fb4578b0af0e1db8741e462d3848d6f0dcfef7bc542c6de3a6913de.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/b57123f20ec6c4f196dd47dab416622a31f8b7478b38d20327b07fb0906dbbb6/84a51a638fb4578b0af0e1db8741e462d3848d6f0dcfef7bc542c6de3a6913de.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/b57123f20ec6c4f196dd47dab416622a31f8b7478b38d20327b07fb0906dbbb6/84a51a638fb4578b0af0e1db8741e462d3848d6f0dcfef7bc542c6de3a6913de.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "network-access",
+      "arm": "revised",
+      "expected_revision": true,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/b57123f20ec6c4f196dd47dab416622a31f8b7478b38d20327b07fb0906dbbb6/84a51a638fb4578b0af0e1db8741e462d3848d6f0dcfef7bc542c6de3a6913de.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/b57123f20ec6c4f196dd47dab416622a31f8b7478b38d20327b07fb0906dbbb6/84a51a638fb4578b0af0e1db8741e462d3848d6f0dcfef7bc542c6de3a6913de.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/b57123f20ec6c4f196dd47dab416622a31f8b7478b38d20327b07fb0906dbbb6/84a51a638fb4578b0af0e1db8741e462d3848d6f0dcfef7bc542c6de3a6913de.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "network-access",
+      "arm": "baseline",
+      "expected_revision": true,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/b57123f20ec6c4f196dd47dab416622a31f8b7478b38d20327b07fb0906dbbb6/84a51a638fb4578b0af0e1db8741e462d3848d6f0dcfef7bc542c6de3a6913de.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/b57123f20ec6c4f196dd47dab416622a31f8b7478b38d20327b07fb0906dbbb6/84a51a638fb4578b0af0e1db8741e462d3848d6f0dcfef7bc542c6de3a6913de.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/b57123f20ec6c4f196dd47dab416622a31f8b7478b38d20327b07fb0906dbbb6/84a51a638fb4578b0af0e1db8741e462d3848d6f0dcfef7bc542c6de3a6913de.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "network-access",
+      "arm": "revised",
+      "expected_revision": true,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/b57123f20ec6c4f196dd47dab416622a31f8b7478b38d20327b07fb0906dbbb6/84a51a638fb4578b0af0e1db8741e462d3848d6f0dcfef7bc542c6de3a6913de.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/b57123f20ec6c4f196dd47dab416622a31f8b7478b38d20327b07fb0906dbbb6/84a51a638fb4578b0af0e1db8741e462d3848d6f0dcfef7bc542c6de3a6913de.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/b57123f20ec6c4f196dd47dab416622a31f8b7478b38d20327b07fb0906dbbb6/84a51a638fb4578b0af0e1db8741e462d3848d6f0dcfef7bc542c6de3a6913de.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "storage-identity",
+      "arm": "baseline",
+      "expected_revision": true,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/ad75a9d6488a1920ca13f1b31cddcdc942ae726047f85a9ac68ae6e1bee70c76/8f0bc8ea5418f2acc9e1bafa41ff9a27a2ce43e1a3afbda31f5cf30b4c90313a.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/ad75a9d6488a1920ca13f1b31cddcdc942ae726047f85a9ac68ae6e1bee70c76/8f0bc8ea5418f2acc9e1bafa41ff9a27a2ce43e1a3afbda31f5cf30b4c90313a.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/ad75a9d6488a1920ca13f1b31cddcdc942ae726047f85a9ac68ae6e1bee70c76/8f0bc8ea5418f2acc9e1bafa41ff9a27a2ce43e1a3afbda31f5cf30b4c90313a.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "storage-identity",
+      "arm": "revised",
+      "expected_revision": true,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/ad75a9d6488a1920ca13f1b31cddcdc942ae726047f85a9ac68ae6e1bee70c76/8f0bc8ea5418f2acc9e1bafa41ff9a27a2ce43e1a3afbda31f5cf30b4c90313a.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/ad75a9d6488a1920ca13f1b31cddcdc942ae726047f85a9ac68ae6e1bee70c76/8f0bc8ea5418f2acc9e1bafa41ff9a27a2ce43e1a3afbda31f5cf30b4c90313a.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/ad75a9d6488a1920ca13f1b31cddcdc942ae726047f85a9ac68ae6e1bee70c76/8f0bc8ea5418f2acc9e1bafa41ff9a27a2ce43e1a3afbda31f5cf30b4c90313a.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "storage-identity",
+      "arm": "baseline",
+      "expected_revision": true,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/ad75a9d6488a1920ca13f1b31cddcdc942ae726047f85a9ac68ae6e1bee70c76/8f0bc8ea5418f2acc9e1bafa41ff9a27a2ce43e1a3afbda31f5cf30b4c90313a.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/ad75a9d6488a1920ca13f1b31cddcdc942ae726047f85a9ac68ae6e1bee70c76/8f0bc8ea5418f2acc9e1bafa41ff9a27a2ce43e1a3afbda31f5cf30b4c90313a.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/ad75a9d6488a1920ca13f1b31cddcdc942ae726047f85a9ac68ae6e1bee70c76/8f0bc8ea5418f2acc9e1bafa41ff9a27a2ce43e1a3afbda31f5cf30b4c90313a.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "storage-identity",
+      "arm": "revised",
+      "expected_revision": true,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/ad75a9d6488a1920ca13f1b31cddcdc942ae726047f85a9ac68ae6e1bee70c76/8f0bc8ea5418f2acc9e1bafa41ff9a27a2ce43e1a3afbda31f5cf30b4c90313a.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/ad75a9d6488a1920ca13f1b31cddcdc942ae726047f85a9ac68ae6e1bee70c76/8f0bc8ea5418f2acc9e1bafa41ff9a27a2ce43e1a3afbda31f5cf30b4c90313a.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/ad75a9d6488a1920ca13f1b31cddcdc942ae726047f85a9ac68ae6e1bee70c76/8f0bc8ea5418f2acc9e1bafa41ff9a27a2ce43e1a3afbda31f5cf30b4c90313a.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "storage-identity",
+      "arm": "baseline",
+      "expected_revision": true,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/ad75a9d6488a1920ca13f1b31cddcdc942ae726047f85a9ac68ae6e1bee70c76/8f0bc8ea5418f2acc9e1bafa41ff9a27a2ce43e1a3afbda31f5cf30b4c90313a.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/ad75a9d6488a1920ca13f1b31cddcdc942ae726047f85a9ac68ae6e1bee70c76/8f0bc8ea5418f2acc9e1bafa41ff9a27a2ce43e1a3afbda31f5cf30b4c90313a.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/ad75a9d6488a1920ca13f1b31cddcdc942ae726047f85a9ac68ae6e1bee70c76/8f0bc8ea5418f2acc9e1bafa41ff9a27a2ce43e1a3afbda31f5cf30b4c90313a.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "storage-identity",
+      "arm": "revised",
+      "expected_revision": true,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/ad75a9d6488a1920ca13f1b31cddcdc942ae726047f85a9ac68ae6e1bee70c76/8f0bc8ea5418f2acc9e1bafa41ff9a27a2ce43e1a3afbda31f5cf30b4c90313a.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/ad75a9d6488a1920ca13f1b31cddcdc942ae726047f85a9ac68ae6e1bee70c76/8f0bc8ea5418f2acc9e1bafa41ff9a27a2ce43e1a3afbda31f5cf30b4c90313a.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/ad75a9d6488a1920ca13f1b31cddcdc942ae726047f85a9ac68ae6e1bee70c76/8f0bc8ea5418f2acc9e1bafa41ff9a27a2ce43e1a3afbda31f5cf30b4c90313a.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "unlinked-parameter",
+      "arm": "baseline",
+      "expected_revision": false,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/3569e09cc6d9ecc0769a0358c473cc7c0fa220cedce3abc6cfb74d5ef2fd7274.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/3569e09cc6d9ecc0769a0358c473cc7c0fa220cedce3abc6cfb74d5ef2fd7274.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/3569e09cc6d9ecc0769a0358c473cc7c0fa220cedce3abc6cfb74d5ef2fd7274.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "unlinked-parameter",
+      "arm": "revised",
+      "expected_revision": false,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/3569e09cc6d9ecc0769a0358c473cc7c0fa220cedce3abc6cfb74d5ef2fd7274.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/3569e09cc6d9ecc0769a0358c473cc7c0fa220cedce3abc6cfb74d5ef2fd7274.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable",
+            "artifact:2": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1",
+            "artifact:2"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/3569e09cc6d9ecc0769a0358c473cc7c0fa220cedce3abc6cfb74d5ef2fd7274.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "unlinked-parameter",
+      "arm": "baseline",
+      "expected_revision": false,
+      "controller_valid": false,
+      "attempts_retained": 2,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/3569e09cc6d9ecc0769a0358c473cc7c0fa220cedce3abc6cfb74d5ef2fd7274.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/3569e09cc6d9ecc0769a0358c473cc7c0fa220cedce3abc6cfb74d5ef2fd7274.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Native structured generation reached its output limit"
+    },
+    {
+      "case": "unlinked-parameter",
+      "arm": "revised",
+      "expected_revision": false,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/3569e09cc6d9ecc0769a0358c473cc7c0fa220cedce3abc6cfb74d5ef2fd7274.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/3569e09cc6d9ecc0769a0358c473cc7c0fa220cedce3abc6cfb74d5ef2fd7274.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/3569e09cc6d9ecc0769a0358c473cc7c0fa220cedce3abc6cfb74d5ef2fd7274.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "unlinked-parameter",
+      "arm": "baseline",
+      "expected_revision": false,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/3569e09cc6d9ecc0769a0358c473cc7c0fa220cedce3abc6cfb74d5ef2fd7274.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/3569e09cc6d9ecc0769a0358c473cc7c0fa220cedce3abc6cfb74d5ef2fd7274.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/3569e09cc6d9ecc0769a0358c473cc7c0fa220cedce3abc6cfb74d5ef2fd7274.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "unlinked-parameter",
+      "arm": "revised",
+      "expected_revision": false,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/3569e09cc6d9ecc0769a0358c473cc7c0fa220cedce3abc6cfb74d5ef2fd7274.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/3569e09cc6d9ecc0769a0358c473cc7c0fa220cedce3abc6cfb74d5ef2fd7274.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/3569e09cc6d9ecc0769a0358c473cc7c0fa220cedce3abc6cfb74d5ef2fd7274.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "whole-query",
+      "arm": "baseline",
+      "expected_revision": true,
+      "controller_valid": false,
+      "attempts_retained": 1,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/e001fc308cd6cc721ae4dc5ca586b97a33dcd4cc80cc73704797f3c67abc49f5.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Native structured generation reached its output limit"
+    },
+    {
+      "case": "whole-query",
+      "arm": "revised",
+      "expected_revision": true,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/e001fc308cd6cc721ae4dc5ca586b97a33dcd4cc80cc73704797f3c67abc49f5.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/e001fc308cd6cc721ae4dc5ca586b97a33dcd4cc80cc73704797f3c67abc49f5.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/e001fc308cd6cc721ae4dc5ca586b97a33dcd4cc80cc73704797f3c67abc49f5.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "whole-query",
+      "arm": "baseline",
+      "expected_revision": true,
+      "controller_valid": false,
+      "attempts_retained": 1,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/e001fc308cd6cc721ae4dc5ca586b97a33dcd4cc80cc73704797f3c67abc49f5.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Native structured generation reached its output limit"
+    },
+    {
+      "case": "whole-query",
+      "arm": "revised",
+      "expected_revision": true,
+      "controller_valid": false,
+      "attempts_retained": 3,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/e001fc308cd6cc721ae4dc5ca586b97a33dcd4cc80cc73704797f3c67abc49f5.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/e001fc308cd6cc721ae4dc5ca586b97a33dcd4cc80cc73704797f3c67abc49f5.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/e001fc308cd6cc721ae4dc5ca586b97a33dcd4cc80cc73704797f3c67abc49f5.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Controller validation remained unresolved after three attempts"
+    },
+    {
+      "case": "whole-query",
+      "arm": "baseline",
+      "expected_revision": true,
+      "controller_valid": false,
+      "attempts_retained": 2,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/e001fc308cd6cc721ae4dc5ca586b97a33dcd4cc80cc73704797f3c67abc49f5.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/e001fc308cd6cc721ae4dc5ca586b97a33dcd4cc80cc73704797f3c67abc49f5.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Native structured generation reached its output limit"
+    },
+    {
+      "case": "whole-query",
+      "arm": "revised",
+      "expected_revision": true,
+      "controller_valid": false,
+      "attempts_retained": 2,
+      "validation_errors": [
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/e001fc308cd6cc721ae4dc5ca586b97a33dcd4cc80cc73704797f3c67abc49f5.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        },
+        {
+          "field_path": "no_hypothesis_basis.inspection_refs",
+          "reference_availability": {
+            "artifact:1": "unavailable"
+          },
+          "deficient_references": [
+            "artifact:1"
+          ],
+          "available_content_refs": [
+            "artifact:artifacts/hypothesis_context/returned_results/df75848fce2b6122b79abbac81e173447ab1fe185474a2f8068376f0cabeac4e/e001fc308cd6cc721ae4dc5ca586b97a33dcd4cc80cc73704797f3c67abc49f5.json"
+          ],
+          "instruction": "Use relevant retained content to correct citations and assessments. Metadata may supplement content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+        }
+      ],
+      "error": "Native structured generation reached its output limit"
+    }
+  ]
+}

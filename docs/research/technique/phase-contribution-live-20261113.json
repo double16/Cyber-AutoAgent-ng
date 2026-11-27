@@ -1,0 +1,280 @@
+{
+  "model": "muse-glimmer:30b-mlx",
+  "request_timeout_seconds": 600,
+  "elapsed_seconds": 570.15,
+  "result": "2 passed, 2 deselected",
+  "historical_scores_modified": false,
+  "fixture_sha256": "990bf221c64dd0e9a1a3ebc47bc5edf0d7ad5d094a39601e3cd11832e0a61931",
+  "interpretation": "Both evaluator/reviewer pairs support helpful contribution to conditional hypothesis generation. This two-case calibration does not establish general scoring reliability.",
+  "limitations": [
+    "DigitalOcean evaluator and reviewer retained neutral_basis=not_used with a positive score. The independent reviewer reported no material errors. This metadata inconsistency remains unresolved."
+  ],
+  "decisions": [
+    {
+      "case_id": "conditional_storage_path",
+      "role": "technique_evaluator",
+      "derived_score": 1,
+      "neutral_basis_consistent": true,
+      "output": {
+        "neutral_basis": null,
+        "purpose_mismatch": false,
+        "methodological_purpose": "Design a reusable hypothesis-generation methodology for server-side path traversal file read via a file serving API that accepts a user-controlled path query parameter, defining prerequisites, explicit assumptions, plausible applicability hypotheses, safe future test steps, positive and negative expectations, evidence requirements, CVE validation guidance, illustrative payloads and checklists with unknown target conditions expressed as future checks.",
+        "observed_use": "The task produced a recorded hypothesis set for endpoint-68c9a7f30770fd57 with a hypothesis about path traversal via the user-controlled path query parameter. The record includes preconditions about endpoint reachability and server-side use of the parameter, a suspected mechanism of resolution without canonicalization/jail enforcement, attacker-controlled input identification, safe_test_steps for baseline/negative control establishment and controlled variation preparation, positive_expectations and negative_expectations for response comparison, and required_evidence items for request/response capture. The observed_basis notes client-side reference only and lack of server handler evidence, framing unknown server behavior as a future check.",
+        "helpful_contribution": true,
+        "contribution": "The recorded hypothesis mirrors the guidance\u2019s hypothesis-generation structure for a file serving API with user-controlled path query parameter: prerequisites about server-side path resolution, mechanism description, attacker-controlled input, safe future test steps with baseline and negative control, positive/negative expectations, and evidence requirements are present in the task deliverable. This shows concrete application of the delivered reusable methodology to the assigned endpoint, establishing a direct methodological correspondence.",
+        "misleading_or_harmful": false,
+        "harmful_effect": "",
+        "reason": "The task deliverable applies the guidance\u2019s reusable path traversal hypothesis-generation method to the specific endpoint with matching elements of prerequisites, mechanism, attacker-controlled flow, safe future steps, expectations and evidence requirements. The observed_basis explicitly notes the limitation to client-side reference and lack of server handler evidence, which aligns with the guidance\u2019s instruction to express unknown target conditions as future checks rather than asserted facts. This demonstrates a demonstrated methodological contribution.",
+        "necessary_evidence_gaps": [],
+        "evidence_mappings": [
+          {
+            "guidance_references": [
+              "guidance:cde0cd90983e:16",
+              "guidance:cde0cd90983e:17",
+              "guidance:cde0cd90983e:18",
+              "guidance:cde0cd90983e:19",
+              "guidance:cde0cd90983e:20",
+              "guidance:cde0cd90983e:21"
+            ],
+            "result_references": [
+              "result:d2569e6a1cfa:24",
+              "result:d2569e6a1cfa:25",
+              "result:d2569e6a1cfa:26",
+              "result:d2569e6a1cfa:29",
+              "result:d2569e6a1cfa:30",
+              "result:d2569e6a1cfa:32",
+              "result:d2569e6a1cfa:33",
+              "result:d2569e6a1cfa:40",
+              "result:d2569e6a1cfa:44",
+              "result:d2569e6a1cfa:49"
+            ],
+            "explanation": "Guidance defines purpose to design a reusable hypothesis-generation methodology with prerequisites, assumptions, safe future steps, expectations and evidence requirements for path traversal via user-controlled path query parameter. The task hypothesis records preconditions about endpoint reachability and server-side parameter use, suspected mechanism of resolution without canonicalization, attacker-controlled input, safe_test_steps for baseline/negative control and controlled variation, positive/negative expectations and required evidence, showing direct application of the methodology."
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "conditional_storage_path",
+      "role": "technique_feedback_reviewer",
+      "derived_score": 1,
+      "neutral_basis_consistent": true,
+      "output": {
+        "assessment": {
+          "neutral_basis": null,
+          "purpose_mismatch": false,
+          "methodological_purpose": "Design a reusable hypothesis-generation methodology for server-side path traversal file read via a file serving API that accepts a user-controlled path query parameter, defining prerequisites, explicit assumptions, plausible applicability hypotheses, safe future test steps, positive and negative expectations, evidence requirements, CVE validation guidance, illustrative payloads and checklists with unknown target conditions expressed as future checks.",
+          "observed_use": "The task produced a recorded hypothesis set for endpoint-68c9a7f30770fd57 with a hypothesis about path traversal via the user-controlled path query parameter. The record includes preconditions about endpoint reachability and server-side use of the parameter, a suspected mechanism of resolution without canonicalization/jail enforcement, attacker-controlled input identification, safe_test_steps for baseline/negative control establishment and controlled variation preparation, positive_expectations and negative_expectations for response comparison, and required_evidence items for request/response capture. The observed_basis notes client-side reference only and lack of server handler evidence, framing unknown server behavior as a future check.",
+          "helpful_contribution": true,
+          "contribution": "The recorded hypothesis mirrors the guidance\u2019s hypothesis-generation structure for a file serving API with user-controlled path query parameter: prerequisites about server-side path resolution, mechanism description, attacker-controlled input, safe future test steps with baseline and negative control, positive/negative expectations, and evidence requirements are present in the task deliverable. This shows concrete application of the delivered reusable methodology to the assigned endpoint, establishing a direct methodological correspondence.",
+          "misleading_or_harmful": false,
+          "harmful_effect": "",
+          "reason": "The task deliverable applies the guidance\u2019s reusable path traversal hypothesis-generation method to the specific endpoint with matching elements of prerequisites, mechanism, attacker-controlled flow, safe future steps, expectations and evidence requirements. The observed_basis explicitly notes the limitation to client-side reference and lack of server handler evidence, which aligns with the guidance\u2019s instruction to express unknown target conditions as future checks rather than asserted facts. This demonstrates a demonstrated methodological contribution.",
+          "necessary_evidence_gaps": [],
+          "evidence_mappings": [
+            {
+              "guidance_references": [
+                "guidance:cde0cd90983e:16",
+                "guidance:cde0cd90983e:17",
+                "guidance:cde0cd90983e:18",
+                "guidance:cde0cd90983e:19",
+                "guidance:cde0cd90983e:20",
+                "guidance:cde0cd90983e:21"
+              ],
+              "result_references": [
+                "result:d2569e6a1cfa:24",
+                "result:d2569e6a1cfa:25",
+                "result:d2569e6a1cfa:26",
+                "result:d2569e6a1cfa:29",
+                "result:d2569e6a1cfa:30",
+                "result:d2569e6a1cfa:32",
+                "result:d2569e6a1cfa:33",
+                "result:d2569e6a1cfa:40",
+                "result:d2569e6a1cfa:44",
+                "result:d2569e6a1cfa:49"
+              ],
+              "explanation": "Guidance defines purpose to design a reusable hypothesis-generation methodology with prerequisites, assumptions, safe future steps, expectations and evidence requirements for path traversal via user-controlled path query parameter. The task hypothesis records preconditions about endpoint reachability and server-side parameter use, suspected mechanism of resolution without canonicalization, attacker-controlled input, safe_test_steps for baseline/negative control and controlled variation, positive/negative expectations and required evidence, showing direct application of the methodology."
+            }
+          ]
+        },
+        "material_errors": []
+      }
+    },
+    {
+      "case_id": "conditional_remote_storage",
+      "role": "technique_evaluator",
+      "derived_score": 1,
+      "neutral_basis_consistent": false,
+      "output": {
+        "neutral_basis": "not_used",
+        "purpose_mismatch": false,
+        "methodological_purpose": "Design a reusable hypothesis-generation methodology for server-side path traversal file read via a file serving API that accepts a user-controlled path query parameter, defining prerequisites, explicit assumptions, plausible applicability hypotheses, safe future test steps, positive and negative expectations, evidence requirements, CVE validation guidance, illustrative payloads and checklists with unknown target conditions expressed as future checks.",
+        "observed_use": "The task produced a recorded hypothesis for endpoint-1c5dbcbb02ab1b4a with documented preconditions that the server implements GET /api/file/digital_ocean and resolves the path query parameter server-side, that the path parameter is used to construct a file system or remote storage path without guaranteed canonicalization, that the endpoint is reachable without authentication, and that success returns file content or metadata distinguishable from error. The hypothesis records suspected mechanism as server concatenation of user-controlled path query parameter with base directory without proper canonicalization allowing path traversal, identifies attacker-controlled input as path query parameter value, lists safe test steps to establish baseline and negative control, test relative traversal ../, URL-encoded traversal %2e%2e%2f, absolute path override and record response codes, and defines positive and negative expectations and required evidence for server response, canonicalization evidence, response schema and server-side confirmation.",
+        "helpful_contribution": true,
+        "contribution": "The recorded hypothesis mirrors the guidance\u2019s reusable methodology: prerequisites about a file serving API resolving a user-controlled path server-side, explicit assumptions about concatenation without guaranteed canonicalization and decoding, attacker-controlled input identification, safe future test steps with baseline and negative control, controlled variations for relative traversal, URL encoding and absolute path override, positive/negative expectations for out-of-scope content vs 400/404 errors, and required evidence collection. This shows concrete application of the delivered hypothesis-generation method to the assigned endpoint.",
+        "misleading_or_harmful": false,
+        "harmful_effect": "",
+        "reason": "The task deliverable contains prerequisites, mechanism, attacker-controlled input, safe test steps, expectations and evidence requirements that correspond to the guidance\u2019s hypothesis-generation structure for path traversal file read via a user-controlled path query parameter. The mapping demonstrates a direct methodological correspondence rather than mere citation.",
+        "necessary_evidence_gaps": [],
+        "evidence_mappings": [
+          {
+            "guidance_references": [
+              "guidance:cde0cd90983e:23",
+              "guidance:cde0cd90983e:24",
+              "guidance:cde0cd90983e:25",
+              "guidance:cde0cd90983e:26"
+            ],
+            "result_references": [
+              "result:93a9ca1ffcdd:24",
+              "result:93a9ca1ffcdd:25",
+              "result:93a9ca1ffcdd:26",
+              "result:93a9ca1ffcdd:27"
+            ],
+            "explanation": "Guidance defines applicability as a file serving API resolving a user-controlled path server-side and returning file contents. The hypothesis records preconditions that the server implements GET /api/file/digital_ocean and resolves path query parameter server-side, uses it to construct a path without guaranteed canonicalization, is reachable without authentication, and returns file content or metadata distinguishable from error, matching the prerequisite framing."
+          },
+          {
+            "guidance_references": [
+              "guidance:cde0cd90983e:179",
+              "guidance:cde0cd90983e:180"
+            ],
+            "result_references": [
+              "result:93a9ca1ffcdd:29",
+              "result:93a9ca1ffcdd:30"
+            ],
+            "explanation": "Guidance states the technique produces advisory hypotheses about server-side path traversal via user-controlled path query parameter without asserting vulnerability existence. The hypothesis records suspected mechanism as server concatenation of user-controlled path query parameter with base directory without proper canonicalization allowing path traversal and identifies attacker-controlled input as path query parameter value, reflecting the guidance\u2019s mechanism framing."
+          },
+          {
+            "guidance_references": [
+              "guidance:cde0cd90983e:179",
+              "guidance:cde0cd90983e:181"
+            ],
+            "result_references": [
+              "result:93a9ca1ffcdd:32",
+              "result:93a9ca1ffcdd:33",
+              "result:93a9ca1ffcdd:34",
+              "result:93a9ca1ffcdd:35",
+              "result:93a9ca1ffcdd:36"
+            ],
+            "explanation": "Guidance prescribes safe test steps including reconnaissance and baseline establishment, policy confirmation, hypothesis design with one controlled variation and pairing with baseline/negative control. The hypothesis lists safe test steps to establish baseline request, establish negative control, test relative traversal ../, test URL-encoded traversal %2e%2e%2f, test absolute path override and record response codes, matching the safe future steps structure."
+          },
+          {
+            "guidance_references": [
+              "guidance:cde0cd90983e:179",
+              "guidance:cde0cd90983e:182"
+            ],
+            "result_references": [
+              "result:93a9ca1ffcdd:40",
+              "result:93a9ca1ffcdd:41",
+              "result:93a9ca1ffcdd:44",
+              "result:93a9ca1ffcdd:45",
+              "result:93a9ca1ffcdd:46"
+            ],
+            "explanation": "Guidance defines positive expectations of success status and out-of-scope content and negative expectations of baseline match or 400/404 errors. The hypothesis records positive expectations of content from outside allowed root and file read succeeded with attacker-controlled influence, and negative expectations of 400 Bad Request Invalid paramater 'path', 404 Not Found, and generic error without disclosure, reflecting the expectation framing."
+          },
+          {
+            "guidance_references": [
+              "guidance:cde0cd90983e:179",
+              "guidance:cde0cd90983e:183"
+            ],
+            "result_references": [
+              "result:93a9ca1ffcdd:49",
+              "result:93a9ca1ffcdd:50",
+              "result:93a9ca1ffcdd:51",
+              "result:93a9ca1ffcdd:52"
+            ],
+            "explanation": "Guidance requires evidence collection such as request/response, status code, canonicalization evidence and comparison of baseline vs test. The hypothesis lists required evidence for server response to controlled path value showing file resolution, evidence of path canonicalization or lack thereof, response schema on success vs error, and confirmation endpoint implemented server-side, matching the evidence requirement structure."
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "conditional_remote_storage",
+      "role": "technique_feedback_reviewer",
+      "derived_score": 1,
+      "neutral_basis_consistent": false,
+      "output": {
+        "assessment": {
+          "neutral_basis": "not_used",
+          "purpose_mismatch": false,
+          "methodological_purpose": "Design a reusable hypothesis-generation methodology for server-side path traversal file read via a file serving API that accepts a user-controlled path query parameter, defining prerequisites, explicit assumptions, plausible applicability hypotheses, safe future test steps, positive and negative expectations, evidence requirements, CVE validation guidance, illustrative payloads and checklists with unknown target conditions expressed as future checks.",
+          "observed_use": "The task produced a recorded hypothesis for endpoint-1c5dbcbb02ab1b4a with documented preconditions that the server implements GET /api/file/digital_ocean and resolves the path query parameter server-side, that the path parameter is used to construct a file system or remote storage path without guaranteed canonicalization, that the endpoint is reachable without authentication, and that success returns file content or metadata distinguishable from error. The hypothesis records suspected mechanism as server concatenation of user-controlled path query parameter with base directory without proper canonicalization allowing path traversal, identifies attacker-controlled input as path query parameter value, lists safe test steps to establish baseline and negative control, test relative traversal ../, URL-encoded traversal %2e%2e%2f, absolute path override and record response codes, and defines positive and negative expectations and required evidence for server response, canonicalization evidence, response schema and server-side confirmation.",
+          "helpful_contribution": true,
+          "contribution": "The recorded hypothesis mirrors the guidance\u2019s reusable methodology: prerequisites about a file serving API resolving a user-controlled path server-side, explicit assumptions about concatenation without guaranteed canonicalization and decoding, attacker-controlled input identification, safe future test steps with baseline and negative control, controlled variations for relative traversal, URL encoding and absolute path override, positive/negative expectations for out-of-scope content vs 400/404 errors, and required evidence collection. This shows concrete application of the delivered hypothesis-generation method to the assigned endpoint.",
+          "misleading_or_harmful": false,
+          "harmful_effect": "",
+          "reason": "The task deliverable contains prerequisites, mechanism, attacker-controlled input, safe test steps, expectations and evidence requirements that correspond to the guidance\u2019s hypothesis-generation structure for path traversal file read via a user-controlled path query parameter. The mapping demonstrates a direct methodological correspondence rather than mere citation.",
+          "necessary_evidence_gaps": [],
+          "evidence_mappings": [
+            {
+              "guidance_references": [
+                "guidance:cde0cd90983e:23",
+                "guidance:cde0cd90983e:24",
+                "guidance:cde0cd90983e:25",
+                "guidance:cde0cd90983e:26"
+              ],
+              "result_references": [
+                "result:93a9ca1ffcdd:24",
+                "result:93a9ca1ffcdd:25",
+                "result:93a9ca1ffcdd:26",
+                "result:93a9ca1ffcdd:27"
+              ],
+              "explanation": "Guidance defines applicability as a file serving API resolving a user-controlled path server-side and returning file contents. The hypothesis records preconditions that the server implements GET /api/file/digital_ocean and resolves path query parameter server-side, uses it to construct a path without guaranteed canonicalization, is reachable without authentication, and returns file content or metadata distinguishable from error, matching the prerequisite framing."
+            },
+            {
+              "guidance_references": [
+                "guidance:cde0cd90983e:179",
+                "guidance:cde0cd90983e:180"
+              ],
+              "result_references": [
+                "result:93a9ca1ffcdd:29",
+                "result:93a9ca1ffcdd:30"
+              ],
+              "explanation": "Guidance states the technique produces advisory hypotheses about server-side path traversal via user-controlled path query parameter without asserting vulnerability existence. The hypothesis records suspected mechanism as server concatenation of user-controlled path query parameter with base directory without proper canonicalization allowing path traversal and identifies attacker-controlled input as path query parameter value, reflecting the guidance\u2019s mechanism framing."
+            },
+            {
+              "guidance_references": [
+                "guidance:cde0cd90983e:179",
+                "guidance:cde0cd90983e:181"
+              ],
+              "result_references": [
+                "result:93a9ca1ffcdd:32",
+                "result:93a9ca1ffcdd:33",
+                "result:93a9ca1ffcdd:34",
+                "result:93a9ca1ffcdd:35",
+                "result:93a9ca1ffcdd:36"
+              ],
+              "explanation": "Guidance prescribes safe test steps including reconnaissance and baseline establishment, policy confirmation, hypothesis design with one controlled variation and pairing with baseline/negative control. The hypothesis lists safe test steps to establish baseline request, establish negative control, test relative traversal ../, test URL-encoded traversal %2e%2e%2f, test absolute path override and record response codes, matching the safe future steps structure."
+            },
+            {
+              "guidance_references": [
+                "guidance:cde0cd90983e:179",
+                "guidance:cde0cd90983e:182"
+              ],
+              "result_references": [
+                "result:93a9ca1ffcdd:40",
+                "result:93a9ca1ffcdd:41",
+                "result:93a9ca1ffcdd:44",
+                "result:93a9ca1ffcdd:45",
+                "result:93a9ca1ffcdd:46"
+              ],
+              "explanation": "Guidance defines positive expectations of success status and out-of-scope content and negative expectations of baseline match or 400/404 errors. The hypothesis records positive expectations of content from outside allowed root and file read succeeded with attacker-controlled influence, and negative expectations of 400 Bad Request Invalid paramater 'path', 404 Not Found, and generic error without disclosure, reflecting the expectation framing."
+            },
+            {
+              "guidance_references": [
+                "guidance:cde0cd90983e:179",
+                "guidance:cde0cd90983e:183"
+              ],
+              "result_references": [
+                "result:93a9ca1ffcdd:49",
+                "result:93a9ca1ffcdd:50",
+                "result:93a9ca1ffcdd:51",
+                "result:93a9ca1ffcdd:52"
+              ],
+              "explanation": "Guidance requires evidence collection such as request/response, status code, canonicalization evidence and comparison of baseline vs test. The hypothesis lists required evidence for server response to controlled path value showing file resolution, evidence of path canonicalization or lack thereof, response schema on success vs error, and confirmation endpoint implemented server-side, matching the evidence requirement structure."
+            }
+          ]
+        },
+        "material_errors": []
+      }
+    }
+  ]
+}
