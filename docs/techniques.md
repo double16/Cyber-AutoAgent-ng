@@ -1520,9 +1520,17 @@ module directory is skipped; a failed scan does not retire that module's documen
 source restores its selected revision, while preserving feedback-based deactivation and declared
 inactive status. Synchronization reports a retired count separately from source additions and updates.
 
-Module eligibility changes use a new embedding-index identity so older payloads cannot consume
-retrieval limits. This may rebuild embeddings even when current module files are unchanged. It does
-not change generated-document compatibility version 1.
+Startup and lookups reconcile each embedding index independently against repository lifecycle state,
+even when another embedding configuration has already synchronized the shared document. Reconciliation
+reads document-point payloads in batches of 100 revisions and repairs stale or missing `active`,
+`current` and `generation_eligible` fields on all document and trigger points for each revision.
+These repairs preserve vectors and phase-specific trigger metadata, preventing stale entries from
+consuming retrieval limits. Missing document points rebuild that revision's vectors through normal
+indexing. Existing collections are reused; no migration or forced re-embedding is needed.
+
+The shared `pending_sync` flag tracks rendered document lifecycle metadata only. It clears after
+those writes succeed and never gates index checks. Failed index or document writes propagate to the
+caller and retry on the next reconciliation. Generated-document compatibility version 1 is unchanged.
 
 ### Identity requirements in structured outputs
 
@@ -1577,3 +1585,8 @@ bundle without component planning or authorship. Unknown target prerequisites re
 A multi-procedure document can cover the request as a whole. Coverage misses use the normal planning
 path; selection failures remain explicit errors. Both paths preserve exact delivery snapshots and
 per-revision receipts. Automatic delivery and hypothesis review are unchanged.
+
+Direct lookup passes a freshly aligned request through compatibility assessment, selection and
+generation while preserving the original request in operation-local provenance. Planned bundle
+components retain their own requests and inherit the parent alignment without repeating it or
+duplicating alignment notes.

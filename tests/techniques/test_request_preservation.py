@@ -29,6 +29,87 @@ def test_single_component_request_is_not_overwritten(scripted_service):
     assert any("CVE-2099-1234 methodology" in query for query in state.research_calls)
 
 
+@pytest.mark.parametrize("changed", [False, True])
+@pytest.mark.parametrize("reuse", [False, True])
+def test_direct_alignment_propagates_to_compatibility_selection_and_generation(scripted_service, changed, reuse):
+    state = scripted_service
+    service = state.service
+    original = service.runner
+    request = "Validate JWT applicability"
+    adjusted = "Develop JWT applicability hypotheses" if changed else request
+    prompts = []
+    if reuse:
+        state.selection = state.publish()
+
+    def run(role, prompt, tools):
+        prompts.append((role, prompt))
+        if role == "technique_request_aligner":
+            return json.dumps({"adjusted_request": adjusted, "reason": "Clarify guidance purpose"})
+        if role == "technique_judge" and "generic_request" in prompt:
+            supplied = prompt.split("Request: ", 1)[1].split("\n", 1)[0]
+            return json.dumps({"generic_request": supplied, "applicability": "supported",
+                               "unmet_prerequisites": [], "reason": "Compatible"})
+        return original(role, prompt, tools)
+
+    service.runner = run
+    _, rendered = service.get(request, LookupContext(phase_contexts=["hypothesis_generation"]))
+    compatibility = [prompt for role, prompt in prompts if role == "technique_judge" and "generic_request" in prompt]
+    assert len(compatibility) == 1 and f"Request: {adjusted}\n" in compatibility[0]
+    selection = [prompt for role, prompt in prompts if role == "technique_judge" and "generic_request" not in prompt]
+    if reuse:
+        assert selection and all(adjusted in prompt for prompt in selection)
+        assert not state.research_calls
+    else:
+        assert state.research_calls[0].startswith(adjusted + "\n")
+        for role in ("technique_author", "technique_critic"):
+            assert any(f"Requested technique: {adjusted}\n" in prompt for selected, prompt in prompts if selected == role)
+    assert rendered.count("Request alignment (operation-local)") == int(changed)
+    if changed:
+        assert f"Original request: {request}\n" in rendered
+
+
+def test_bundle_components_keep_local_requests_and_one_parent_alignment(scripted_service, monkeypatch):
+    state = scripted_service
+    service = state.service
+    original = service.runner
+    request = "JWT handling and TCP mapping"
+    adjusted = "Develop JWT and TCP hypotheses"
+    components = ["JWT handling", "TCP mapping"]
+    lookups = []
+    alignments = []
+    revision = state.publish()
+    monkeypatch.setattr(service, "_select_existing", lambda *_a, **_k: None)
+
+    def run(role, prompt, tools):
+        if role == "technique_request_aligner":
+            alignments.append(prompt)
+            return json.dumps({"adjusted_request": adjusted, "reason": "Clarify phase"})
+        if role == "technique_planner":
+            return json.dumps(plan_payload({"components": [{
+                "id": str(number), "request": item, "purpose": item, "request_excerpt": request,
+                "requirements": [{"id": "method", "description": item}],
+            } for number, item in enumerate(components)]}))
+        return original(role, prompt, tools)
+
+    def get(component_request, context, **kwargs):
+        lookups.append((component_request, context._request_alignment.model_dump()))
+        kwargs["on_decision"](LookupDecision(generic_request=component_request, applicability="supported",
+                                           unmet_prerequisites=[], reason="Compatible"))
+        return revision, service.store.render(revision, guidance=True)
+
+    service.runner = run
+    monkeypatch.setattr(service, "_get", get)
+    bundle = service.resolve_bundle(request, LookupContext(phase_contexts=["hypothesis_generation"]),
+                                    operation="operation", task="task")
+    assert [item[0] for item in lookups] == components
+    assert len(alignments) == 1
+    assert all(item[1]["original_request"] == request and item[1]["adjusted_request"] == adjusted for item in lookups)
+    assert all("Request alignment (operation-local)" not in item.markdown for item in bundle.delivered)
+    assert bundle.render().count("Request alignment (operation-local)") == 1
+    receipt = json.loads(service.repository.pending_uses("operation", "task")[0]["use_context"])
+    assert receipt["request_alignment"]["original_request"] == request
+
+
 @pytest.mark.parametrize("subject", ["HTTP CVE-2099-1234", "TCP parser", "source/filesystem parser"])
 @pytest.mark.parametrize("repair", [False, True])
 def test_applicability_rewrite_is_independently_checked(scripted_service, subject, repair):

@@ -557,7 +557,7 @@ class TechniqueService:
             self._validate_request(request)
             inherited = context is not None and context._request_alignment is not None
             alignment, context = align_request(self, request, context)
-            resolved_request = request
+            resolved_request = request if inherited else alignment.adjusted_request
             revision, markdown = self._get(
                 resolved_request, context, on_decision=on_decision, requirements=requirements,
             )

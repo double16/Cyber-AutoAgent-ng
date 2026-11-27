@@ -190,6 +190,10 @@ def test_alignment_reaches_full_workflow_and_stays_out_of_published_document(
         result = capsys.readouterr().out
         revision = state.service.repository.revisions()[0]["revision_id"]
     assert len(alignments) == 1 and "Phase-aligned request: " + adjusted in result
+    compatibility_prompts = [prompt for role, prompt, _ in state.calls
+                             if role == "technique_judge" and "generic_request" in prompt]
+    assert compatibility_prompts
+    assert all(f"Request: {adjusted}\n" in prompt for prompt in compatibility_prompts)
     assert "Request alignment (operation-local)" not in state.service.store.render(revision)
     for role in ("technique_author", "technique_critic"):
         prompt = next(prompt for selected, prompt, _ in state.calls if selected == role)

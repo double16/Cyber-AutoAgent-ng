@@ -701,7 +701,9 @@ def test_selection_preserves_policy_without_authoring_enrichment(scripted_servic
 
 @pytest.mark.parametrize("inherited", [False, True])
 @pytest.mark.parametrize("method_request", ["Assess input handling", "Assess input handling with a payload checklist"])
-def test_get_keeps_selection_request_unenriched(scripted_service, monkeypatch, inherited, method_request):
+def test_get_uses_fresh_alignment_and_preserves_inherited_component_request(
+    scripted_service, monkeypatch, inherited, method_request,
+):
     from modules.techniques.alignment import RequestAlignment
     from modules.techniques.context import MethodologyContext
 
@@ -709,7 +711,7 @@ def test_get_keeps_selection_request_unenriched(scripted_service, monkeypatch, i
     context = MethodologyContext(phase_contexts=["hypothesis_generation"])
     alignment = RequestAlignment(
         original_request=method_request,
-        adjusted_request=f"{method_request} with illustrative payloads and a summary table",
+        adjusted_request=f"Develop hypotheses for {method_request}",
     )
     if inherited:
         context._request_alignment = alignment
@@ -721,9 +723,10 @@ def test_get_keeps_selection_request_unenriched(scripted_service, monkeypatch, i
         return "revision", "document"
 
     monkeypatch.setattr(service, "_get", get)
-    revision, _ = service.get(method_request, context)
+    revision, rendered = service.get(method_request, context)
     assert revision == "revision"
-    assert requests == [method_request]
+    assert requests == [method_request if inherited else alignment.adjusted_request]
+    assert rendered.count("Request alignment (operation-local)") == int(not inherited)
 
 
 def test_module_sync_retires_removed_sources_and_restores_without_losing_history(

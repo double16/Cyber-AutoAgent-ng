@@ -33,7 +33,6 @@ class TechniqueStore:
         identity = (f"phase-index-v5:{TECHNIQUE_GENERATION_VERSION}:{self.retrieval.representation}:"
                     f"{config.get('embedding_provider')}:{config.get('embedding_model')}:{self.dimensions}")
         self.index = f"cyber_autoagent_technique_index_{hashlib.sha256(identity.encode()).hexdigest()[:16]}"
-        self._indexed: set[str] = set()
         with WRITE_LOCK:
             if not qdrant.collection_exists(DOCUMENTS):
                 qdrant.create_collection(DOCUMENTS, vectors_config={})
@@ -136,7 +135,6 @@ class TechniqueStore:
                 )
             )
         self.qdrant.upsert(self.index, points=points, wait=True)
-        self._indexed.add(revision)
         self._embedded_revisions.add(revision)
 
     def embedding_status(self) -> dict:
@@ -149,27 +147,40 @@ class TechniqueStore:
         }
 
     def reconcile(self) -> None:
-        """Repair interrupted lifecycle writes and rebuild indexes after embedding changes."""
-        for row in self.repository.revisions():
-            revision = row["revision_id"]
-            if not row["pending_sync"]:
-                if revision in self._indexed:
-                    continue
-                if self.qdrant.retrieve(self.index, ids=[revision], with_payload=False):
-                    self._indexed.add(revision)
-                    continue
-            document = self.document(revision)
-            self._index(revision, document, bool(row["active"]), bool(row["current_revision"]))
-            self.qdrant.set_payload(
-                DOCUMENTS,
-                payload={
-                    **self.lifecycle(row),
-                    "document_markdown": document.render(self.lifecycle(row)),
-                },
-                points=[revision],
-                wait=True,
+        """Reconcile this index independently; pending_sync tracks shared rendered documents only."""
+        rows = self.repository.revisions()
+        for start in range(0, len(rows), 100):
+            batch = rows[start:start + 100]
+            points = self.qdrant.retrieve(
+                self.index, ids=[row["revision_id"] for row in batch],
+                with_payload=["active", "current", "generation_eligible"], with_vectors=False,
             )
-            self.repository.synced(revision, DOCUMENTS)
+            payloads = {str(point.id): point.payload or {} for point in points}
+            for row in batch:
+                revision = row["revision_id"]
+                expected = {"active": bool(row["active"]), "current": bool(row["current_revision"]),
+                            "generation_eligible": generation_eligible(row)}
+                document = None
+                if revision not in payloads:
+                    document = self.document(revision)
+                    self._index(revision, document, expected["active"], expected["current"])
+                elif any(payloads[revision].get(key) != value for key, value in expected.items()):
+                    # Repair all document/trigger points without touching vectors or trigger metadata.
+                    self.qdrant.set_payload(
+                        self.index, payload=expected,
+                        points=models.Filter(must=[models.FieldCondition(
+                            key="revision_id", match=models.MatchValue(value=revision),
+                        )]), wait=True,
+                    )
+                if row["pending_sync"]:
+                    document = document or self.document(revision)
+                    lifecycle = self.lifecycle(row)
+                    self.qdrant.set_payload(
+                        DOCUMENTS,
+                        payload={**lifecycle, "document_markdown": document.render(lifecycle)},
+                        points=[revision], wait=True,
+                    )
+                    self.repository.synced(revision, DOCUMENTS)
 
     def search(self, request: str, *, active: bool, limit: int | None = None, contexts: list[str] | None = None) -> list[dict]:
         with WRITE_LOCK:

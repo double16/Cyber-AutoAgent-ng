@@ -248,3 +248,195 @@ def test_migration_keeps_existing_generated_revision_unversioned(tmp_path):
     migrated = TechniqueRepository(path)
     assert migrated.get("legacy")["generation_version"] is None
     assert migrated.get("legacy")["source_sha256"] == "digest"
+
+
+def alternate_store(store):
+    return TechniqueStore(
+        store.qdrant, store.embeddings, {"embedding_dimensions": 3, "embedding_model": "alternate"}, store.repository,
+    )
+
+
+def test_indexes_independently_remove_and_restore_module_sources(store, markdown):
+    revision = store.publish(TechniqueDocument(markdown()), "module:web:jwt.md", "module:web")
+    other = alternate_store(store)
+    repo = store.repository
+    for removed_store, restored_store in ((store, other), (other, store)):
+        assert repo.synchronize_module("module:web", {}) == 1
+        removed_store.reconcile()
+        assert not repo.get(revision)["pending_sync"]
+        for index in (other, store):
+            assert index.search("JWT", active=True, limit=1) == []
+            assert index.search_triggers("JWT", ["hypothesis_generation"], limit=1) == []
+            assert index.triggers(["hypothesis_generation"]) == []
+        repo.synchronize_module("module:web", {revision: True})
+        restored_store.reconcile()
+        assert not repo.get(revision)["pending_sync"]
+        for index in (store, other):
+            assert [row["revision_id"] for row in index.search("JWT", active=True, limit=1)] == [revision]
+            assert [row["revision_id"] for row in index.search_triggers(
+                "JWT", ["hypothesis_generation"], limit=1,
+            )] == [revision]
+            assert index.triggers(["hypothesis_generation"])[0]["active"] is True
+
+
+def test_deactivation_and_supersession_repair_both_indexes_before_limits(store, markdown):
+    old = store.publish(TechniqueDocument(markdown()), "lineage", "generated")
+    other = alternate_store(store)
+    for number in range(3):
+        store.repository.use("op", str(number), old)
+        store.repository.feedback("op", str(number), old, -1, "Misleading controls")
+    store.reconcile()
+    for index in (other, store):
+        assert index.search("JWT", active=True, limit=1) == []
+        assert index.search("JWT", active=False, limit=1)[0]["revision_id"] == old
+        # Inactive current guidance still advertises regeneration requests.
+        assert index.search_triggers("JWT", ["hypothesis_generation"], limit=1)[0]["active"] is False
+        assert index.triggers(["hypothesis_generation"])[0]["active"] is False
+    # Stale vectors rank above the replacement, so post-query filtering cannot hide starvation.
+    replacement = other.publish(TechniqueDocument(markdown("Replacement").replace("JWT", "token")),
+                                "lineage", "generated")
+    for index in (store, other):
+        assert [row["revision_id"] for row in index.search("JWT", active=True, limit=1)] == [replacement]
+        assert [row["revision_id"] for row in index.search_triggers(
+            "JWT", ["hypothesis_generation"], limit=1,
+        )] == [replacement]
+        assert {row["revision_id"] for row in index.triggers(["hypothesis_generation"])} == {replacement}
+    assert store.repository.get(old)["score_count"] == 3
+
+
+def test_generation_eligibility_repaired_in_each_index_before_limits(store, markdown):
+    stale = store.publish(TechniqueDocument(markdown()), "stale", "generated")
+    other = alternate_store(store)
+    with store.repository.transaction() as connection:
+        connection.execute("UPDATE technique_revisions SET generation_version = NULL, pending_sync = 1 "
+                           "WHERE revision_id = ?", (stale,))
+    other.reconcile()
+    current = other.publish(TechniqueDocument(markdown().replace("JWT", "token")), "current", "generated")
+    for index in (store, other):
+        assert [row["revision_id"] for row in index.search("JWT", active=True, limit=1)] == [current]
+        assert [row["revision_id"] for row in index.search_triggers(
+            "JWT", ["hypothesis_generation"], limit=1,
+        )] == [current]
+
+
+@pytest.mark.parametrize("missing_fields", [False, True])
+def test_reopen_repairs_existing_payloads_without_embedding_or_losing_trigger_metadata(
+    store, markdown, monkeypatch, missing_fields,
+):
+    revision = store.publish(TechniqueDocument(markdown()), "lineage", "generated")
+    before, _ = store.qdrant.scroll(store.index, with_payload=True, with_vectors=True)
+    # Simulate persisted lifecycle payloads from an interrupted/older synchronization.
+    if missing_fields:
+        store.qdrant.delete_payload(store.index, keys=["active", "current", "generation_eligible"],
+                                   points=[point.id for point in before], wait=True)
+    else:
+        store.qdrant.set_payload(store.index, payload={"active": False, "current": False,
+                                                     "generation_eligible": False},
+                                points=[point.id for point in before], wait=True)
+    monkeypatch.setattr(store.embeddings, "embed_query", lambda _: pytest.fail("Lifecycle repair must reuse vectors"))
+    reopened = TechniqueStore(store.qdrant, store.embeddings,
+                              {"embedding_dimensions": 3, "embedding_model": "test"}, store.repository)
+    assert reopened.index == store.index
+    after, _ = store.qdrant.scroll(store.index, with_payload=True, with_vectors=True)
+    assert {point.id: (point.payload, point.vector) for point in after} == {
+        point.id: (point.payload, point.vector) for point in before
+    }
+    assert reopened.embedding_status()["embedding_documents"] == 0
+    assert store.repository.get(revision)["pending_sync"] == 0
+    monkeypatch.setattr(store.qdrant, "set_payload", lambda *_a, **_k: pytest.fail("Unexpected lifecycle write"))
+    monkeypatch.setattr(store.qdrant, "upsert", lambda *_a, **_k: pytest.fail("Unexpected indexing write"))
+    reopened.reconcile()
+    store.reconcile()
+
+
+@pytest.mark.parametrize("shared_pending", [False, True])
+def test_failed_index_payload_repair_retries_without_reembedding(store, markdown, monkeypatch, shared_pending):
+    revision = store.publish(TechniqueDocument(markdown()), "module:web:jwt.md", "module:web")
+    other = alternate_store(store)
+    store.repository.synchronize_module("module:web", {})
+    if not shared_pending:
+        other.reconcile()
+    original = store.qdrant.set_payload
+
+    def fail(collection_name, *args, **kwargs):
+        if collection_name == store.index:
+            raise RuntimeError("Index unavailable")
+        return original(collection_name, *args, **kwargs)
+
+    monkeypatch.setattr(store.embeddings, "embed_query", lambda _: pytest.fail("Repair must reuse vectors"))
+    monkeypatch.setattr(store.qdrant, "set_payload", fail)
+    with pytest.raises(RuntimeError, match="Index unavailable"):
+        store.reconcile()
+    assert bool(store.repository.get(revision)["pending_sync"]) is shared_pending
+    monkeypatch.setattr(store.qdrant, "set_payload", original)
+    store.reconcile()
+    assert not store.repository.get(revision)["pending_sync"]
+    point = store.qdrant.retrieve(store.index, ids=[revision])[0]
+    assert point.payload["current"] is point.payload["active"] is point.payload["generation_eligible"] is False
+    assert "module_removed" in store.qdrant.retrieve(DOCUMENTS, ids=[revision])[0].payload["document_markdown"]
+
+
+def test_missing_document_point_rebuild_retries_and_preserves_other_vectors(store, markdown, monkeypatch):
+    from unittest.mock import Mock
+
+    revision = store.publish(TechniqueDocument(markdown()), "lineage", "generated")
+    store.qdrant.delete(store.index, points_selector=[revision], wait=True)
+    embed = Mock(wraps=store.embeddings.embed_query)
+    monkeypatch.setattr(store.embeddings, "embed_query", embed)
+    upsert = store.qdrant.upsert
+    monkeypatch.setattr(store.qdrant, "upsert", Mock(side_effect=RuntimeError("Write failed")))
+    with pytest.raises(RuntimeError, match="Write failed"):
+        store.reconcile()
+    monkeypatch.setattr(store.qdrant, "upsert", upsert)
+    embed.reset_mock()
+    store.reconcile()
+    assert embed.call_count == 2  # One document and one trigger.
+    assert store.qdrant.retrieve(store.index, ids=[revision])
+    embed.reset_mock()
+    store.reconcile()
+    embed.assert_not_called()
+
+
+def test_shared_document_write_failure_remains_pending_after_successful_index_repair(store, markdown, monkeypatch):
+    from unittest.mock import Mock
+
+    revision = store.publish(TechniqueDocument(markdown()), "module:web:jwt.md", "module:web")
+    store.repository.synchronize_module("module:web", {})
+    original = store.qdrant.set_payload
+
+    def fail(collection_name, *args, **kwargs):
+        if collection_name == DOCUMENTS:
+            raise RuntimeError("Shared document unavailable")
+        return original(collection_name, *args, **kwargs)
+
+    monkeypatch.setattr(store.embeddings, "embed_query", lambda _: pytest.fail("Repair must reuse vectors"))
+    monkeypatch.setattr(store.qdrant, "set_payload", fail)
+    with pytest.raises(RuntimeError, match="Shared document unavailable"):
+        store.reconcile()
+    assert store.repository.get(revision)["pending_sync"]
+    assert store.qdrant.retrieve(store.index, ids=[revision])[0].payload["current"] is False
+    writes = Mock(wraps=original)
+    monkeypatch.setattr(store.qdrant, "set_payload", writes)
+    store.reconcile()
+    assert not store.repository.get(revision)["pending_sync"]
+    assert len(writes.call_args_list) == 1 and writes.call_args.args[0] == DOCUMENTS
+    writes.reset_mock()
+    store.reconcile()
+    writes.assert_not_called()
+
+
+def test_reconciliation_reads_index_payloads_in_batches_of_100(store, markdown, monkeypatch):
+    from unittest.mock import Mock
+
+    # Build a larger authoritative catalog without repeatedly reconciling during setup.
+    reconcile = store.reconcile
+    monkeypatch.setattr(store, "reconcile", lambda: None)
+    for number in range(205):
+        store.publish(TechniqueDocument(markdown(triggers=False)), f"lineage:{number}", "generated")
+    monkeypatch.setattr(store, "reconcile", reconcile)
+    retrieve = Mock(wraps=store.qdrant.retrieve)
+    monkeypatch.setattr(store.qdrant, "retrieve", retrieve)
+    store.reconcile()
+    calls = [call for call in retrieve.call_args_list if call.args[0] == store.index]
+    assert [len(call.kwargs["ids"]) for call in calls] == [100, 100, 5]
+    assert all(call.kwargs["with_payload"] for call in calls)
