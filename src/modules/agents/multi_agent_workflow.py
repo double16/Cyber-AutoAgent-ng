@@ -86,6 +86,7 @@ from modules.agents.hypothesis_review import (
     HypothesisReviewCorrection,
     repair_context,
     review_requires_changes,
+    sibling_context,
     validate_checkpoint,
     validate_review,
 )
@@ -379,6 +380,10 @@ TASK_PROMPT_CONTROLLER_SUPPLIED_TOOLS = frozenset({"record_task_acceptance"})
 
 class WorkflowInvariantError(RuntimeError):
     """Raised when the workflow cannot make valid state progress."""
+
+
+class EvaluatorFailure(dict):
+    """Controller-owned failure envelope, never a model-authored semantic review."""
 
 
 class TaskPromptBuildError(WorkflowInvariantError):
@@ -706,7 +711,7 @@ def _prompt_optional_headings(role: str) -> tuple[str, ...]:
         "task_evaluator": ("Task history", "Eligible Semantic Memories", "Task worker final context"),
         "phase_evaluator": ("Eligible Semantic Memories",),
     }.get(role, ("Task history", "Eligible Semantic Memories")), *(
-        () if role in _PROMPT_FITTING_ROLES else ("Retained inspection evidence",)
+        () if role in _PROMPT_FITTING_ROLES else ("Related hypothesis proposals", "Retained inspection evidence",)
     ))
 
 
@@ -6030,28 +6035,6 @@ class MultiAgentWorkflowController:
                         + HYPOTHESIS_SEMANTIC_GUIDANCE
                     )
                 corrections = hypothesis_correction_state(task) if production else {}
-                if corrections.get("pending"):
-                    refreshed = self._resolve_task_executor_base_tools(plan, task, prompt_spec)
-                    revision_tool = next(item for item in refreshed if get_tool_name(item) == "revise_hypothesis")
-                    tool_override = [item for item in (tool_override or tools) if get_tool_name(item) in {
-                        "record_task_acceptance", "read_inspection_result", "read_hypothesis_input",
-                        "get_inventory_item", "read_artifact", "search_artifact",
-                    }]
-                    tool_override.append(revision_tool)
-                    policy = replace(task_policy, checkpoint_tool_calls=0)
-                    prompt = (
-                        f"Assigned objective: {task.objective}\nCorrect only the supplied hypotheses. "
-                        "Use retained evidence; inspect only to resolve a concrete uncertainty. "
-                        "Inspect required missing inputs first when prerequisite gaps are supplied.\n"
-                        + HYPOTHESIS_SEMANTIC_GUIDANCE
-                        + self._hypothesis_repair_context(task)
-                        + "\n"
-                        + hypothesis_inspection_journal(
-                            task, self.runtime.operation_id, _operation_output_root(),
-                        ).replay_context(8000, lambda text: estimate_prompt_tokens(
-                            str(getattr(self.runtime.config, "model_id", "") or ""), extra_content=text,
-                        ))
-                    )
                 live_outcomes_reader = getattr(executor, "live_outcomes", None)
                 active_live_outcomes_reader = (
                     live_outcomes_reader if callable(live_outcomes_reader) else None
@@ -6062,13 +6045,21 @@ class MultiAgentWorkflowController:
 
                     prompt = recommendation_prompt(prompt, tool_override or tools)
                     prompt = execution_guidance_prompt(self.runtime, task, prompt, system_prompt, tool_override or tools)
-                    if production:
+                    if production and not corrections.get("pending"):
                         prompt = self._fit_hypothesis_replay(prompt, system_prompt, tool_override or tools)
                     with scoped_shell_command_validator(
                         lambda commands: self._validate_task_shell_commands(plan, task, commands)
                     ), (capture_inspections(hypothesis_inspection_journal(
                         task, self.runtime.operation_id, _operation_output_root(),
                     )) if production else nullcontext()):
+                        if corrections.get("pending"):
+                            return self._run_hypothesis_correction_batch(
+                                task, executor, task_policy, system_prompt,
+                                lambda current: [
+                                    *self._resolve_task_executor_base_tools(plan, current, prompt_spec),
+                                    *(item for item in tools if get_tool_name(item) == "record_task_acceptance"),
+                                ],
+                            )
                         publication_first = bool(
                             production and production["publication"] and production["missing_subject_ids"]
                             and not inspection_review
@@ -8701,6 +8692,103 @@ by the storage tool or listed above. Do not add criteria or broaden scope.
               "If observations support no safe testable hypothesis, publish no_testable_hypotheses "
               "with an evidence-based reason. Then record_task_acceptance; Python binds the complete output."
         )
+
+    def _run_hypothesis_correction_batch(
+        self, task: Task, executor: Any, policy: AgentRunPolicy, system_prompt: str,
+        build_tools: Callable[[Task], list[Any]],
+    ) -> TaskExecutorCycleResult:
+        """Spend the existing agent-call allowance on isolated edits, then acceptance."""
+        outcomes = []
+        result = TaskExecutorCycleResult(text="Correction allowance exhausted", outcomes=[])
+        for ordinal in range(policy.max_agent_calls):
+            task = next(item for item in self.state.list_tasks() if item.task_uid == task.task_uid)
+            corrections = hypothesis_correction_state(task)
+            pending = corrections.get("pending", {})
+            identifier = min(pending) if pending else None
+            allowed = {"read_inspection_result", "read_hypothesis_input", "get_inventory_item",
+                       "read_artifact", "search_artifact"}
+            terminal = "revise_hypothesis" if identifier else "record_task_acceptance"
+            allowed.add(terminal)
+            tools = [item for item in build_tools(task) if get_tool_name(item) in allowed]
+            if identifier:
+                review = task.recovery_context.get("hypothesis_review", {})
+                gaps = [gap for gap in review.get("prerequisite_gaps", [])
+                        if pending[identifier]["item_id"] in gap["item_ids"]]
+                if gaps:
+                    sources = prerequisite_input_sources(task, {
+                        reference for gap in gaps for reference in gap["source_refs"]
+                    })
+                    tools = [item for item in tools if get_tool_name(item) != "get_inventory_item"]
+                    tools.extend((
+                        build_hypothesis_input_reader(sources, max_inline_chars=self._artifact_router_max_chars()),
+                        create_inventory_item_reader(
+                            allowed_manifest_refs=task.acceptance.basis.source_refs,
+                            expected_manifest_digests=dict.fromkeys(
+                                task.acceptance.basis.source_refs, task.acceptance.basis.snapshot_hash,
+                            ), allowed_source_refs=sources, max_output_chars=self._artifact_router_max_chars(),
+                        ),
+                    ))
+                tools = [_bind_single_choice_tool(item, {"hypothesis_id": identifier}, required=True)
+                         if get_tool_name(item) == terminal else item for item in tools]
+                binding = hypothesis_binding(task)
+                publication = load_hypothesis_set(
+                    binding["artifact_ref"], task, self.runtime.operation_id, require_complete=False,
+                )
+                tools.append(build_read_hypotheses_tool(
+                    [(binding["artifact_ref"], task)], self.runtime.operation_id,
+                    {subject.item_id for subject in publication.subjects},
+                ))
+                focused = {**corrections, "pending": {identifier: pending[identifier]}}
+                prompt = (
+                    f"Assigned objective: {task.objective}\n"
+                    "Correct the single supplied hypothesis using retained evidence. "
+                    "The revision tool is bound to this record. Do not execute future tests.\n"
+                    "Inspect required missing inputs first when prerequisite gaps are supplied.\n"
+                    + HYPOTHESIS_SEMANTIC_GUIDANCE
+                    + self._hypothesis_identity_context(task)
+                    + "\nRead-only sibling context is optional during fitting. If omitted, use read_hypotheses "
+                      "for the current publication's subject IDs: "
+                    + json.dumps([subject.item_id for subject in publication.subjects])
+                    + ". The reader is scoped to this publication.\n"
+                    + sibling_context(publication, identifier)
+                    + repair_context({**review, "prerequisite_gaps": gaps}, binding["sha256"],
+                                     publication, focused, acceptance_ready=False)
+                    + "\n" + hypothesis_inspection_journal(
+                        task, self.runtime.operation_id, _operation_output_root(),
+                    ).replay_context(8000, lambda text: estimate_prompt_tokens(
+                        str(getattr(self.runtime.config, "model_id", "") or ""), extra_content=text,
+                    ))
+                )
+            else:
+                prompt = (
+                    "All requested individual corrections are saved. Record task acceptance using the "
+                    "current publication; Python attaches its provenance. Do not republish or execute tests.\n"
+                    + self._hypothesis_repair_context(task)
+                )
+            self._emit_workflow_event({
+                "type": "hypothesis_correction_dispatch", "task_uid": task.task_uid,
+                "hypothesis_id": identifier, "publication_sha256": hypothesis_binding(task).get("sha256"),
+                "attempt": ordinal + 1, "allowance": policy.max_agent_calls,
+            })
+            dispatch_policy = replace(
+                policy, max_agent_calls=1, checkpoint_tool_calls=0, required_tool_names={terminal},
+                terminal_after_required_tools=True, require_successful_required_tools=True,
+                terminal_check=None,
+                recovery_objective=("Correct the single supplied hypothesis" if identifier
+                                    else "Record acceptance for the corrected publication"),
+                recovery_next_action=f"Call {terminal} using the supplied record and retained evidence.",
+                recovery_allowed_tool_names={get_tool_name(item) for item in tools},
+            )
+            result = self._executor_cycle_result(executor(
+                self._fit_hypothesis_replay(prompt, system_prompt, tools), dispatch_policy, tools,
+            ))
+            outcomes.extend(result.outcomes)
+            latest = next(item for item in self.state.list_tasks() if item.task_uid == task.task_uid)
+            if identifier is None or identifier in hypothesis_correction_state(latest).get("pending", {}):
+                break
+            if result.max_tokens_exhausted or result.recovery_exhausted or result.repeat_loop_detected:
+                break
+        return replace(result, outcomes=outcomes)
 
     def _hypothesis_repair_context(self, task: Task) -> str:
         state = self._hypothesis_production_state(task)
@@ -13907,6 +13995,12 @@ applicability or a finding, and published proof of concepts must not be executed
         except PromptInputTooLarge as error:
             return WorkflowDecision(status="blocked", reason=f"evaluator_input_capacity: {error}")
         if self._is_hypothesis_producer(task):
+            if isinstance(data, EvaluatorFailure):
+                reason = data["reason"]
+                self.state.patch_task(task.task_uid, recovery_context_updates={
+                    "evaluator_output_failure": {"reason": reason, "operation_id": self.runtime.operation_id},
+                })
+                return WorkflowDecision(status="partial_failure", reason=reason, repair_kind="none")
             try:
                 validate_review(data, task, self.runtime.operation_id)
             except (OSError, TypeError, ValueError) as error:
@@ -17585,7 +17679,7 @@ Allowed evidence references:
         excerpt = str(last_response or "")[:1000]
         if role in {"phase_evaluator", "task_evaluator"} and last_failure_was_parse:
             fallback = self._evaluator_prose_fallback(last_response)
-            if fallback is not None:
+            if fallback is not None and canonical_output_model is not HypothesisTaskDecisionOutput:
                 event = {
                     "type": "evaluator_fallback",
                     "role": role,
@@ -17776,7 +17870,7 @@ criterion. Return the JSON decision immediately.
         }
         event.update(context or {})
         return {
-            "data": {"status": "partial_failure", "reason": reason, "instructions": ""},
+            "data": EvaluatorFailure(status="partial_failure", reason=reason, instructions=""),
             "event": event,
         }
 
@@ -17809,7 +17903,7 @@ criterion. Return the JSON decision immediately.
         }
         event.update(context or {})
         return {
-            "data": {"status": "partial_failure", "reason": reason, "instructions": ""},
+            "data": EvaluatorFailure(status="partial_failure", reason=reason, instructions=""),
             "event": event,
         }
 

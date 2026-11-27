@@ -27,7 +27,7 @@ class Hypothesis(BaseModel):
     authentication_requirement: AuthenticationRequirement = Field(
         description="Identity needs of this proposed future test, not of the generation task. An authenticated "
                     "single-session test declares one role even with comparison=none; unauthenticated tests "
-                    "use no roles. Account comparisons declare one shared role; role comparisons declare two "
+                    "use no roles. Empty roles means no named role restriction, including for authenticated comparisons. Account comparisons may declare one shared role; explicit role comparisons declare two "
                     "distinct roles; tenant comparisons declare their required roles. Declare future needs "
                     "even when sessions are not available.",
     )
@@ -53,8 +53,6 @@ class Hypothesis(BaseModel):
     @model_validator(mode="after")
     def validate_authentication(self) -> "Hypothesis":
         validate_comparison_requirement(self.authentication_requirement)
-        if self.authentication_requirement.comparison != "none" and not self.authentication_requirement.roles:
-            raise ValueError("comparison hypotheses require explicit roles")
         if self.authentication_requirement.comparison == "none" and len(self.authentication_requirement.roles) > 1:
             raise ValueError("single-session hypotheses allow at most one role")
         return self
@@ -248,7 +246,9 @@ def build_revise_hypothesis_tool(
     schema = {"json": {
         "type": "object", "properties": {
             "hypothesis_id": {"type": "string", "enum": sorted(initial.get("pending", {}))},
-            "replacement": {"anyOf": [replacement_schema, {"type": "null"}]},
+            "replacement": {"anyOf": [replacement_schema,
+                                       {"type": "array", "items": replacement_schema, "minItems": 1},
+                                       {"type": "null"}]},
             "reason": {"type": "string", "minLength": 1},
         }, "required": ["hypothesis_id", "replacement", "reason"], "additionalProperties": False,
         "$defs": definitions,
@@ -256,7 +256,7 @@ def build_revise_hypothesis_tool(
 
     mutation_lock = Lock()
 
-    def apply_revision(hypothesis_id: str, replacement: dict[str, Any] | None, reason: str) -> str:
+    def apply_revision(hypothesis_id: str, replacement: dict[str, Any] | list[dict[str, Any]] | None, reason: str) -> str:
         latest = current_task()
         binding = hypothesis_binding(latest)
         state = hypothesis_correction_state(latest)
@@ -271,12 +271,15 @@ def build_revise_hypothesis_tool(
         publication = load_hypothesis_set(binding["artifact_ref"], latest, operation_id, require_complete=False)
         subject = next(item for item in publication.subjects if item.item_id == target["item_id"])
         original = next(item for item in subject.hypotheses if item.hypothesis_id == hypothesis_id)
-        revised = Hypothesis.model_validate(replacement) if replacement is not None else None
-        if revised is not None and _correction_content(revised.model_dump()) == _correction_content(original.model_dump()):
+        values = replacement if isinstance(replacement, list) else [replacement] if replacement is not None else []
+        if isinstance(replacement, list) and not replacement:
+            raise ValueError("Use replacement=null to withdraw a hypothesis; a replacement list must not be empty")
+        revised = [Hypothesis.model_validate(value) for value in values]
+        if revised and all(_correction_content(item.model_dump()) == _correction_content(original.model_dump())
+                           for item in revised):
             raise ValueError(f"Hypothesis is unchanged. Resolve this concern or withdraw it: {target['reason']}")
         remaining = [item for item in subject.hypotheses if item.hypothesis_id != hypothesis_id]
-        if revised is not None:
-            remaining.append(revised)
+        remaining.extend(revised)
         corrected = SubjectHypotheses(
             item_id=subject.item_id, disposition="hypotheses_supplied" if remaining else "no_testable_hypotheses",
             reason="" if remaining else reason.strip(), hypotheses=remaining,
@@ -297,12 +300,22 @@ def build_revise_hypothesis_tool(
         return writer(subjects=[corrected.model_dump(mode="json")], mode="replace")
 
     @tool(name="revise_hypothesis", inputSchema=schema)
-    def revise_hypothesis(hypothesis_id: str, replacement: dict[str, Any] | None, reason: str) -> str:
-        """Resolve a review concern with a complete replacement, or replacement=null to withdraw it.
+    def revise_hypothesis(
+        hypothesis_id: str, replacement: dict[str, Any] | list[dict[str, Any]] | str | None, reason: str,
+    ) -> str:
+        """Replace one reviewed record with a complete hypothesis or a list of independent hypotheses.
 
-        Python preserves all other records. Changed content still requires semantic review.
+        Use replacement=null to withdraw it. Python preserves all other records.
+        Changed content still requires semantic review.
         Do not execute the proposed future tests.
         """
+        if isinstance(replacement, str):
+            try:
+                replacement = json.loads(replacement)
+            except json.JSONDecodeError as error:
+                raise ValueError("replacement must be an object or list, not malformed JSON") from error
+            if not isinstance(replacement, (dict, list)):
+                raise ValueError("Encoded replacement must contain an object or list; use explicit null to withdraw")
         with mutation_lock:
             return apply_revision(hypothesis_id, replacement, reason)
 

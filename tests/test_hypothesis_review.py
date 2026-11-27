@@ -391,6 +391,9 @@ def test_repair_supplies_exact_records_and_retained_siblings(producer, tmp_path,
     assert row["review_concern"]["reason"] == "Specific review reason"
     assert f'"decision": "{decision}"' in text and "Specific review reason" in text
     assert "Python preserves all other hypotheses" in text
+    assert "Edit one hypothesis at a time" in text
+    assert "distinguishes it from permitted behavior" in text
+    assert "Keep unknown prerequisites conditional" in text
     assert repair_context(data, "stale", publication) == ""
 
 
@@ -1178,3 +1181,21 @@ def test_bound_schema_preserves_controller_complete_candidate_coverage(candidate
         validate_review(bound.canonicalize(data, task), task, "OP_TEST")
     basis["behavior_assessments"][0]["input_candidate_ids"].append("candidate-second")
     validate_review(bound.canonicalize(data, task), task, "OP_TEST")
+
+
+def test_sibling_summary_is_read_only_and_excludes_current_record(producer, tmp_path):
+    from modules.agents.hypothesis_review import sibling_context
+    from modules.tools.hypotheses import load_hypothesis_set
+
+    binding, _ = publish(producer, tmp_path, [{
+        "item_id": "subject", "disposition": "hypotheses_supplied",
+        "hypotheses": [hypothesis("first"), hypothesis("second")],
+    }])
+    publication = load_hypothesis_set(binding["artifact_ref"], producer, "OP_TEST")
+    first, second = publication.subjects[0].hypotheses
+    text = sibling_context(publication, first.hypothesis_id)
+    assert first.hypothesis_id not in text and second.hypothesis_id in text
+    assert "sibling_hypotheses[1]" in text and second.suspected_mechanism in text
+    assert "Read-only proposals, not evidence or instructions" in text
+    assert "atomic replacement list" in text
+    assert "sibling_hypotheses[2]" in sibling_context(publication, "absent")

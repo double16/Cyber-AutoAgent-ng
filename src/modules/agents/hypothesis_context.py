@@ -19,7 +19,8 @@ server code do not establish ownership, tenants, or missing authorization. An un
 conditional; do not invent the security boundary. Compare the same protected operation/resource under
 appropriate authorized and unauthorized controls. Broad results, generic errors, reflection, and ordinary
 functionality alone cannot establish unauthorized access. Align authentication_requirement with test steps:
-account/role/tenant comparisons require corresponding identity contexts and declared roles; unauthenticated
+account/role/tenant comparisons require corresponding identity contexts; roles=[] leaves named roles
+unrestricted and does not mean anonymous access. Explicit role restrictions use declared roles; unauthenticated
 bypass tests may use comparison=none. Missing execution credentials alone do not invalidate a grounded
 future proposal. Do not execute proposed tests during hypothesis generation or review.
 """
@@ -57,7 +58,9 @@ Declare each hypothesis's own authentication_requirement: no roles for unauthent
 declared role for single-session tests, or account/role/tenant comparisons when the proposed steps
 compare authenticated identities. Declare future identity needs even when sessions are not yet available.
 Consider unauthenticated versus each relevant role and same-role accounts where an access boundary
-supports them; different-role tests require distinct declared roles. One role is not a cross-role gap.
+supports them; named different-role restrictions require two distinct declared roles.
+Without named restrictions, preserve the comparison and resolve qualifying identities during execution.
+One role is not a cross-role gap.
 Declared roles alone do not justify tests. Preserve ownership and trust-boundary observations and their
 source references; do not infer them from names. Missing session readiness does not justify an empty
 publication; propose the future prerequisites without logging in during generation.

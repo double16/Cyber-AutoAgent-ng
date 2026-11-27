@@ -1,0 +1,60 @@
+{
+  "id": "refutation",
+  "title": "Repair refutation proposal",
+  "url": "https://fixture.invalid/preview",
+  "source_ref": "artifact:refutation.txt",
+  "observation": "Current isolated fixture contract: POST /preview accepts JSON field url and intentionally fetches public URLs. Public callbacks are allowed. Private destinations are prohibited. Future tests may use only owned, authorized fixture public/private canaries. A private-probe success and the corresponding blocked private-probe outcome must address the same destination-policy consequence; public/invalid-URL controls alone do not refute private access. Evidence must differentiate server-side private retrieval from ordinary callbacks and transport errors. No target test has run; do not execute probes in this correction task.",
+  "objective": "Future destination-policy test has permitted public baseline, positive private access evidence and a matching negative private-probe outcome; no execution is required now. Use only retained current-operation fixture evidence; do not execute future tests.",
+  "criterion": "Future destination-policy test has permitted public baseline, positive private access evidence and a matching negative private-probe outcome; no execution is required now.",
+  "interaction": {
+    "interface": "http",
+    "operations": [
+      "POST"
+    ],
+    "operation_provenance": "observed",
+    "inputs": [
+      {
+        "name": "url",
+        "location": "body"
+      }
+    ]
+  },
+  "hypotheses": [
+    {
+      "authentication_requirement": {
+        "comparison": "none",
+        "roles": []
+      },
+      "observed_basis": "Current isolated fixture contract: POST /preview accepts JSON field url and intentionally fetches public URLs. Public callbacks are allowed. Private destinations are prohibited. Future tests may use only owned, authorized fixture public/private canaries. A private-probe success and the corresponding blocked private-probe outcome must address the same destination-policy consequence; public/invalid-URL controls alone do not refute private access. Evidence must differentiate server-side private retrieval from ordinary callbacks and transport errors. No target test has run; do not execute probes in this correction task.",
+      "preconditions": [
+        "Authorized isolated fixture with private canary reachable only from server network",
+        "Policy documentation confirms public URLs permitted and private network destinations prohibited",
+        "POST /preview fetches user-supplied URL server-side"
+      ],
+      "suspected_mechanism": "Server-side request forgery allowing retrieval from prohibited private network destinations via user-controlled URL in POST /preview",
+      "attacker_controlled_input": "URL parameter supplied in POST /preview request body",
+      "safe_test_steps": [
+        "Send POST /preview with URL pointing to owned public canary and record response",
+        "Send POST /preview with URL pointing to owned private canary in prohibited private range and record response",
+        "Compare private probe response to public canary control and to a no-op control"
+      ],
+      "positive_expectations": [
+        "Server returns content from private canary indicating server-side fetch succeeded from a prohibited private destination",
+        "Response contains private canary data not reachable from the client and differs from the public canary response"
+      ],
+      "negative_expectations": [
+        "Public canary request returns expected public content with no private data",
+        "Control request with no URL or invalid URL returns error without private retrieval"
+      ],
+      "required_evidence": [
+        "Saved response bodies for public canary probe and private canary probe",
+        "Evidence that private canary is only reachable from server network and that response originates from server-side fetch"
+      ],
+      "supporting_refs": [
+        "artifact:refutation.txt"
+      ],
+      "research_refs": []
+    }
+  ],
+  "advisory_seed_origin": "outputs/technique_review_trials/identity-corrections-replicated-20261125/permitted-fetch-candidate-1/result.json"
+}

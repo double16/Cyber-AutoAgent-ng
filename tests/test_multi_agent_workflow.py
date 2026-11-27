@@ -5304,6 +5304,23 @@ def test_task_evaluator_parse_failure_falls_back_to_partial_failure(response):
     assert event["task_uid"] == "parse-fallback"
 
 
+@pytest.mark.parametrize("response", ["not JSON", "Status Assessment: BLOCKED. Cannot complete."])
+def test_bound_hypothesis_review_never_uses_a_prose_conclusion(response):
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_JSON_RETRIES": 0}),
+        budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(_plan()),
+        text_runner=lambda *_args: response,
+    )
+    result = controller._run_json_text_agent(
+        "task_evaluator", "Review the frozen publication", [], "Review only",
+        canonical_output_model=workflow_mod.HypothesisTaskDecisionOutput,
+    )
+    assert isinstance(result, workflow_mod.EvaluatorFailure)
+    assert result["status"] == "partial_failure"
+    assert "bounded JSON retries" in result["reason"]
+    assert "publication_sha256" not in result
+
+
 def test_empty_task_evaluator_response_does_not_retry():
     plan = _plan()
     task = Task(task_uid="empty", title="Assess", objective="run", phase=1, status="active")
@@ -23741,6 +23758,9 @@ def test_hypothesis_evaluator_reviews_current_records_and_preserves_semantic_rep
     assert "comparison_assessment" not in capture[0]
     assert "closure/schema defect" not in capture[0]
     assert "Under test_discrimination" in capture[0]
+    assert "directly linked consumers" in capture[0]
+    assert "observed flow and remaining uncertainty" in capture[0]
+    assert "exhaustive source inspection is unnecessary" in capture[0]
     assert "What observation would distinguish that consequence" in capture[0]
     assert "not completed exploitation" in capture[0]
 
@@ -24387,6 +24407,12 @@ def test_complete_hypothesis_prompts_agree_on_publication_and_repair(worker_flow
 
     for prompt in prompts:
         assert prompt.count(SECURITY_INTERPRETATION) == 1
+        assert "observation of the same probe that would refute it" in prompt
+        assert "unrelated invalid-input control cannot substitute" in prompt
+        assert "mark test_discrimination\nrevise" in prompt
+        assert "no particular wording or field placement" in prompt
+        assert "A timeout, reset or I/O error alone is inconclusive about policy enforcement" in prompt
+        assert "do not label those failures policy-compliant denial" in prompt
         assert "counterexample_matches_check=false" not in prompt
         assert candidate_id in prompt
         assert "inventory_url" in prompt
@@ -24529,6 +24555,10 @@ def test_structured_hypothesis_review_reaches_real_actor_replacement(
 
     def actor(_role, prompt, tools, system, _policy):
         actors.append((prompt, system))
+        if "All requested individual corrections are saved" in prompt:
+            assert "record_task_acceptance" in controller._tool_names(tools)
+            assert not {"revise_hypothesis", "record_hypotheses"}.intersection(controller._tool_names(tools))
+            return workflow_mod.TaskExecutorCycleResult(text="Accepted", outcomes=[])
         if len(actors) == 1 and not continuation:
             writer = next(tool for tool in tools if workflow_mod.get_tool_name(tool) == "record_hypotheses")
             binding = json.loads(writer(subjects=[{
@@ -24576,7 +24606,7 @@ def test_structured_hypothesis_review_reaches_real_actor_replacement(
                     reader(source_ref="artifact:unrelated.txt")
             revise = next(tool for tool in tools if workflow_mod.get_tool_name(tool) == "revise_hypothesis")
             binding = json.loads(revise(
-                hypothesis_id=current["hypothesis_id"], replacement=None,
+                replacement=None,
                 reason="Frozen observations support no test that distinguishes unauthorized behavior",
             ))
         controller.state.acceptance_results[task.task_uid] = [AcceptanceResult(
@@ -24607,7 +24637,7 @@ def test_structured_hypothesis_review_reaches_real_actor_replacement(
     controller._run_task(_plan(), _plan().phases[0], task)
     updated = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
     assert updated.status == "done"
-    assert len(actors) == (1 if continuation else 2) and len(reviews) == 2
+    assert len(actors) == (2 if continuation else 3) and len(reviews) == 2
     assert reviews[0] != reviews[1]
 
 
@@ -24789,6 +24819,7 @@ def test_evaluator_fallback_distinguishes_contract_and_schema_failures(contract)
              else ValueError("Missing required field"))
     fallback = MultiAgentWorkflowController._evaluator_schema_fallback("task_evaluator", error, ["status"], {})
     assert fallback["event"]["source"] == ("review_contract_validation" if contract else "schema_validation")
+    assert isinstance(fallback["data"], workflow_mod.EvaluatorFailure)
     assert ("evidence or decision contract" if contract else "required decision schema") in fallback["data"]["reason"]
 
 
@@ -25351,8 +25382,9 @@ def test_candidate_links_correct_through_evaluator_retry(worker_flow_case, monke
     assert assessment["inspection_refs"] == [reference]
 
 
+@pytest.mark.parametrize("typed", [False, True])
 def test_invalid_hypothesis_evaluator_fallback_does_not_poison_publication(
-    worker_flow_case, monkeypatch,
+    worker_flow_case, monkeypatch, typed,
 ):
     controller, *_ = worker_flow_case
     task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
@@ -25360,11 +25392,15 @@ def test_invalid_hypothesis_evaluator_fallback_does_not_poison_publication(
     _publish_controller_hypotheses(controller, task)
     task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
     fallback = {"status": "partial_failure", "reason": "Evaluator contract exhausted", "instructions": ""}
+    if typed:
+        fallback = workflow_mod.EvaluatorFailure(fallback)
     monkeypatch.setattr(controller, "_run_json_text_agent", lambda *_args, **_kwargs: fallback)
     for _ in range(2):
         decision = controller._evaluate_task(_plan(), _plan().phases[0], task, acceptance_results=[])
         assert decision.status == "partial_failure"
         assert decision.repair_kind == "none"
+        if typed:
+            assert decision.reason == "Evaluator contract exhausted"
         task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
         assert "hypothesis_review" not in task.recovery_context
         assert "evaluator_output_failure" in task.recovery_context

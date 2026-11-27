@@ -1,0 +1,123 @@
+[
+  {
+    "comparison": {
+      "comparison": "account",
+      "roles": [
+        "member"
+      ]
+    },
+    "roles": [
+      "member",
+      "administrator"
+    ],
+    "sources": {},
+    "sibling": null,
+    "name": "authorization-named",
+    "subject": "https://fixture.test/records",
+    "objective": "Correct the proposed future two-account authorization comparison. Preserve comparison=account and compare the same protected record under two distinct same-role account sessions. Retain future credential prerequisites; do not replace this assignment with a single-session or anonymous test.",
+    "observation": "GET /records selects a record under an authenticated session. Policy permits only owners and explicit shared readers. The intended future experiment requires two distinct same-role test-account sessions A and B and their separately owned records. Establish each ownership and sharing state before comparing the same protected record under A and B. There are no currently qualifying execution credentials; provisioning and validation remain future execution prerequisites, not a reason to remove the comparison. The declared target-role catalog contains member and administrator. This comparison restricts both accounts to member; administrator is not a comparison side.",
+    "mechanism": "Account authorization bypass",
+    "positive": "Different records returned under two sessions prove bypass",
+    "required_inspection_refs": [],
+    "inline_refs": []
+  },
+  {
+    "comparison": {
+      "comparison": "account",
+      "roles": []
+    },
+    "roles": [],
+    "sources": {},
+    "sibling": null,
+    "name": "authorization-unnamed",
+    "subject": "https://fixture.test/records",
+    "objective": "Correct the proposed future two-account authorization comparison. Preserve comparison=account and compare the same protected record under two distinct same-role account sessions. Retain future credential prerequisites; do not replace this assignment with a single-session or anonymous test.",
+    "observation": "GET /records selects a record under an authenticated session. Policy permits only owners and explicit shared readers. The intended future experiment requires two distinct same-role test-account sessions A and B and their separately owned records. Establish each ownership and sharing state before comparing the same protected record under A and B. There are no currently qualifying execution credentials; provisioning and validation remain future execution prerequisites, not a reason to remove the comparison. No role names are declared for this target. Preserve roles=[] without inventing names. This leaves the two-account comparison unrestricted by a named role, not anonymous or single-session.",
+    "mechanism": "Account authorization bypass",
+    "positive": "Different records returned under two sessions prove bypass",
+    "required_inspection_refs": [],
+    "inline_refs": []
+  },
+  {
+    "comparison": {
+      "comparison": "none",
+      "roles": []
+    },
+    "roles": [],
+    "sources": {},
+    "sibling": {
+      "mechanism": "Private destination retrieval",
+      "positive": "A future controlled test must show server retrieval of a policy-prohibited destination"
+    },
+    "name": "rendering",
+    "subject": "https://fixture.test/render",
+    "objective": "Correct the instruction-override proposal while preserving independent, grounded mechanisms in the publication.",
+    "observation": "Recorded POST /render passes user_text to an LLM renderer with a documented URL retrieval capability. The retained configuration selects that renderer; enforcement is unresolved. Policy fixes a protected template header and footer: user text may fill only its content region and cannot change those sections. URL retrieval may reach public destinations only. No override or prohibited retrieval has been observed. Future checks must distinguish policy violations from literal user text and intended public retrieval.",
+    "mechanism": "Instruction override",
+    "positive": "A reflected marker proves instruction override",
+    "required_inspection_refs": [],
+    "inline_refs": []
+  },
+  {
+    "comparison": {
+      "comparison": "none",
+      "roles": []
+    },
+    "roles": [],
+    "sources": {},
+    "sibling": null,
+    "name": "permitted-fetch",
+    "subject": "https://fixture.test/preview",
+    "objective": "Correct the proposed destination-policy test using the documented distinction between permitted and prohibited retrieval.",
+    "observation": "POST /preview intentionally fetches user-supplied public URLs. Policy permits public callbacks and prohibits private network destinations. Public callbacks are normal operation. No private destination has been tested. Future probes may use only explicitly authorized, owned fixture canary endpoints; metadata services, arbitrary internal services and unrelated files are outside the fixture scope.",
+    "mechanism": "Server-side request boundary bypass",
+    "positive": "A public callback proves SSRF",
+    "required_inspection_refs": [],
+    "inline_refs": []
+  },
+  {
+    "comparison": {
+      "comparison": "none",
+      "roles": []
+    },
+    "roles": [],
+    "sources": {
+      "artifact:client.js": "import {mount} from './render.js';\nmount(new URL(location.href).searchParams.get('title'));\n",
+      "artifact:render.js": "export function mount(value){document.querySelector('#out').innerHTML=value;}\n"
+    },
+    "sibling": null,
+    "name": "linked-dom",
+    "subject": "https://fixture.test/view?title=value",
+    "objective": "Inspect the linked retained consumer and correct the proposed DOM test using its actual processing boundary.",
+    "observation": "The assigned route reads title from location.search in artifact:client.js and calls mount(title). client.js explicitly imports mount from render.js. The consumer source is retained and readable at artifact:render.js. Follow that exact canonical reference before closing this correction. Only the entry source is supplied inline here; no source read or future target test has been executed.",
+    "mechanism": "DOM injection",
+    "positive": "Reflection in a page proves script execution",
+    "required_inspection_refs": [
+      "artifact:render.js"
+    ],
+    "inline_refs": [
+      "artifact:client.js"
+    ]
+  },
+  {
+    "comparison": {
+      "comparison": "none",
+      "roles": []
+    },
+    "roles": [],
+    "sources": {
+      "artifact:resolver.py": "def load(root, filename):\n    trusted_root = root.resolve()\n    candidate = (trusted_root / filename).resolve()\n    candidate.relative_to(trusted_root)\n    return candidate.read_bytes()\n"
+    },
+    "sibling": null,
+    "name": "safe-filesystem",
+    "subject": "/fixture/import/manifest",
+    "objective": "Assess whether the proposed containment-escape mechanism is grounded in the complete supplied consumer; withdraw an unsupported premise rather than inventing an unobserved path. Any retained future tests must use owned fixture canary files only.",
+    "observation": "The import manifest accepts filename. The complete resolver source is supplied below at artifact:resolver.py. The trusted root is configured independently of filename. The filesystem is static during this fixture; the attacker controls filename only and has no write or concurrent mutation capability. Symlinks are resolved before the containment check; an outside path raises ValueError before any read. Intended behavior permits in-root reads. No bypass or other consumer is observed.",
+    "mechanism": "Filesystem containment escape",
+    "positive": "Reading an in-root file proves traversal",
+    "required_inspection_refs": [],
+    "inline_refs": [
+      "artifact:resolver.py"
+    ]
+  }
+]

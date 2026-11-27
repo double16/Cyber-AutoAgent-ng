@@ -65,10 +65,10 @@ from modules.agents.cyber_autoagent import (
 )
 from modules.agents.multi_agent_workflow import (
     MultiAgentWorkflowController,
-    TaskExecutorCycleResult,
     WorkflowInvariantError,
 )
 from modules.agents.run_policy import AgentRunPolicy
+from modules.agents.workflow_executor import workflow_executor_session as production_executor_session
 from modules.config.manager import get_config_manager
 from modules.config.models.factory import (  # noqa: F401
     configure_model_rate_limits,
@@ -2369,102 +2369,15 @@ def main():
 
             @contextmanager
             def workflow_executor_session(role: str, tools: list[Any], system_prompt: str):
-                agent = create_agent(
-                    target=args.target,
-                    objective=args.objective,
-                    config=config,
-                    runtime_resources=runtime_resources,
-                    system_prompt=system_prompt,
-                    tools=tools,
-                    name=f"Cyber-AutoAgent {operation_id} {role}",
-                    agent_type=role,
-                    include_tool_catalog=role != "task_creator",
-                )
-                try:
-                    callback = getattr(agent, "_cyber_callback_handler", None)
-                    recovery_hook = getattr(agent, "_cyber_failure_recovery_hook", None)
-                    journal = getattr(callback, "tool_outcome_journal", None)
-                    if role == "authentication_agent":
-                        recorder = getattr(agent, "_cyber_tool_outcome_recording_hook", None)
-                        if recorder is None or journal is None or recorder.journal is not journal:
-                            raise WorkflowInvariantError("Worker requires its agent's outcome recorder")
-
-
-                    def run_retained_executor(
-                        prompt: str,
-                        run_policy: AgentRunPolicy | None = None,
-                    ) -> TaskExecutorCycleResult:
-                        snapshot = journal.snapshot() if journal is not None else 0
-                        try:
-                            run_result, result_message = run_workflow_agent(agent, prompt, run_policy)
-                        except MaxTokensReachedException as error:
-                            sanitize_sdk_error(error)
-                            classification = getattr(error, "max_token_classification", None)
-                            kind = getattr(classification, "kind", "output_truncation")
-                            outcomes = journal.since(snapshot) if journal is not None else []
-                            role_label = "Task creator" if role == "task_creator" else "Task executor"
-                            return TaskExecutorCycleResult(
-                                text="",
-                                outcomes=outcomes,
-                                max_tokens_exhausted=True,
-                                max_tokens_classification=kind,
-                                max_token_efficiency_accounted=bool(
-                                    getattr(error, "_max_token_efficiency_recorded", False)
-                                ),
-                                max_tokens_reason=(
-                                    f"{role_label} repeated the same reasoning loop after its bounded recovery."
-                                    if kind == "reasoning_loop"
-                                    else f"{role_label} reached its output-token limit after its bounded recovery."
-                                ),
-                            )
-                        outcomes = journal.since(snapshot) if journal is not None else []
-                        repeat_loop = (
-                            run_result.details
-                            if run_result.reason == "repeated_tool_loop"
-                            else None
-                        )
-                        return TaskExecutorCycleResult(
-                            text=result_message,
-                            outcomes=outcomes,
-                            reason=run_result.reason,
-                            message=run_result.message,
-                            details=run_result.details,
-                            artifact_limit_exhausted=bool(
-                                getattr(getattr(agent, "_cyber_evaluator_artifact_read_limit_hook", None),
-                                        "exhausted", False)
-                            ),
-                            artifact_limit_events=tuple(
-                                getattr(getattr(agent, "_cyber_evaluator_artifact_read_limit_hook", None),
-                                        "limit_events", ())
-                            ),
-                            recovery_required=bool(recovery_hook and recovery_hook.unresolved),
-                            recovery_exhausted=bool(recovery_hook and recovery_hook.exhausted),
-                            recovery_guidance=_recovery_guidance_with_failed_command_help(
-                                recovery_hook,
-                                config.available_tools or [],
-                            ),
-                            repeat_loop_detected=isinstance(repeat_loop, dict),
-                            repeat_loop_signature=(
-                                str(repeat_loop.get("cycle_signature", ""))
-                                if isinstance(repeat_loop, dict)
-                                else ""
-                            ),
-                            repeat_loop_reason=(
-                                result_message
-                                if isinstance(repeat_loop, dict)
-                                else ""
-                            ),
-                        )
-
-                    run_retained_executor.live_outcomes = (
-                        lambda: journal.entries() if journal is not None else []
-                    )
-                    yield run_retained_executor
-                finally:
-                    try:
-                        agent.cleanup()
-                    except Exception as error:
-                        logger.warning("Unable to clean up role agent %s: %s", role, error)
+                with production_executor_session(
+                    runtime=runtime_resources, role=role, tools=tools, system_prompt=system_prompt,
+                    config=config, target=args.target, objective=args.objective, operation_id=operation_id,
+                    create_agent=create_agent, invoke=run_workflow_agent,
+                    recovery_guidance=lambda hook: _recovery_guidance_with_failed_command_help(
+                        hook, config.available_tools or [],
+                    ), logger=logger,
+                ) as runner:
+                    yield runner
 
             workflow = MultiAgentWorkflowController(
                 runtime=runtime_resources,
