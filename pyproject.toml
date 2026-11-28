@@ -30,8 +30,7 @@ classifiers = [
 requires-python = ">=3.12,<3.15"
 dependencies = [
     "cryptography~=48.0.1",
-    "strands-agents[ollama,otel,litellm]~=1.54.0",
-    "strands-agents-tools>=0.8.3,<0.10.0",
+    "strands-agents[ollama,otel,litellm]>=1.68.0,<2",
     "qdrant-client==1.20.0",
     "google-genai~=1.71.0",
     "litellm>=1.92,<1.111",

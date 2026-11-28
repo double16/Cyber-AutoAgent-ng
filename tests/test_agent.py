@@ -54,20 +54,6 @@ def isolate_technique_bootstrap(monkeypatch):
     monkeypatch.setattr("modules.techniques.bootstrap.operation_techniques", lambda *args, **kwargs: service)
 
 
-@pytest.mark.asyncio
-async def test_tavily_web_search_provider_adapts_wrapper_arguments(monkeypatch):
-    calls = []
-
-    async def fake_tavily_search(**kwargs):
-        calls.append(kwargs)
-        return {"status": "success"}
-
-    monkeypatch.setattr(cyber_agent_module, "tavily_search", fake_tavily_search)
-
-    assert await cyber_agent_module._tavily_web_search_provider("CVE remediation", 50) == {"status": "success"}
-    assert calls == [{"query": "CVE remediation", "max_results": 20}]
-
-
 class TestModelConfigs:
     """Test model configuration functions"""
 
@@ -1135,6 +1121,11 @@ def test_create_agent_runtime_resources_builds_integrated_runtime_with_module_fa
     assert "MODULE EXECUTION GUIDANCE" in runtime.system_prompt
     assert runtime.tool_executor == "executor"
     assert runtime.optional_tools_list
+    from modules.handlers.utils import get_tool_name
+
+    names = {get_tool_name(item) for item in [*runtime.tools_list, *runtime.optional_tools_list]}
+    assert not names & {"environment", "load_tool", "tavily_search"}
+    assert "load_tool(" not in runtime.system_prompt
 
 
 def test_create_agent_runtime_resources_handles_degraded_integrations(monkeypatch, tmp_path):

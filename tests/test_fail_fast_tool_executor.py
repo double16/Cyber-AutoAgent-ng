@@ -35,7 +35,7 @@ def _collect(executor: FailFastSequentialToolExecutor, tool_uses: list[dict[str,
 def test_fail_fast_executor_runs_successful_tool_batch_in_order(monkeypatch):
     calls = []
 
-    async def stream_with_trace(_agent, tool_use, tool_results, *_args) -> AsyncGenerator[Any, None]:
+    async def stream_with_trace(_agent, tool_use, tool_results, *_args, **_kwargs) -> AsyncGenerator[Any, None]:
         calls.append(tool_use["toolUseId"])
         result = {"toolUseId": tool_use["toolUseId"], "status": "success", "content": []}
         tool_results.append(result)
@@ -53,7 +53,7 @@ def test_fail_fast_executor_runs_successful_tool_batch_in_order(monkeypatch):
 def test_fail_fast_executor_skips_remaining_tools_after_error_result(monkeypatch):
     calls = []
 
-    async def stream_with_trace(_agent, tool_use, tool_results, *_args) -> AsyncGenerator[Any, None]:
+    async def stream_with_trace(_agent, tool_use, tool_results, *_args, **_kwargs) -> AsyncGenerator[Any, None]:
         calls.append(tool_use["toolUseId"])
         result = {"toolUseId": tool_use["toolUseId"], "status": "error", "content": []}
         tool_results.append(result)
@@ -76,7 +76,7 @@ def test_task_executor_strategy_runs_next_tool_after_error(monkeypatch):
     calls = []
     results = []
 
-    async def stream_with_trace(_agent, tool_use, tool_results, *_args) -> AsyncGenerator[Any, None]:
+    async def stream_with_trace(_agent, tool_use, tool_results, *_args, **_kwargs) -> AsyncGenerator[Any, None]:
         calls.append(tool_use["toolUseId"])
         result = {
             "toolUseId": tool_use["toolUseId"],
@@ -105,7 +105,7 @@ def test_task_executor_strategy_runs_next_tool_after_error(monkeypatch):
 def test_fail_fast_executor_skips_remaining_tools_after_exception_result(monkeypatch):
     calls = []
 
-    async def stream_with_trace(_agent, tool_use, tool_results, *_args) -> AsyncGenerator[Any, None]:
+    async def stream_with_trace(_agent, tool_use, tool_results, *_args, **_kwargs) -> AsyncGenerator[Any, None]:
         calls.append(tool_use["toolUseId"])
         result = {"toolUseId": tool_use["toolUseId"], "status": "success", "content": []}
         tool_results.append(result)
@@ -122,7 +122,7 @@ def test_fail_fast_executor_skips_remaining_tools_after_exception_result(monkeyp
 def test_fail_fast_executor_stops_after_interrupt_without_running_remaining_tools(monkeypatch):
     calls = []
 
-    async def stream_with_trace(_agent, tool_use, _tool_results, *_args) -> AsyncGenerator[Any, None]:
+    async def stream_with_trace(_agent, tool_use, _tool_results, *_args, **_kwargs) -> AsyncGenerator[Any, None]:
         calls.append(tool_use["toolUseId"])
         yield ToolInterruptEvent(tool_use, [])
 
@@ -133,3 +133,22 @@ def test_fail_fast_executor_stops_after_interrupt_without_running_remaining_tool
     assert calls == ["interrupted"]
     assert len(events) == 1
     assert results == []
+
+
+def test_fail_fast_executor_forwards_sdk_invocation_context(monkeypatch):
+    context = object()
+
+    async def stream_with_trace(_agent, tool_use, tool_results, *_args, invocation_context=None):
+        assert invocation_context is context
+        result = {"toolUseId": tool_use["toolUseId"], "status": "success", "content": []}
+        tool_results.append(result)
+        yield ToolResultEvent(result)
+
+    monkeypatch.setattr(ToolExecutor, "_stream_with_trace", staticmethod(stream_with_trace))
+
+    async def collect():
+        return [event async for event in FailFastSequentialToolExecutor()._execute(
+            object(), [_tool_use("one")], [], None, None, {}, invocation_context=context,
+        )]
+
+    assert asyncio.run(collect())[0].tool_result["status"] == "success"

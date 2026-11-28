@@ -19,6 +19,8 @@
 
 ### Fixes
 
+- Migrate built-in tools to the current Strands SDK, preserving HTTP execution receipts in
+  fresh Python interpreters and retaining HTTP error-response bodies. Remove Tavily, the legacy environment tool, and dynamic tool loading.
 - Streamline the forensics skill around current technique interpretation rules; move detailed technique lifecycle and calibration references into linked research documentation.
 - Allocate generation tokens from each complete request across workflow, executor, report, summary, and
   evaluation calls. Preserve complete-answer space, honor explicit output caps, and isolate retry adjustments

@@ -2614,7 +2614,7 @@ class CyberAgentEvaluator:
             "Gaps: No authenticated endpoints tested.\n\n"
             "Example 2:\n"
             "Objective: Validate core tool functionality against https://target.tld.\n"
-            "Methods: shell (ping, nslookup), http_request (GET /, metrics), python_repl (parse HTML), editor/load_tool (custom tool), memory store.\n"
+            "Methods: shell (ping, nslookup), http_request (GET /, metrics), python_repl (parse HTML), editor (artifact files), memory store.\n"
             "Evidence: shell ping: rtt avg ~45ms; http_request 200 OK (nginx), bytes_received ~5KB; python_repl extracted 1 form and 5 links; custom tool summary.\n"
             "Findings: Tooling verified; no new vulnerabilities validated this session.\n"
             "Outcomes: Objective achieved (tool testing complete).\n"

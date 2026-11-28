@@ -77,7 +77,7 @@ def test_pruning_conversation_manager_falls_back_to_summary(monkeypatch):
 
     summary_message = _make_message("summary")
 
-    def _fake_generate_summary(messages, _agent):
+    def _fake_generate_summary(messages, _agent, invocation_context=None):
         # Should summarize messages not in preservation zone
         return summary_message
 
@@ -269,3 +269,18 @@ def test_preserve_recent_messages_scaling():
     assert manager.preserve_recent_messages == 4
     manager = MappingConversationManager(window_size=5)
     assert manager.preserve_recent_messages == 1
+
+
+def test_summary_forwards_sdk_invocation_context(monkeypatch):
+    from unittest.mock import Mock
+
+    from strands.agent.conversation_manager import SummarizingConversationManager
+
+    from modules.handlers.conversation_budget import MappingConversationManager
+
+    summarize = Mock()
+    monkeypatch.setattr(SummarizingConversationManager, "_summarize_oldest", summarize)
+    manager = MappingConversationManager()
+    agent, context = object(), object()
+    manager._summarize_oldest(agent, context)
+    summarize.assert_called_once_with(agent, context)

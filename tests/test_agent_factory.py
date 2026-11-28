@@ -169,12 +169,13 @@ def test_agent_factory_sets_load_tools_from_directory_default(monkeypatch):
 
     agent = make_agent("sub", tools=[])
 
-    assert agent._init_kwargs["load_tools_from_directory"] is True
+    assert agent._init_kwargs["load_tools_from_directory"] is False
     # ToolUseIdHook should have been appended if not present
     assert any(isinstance(h, ToolUseIdHook) for h in agent._init_kwargs["hooks"])
 
 
-def test_agent_factory_respects_existing_load_tools_from_directory(monkeypatch):
+@pytest.mark.parametrize("stateful", [True, False])
+def test_agent_factory_disables_requested_directory_loading(monkeypatch, stateful):
     install_fake_tooluseidhook(monkeypatch)
     fake_cm = FakeConfigManager(provider="bedrock")
 
@@ -188,7 +189,8 @@ def test_agent_factory_respects_existing_load_tools_from_directory(monkeypatch):
     cfg = factory.AgentFactoryConfig()
     make_agent = factory.init_agent_factory(cfg)
 
-    agent = make_agent("sub", load_tools_from_directory=False)
+    monkeypatch.setattr(factory, "model_uses_server_side_state", lambda model: stateful)
+    agent = make_agent("sub", load_tools_from_directory=True)
     assert agent._init_kwargs["load_tools_from_directory"] is False
 
 

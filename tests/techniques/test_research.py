@@ -124,7 +124,7 @@ def test_search_dictionary_results_without_valid_url_are_not_fetchable():
         "{'results': [{'url': 'https://vendor.example/doc', 'title': 'Source'}], 'ok': True}",
     ],
 )
-def test_tavily_strands_envelopes_are_normalized(serialized):
+def test_injected_provider_envelopes_are_normalized(serialized):
     async def search_tool(**kwargs):
         return {"status": "success", "content": [{"text": serialized}]}
 
@@ -157,10 +157,15 @@ def test_standalone_research_uses_configured_search_provider_and_shared_qdrant_c
     assert cache.lookup("JWT validation guidance", 1) == result
     monkeypatch.setenv("TAVILY_API_KEY", "synthetic")
     provider = AsyncMock(return_value=result)
-    monkeypatch.setattr("strands_tools.tavily.tavily_search", provider)
+    from modules.tools.web_search import create_web_search_tool
+
+    monkeypatch.setattr(
+        "modules.techniques.research.create_web_search_tool",
+        lambda **kwargs: create_web_search_tool(search_provider=provider, **kwargs),
+    )
     search = default_search_tool()
     assert asyncio.run(search(query="Generic validation guidance", limit=25)) == result
-    provider.assert_awaited_once_with(query="Generic validation guidance", max_results=20)
+    provider.assert_awaited_once_with("Generic validation guidance", 25)
 
 
 def test_tls_failure_stops_further_research_and_surfaces_actionable_error():
@@ -334,3 +339,15 @@ def test_fetch_falls_back_when_article_extractor_rejects_input(monkeypatch):
     result = fetch_document("https://example.org/article")
     assert result["text"] == "Readable fallback"
     assert result["extraction_method"] == "whole_page"
+
+
+def test_default_search_ignores_legacy_tavily_configuration(monkeypatch):
+    from unittest.mock import Mock
+
+    from modules.techniques.research import default_search_tool
+
+    monkeypatch.setenv("TAVILY_API_KEY", "unused")
+    factory = Mock()
+    monkeypatch.setattr("modules.techniques.research.create_web_search_tool", factory)
+    assert default_search_tool() is factory.return_value
+    factory.assert_called_once_with()
