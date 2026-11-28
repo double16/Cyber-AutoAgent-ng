@@ -1,7 +1,6 @@
 """Bounded web research with separately fetched, attributable source documents."""
 
 import ast
-import os
 import re
 import ssl
 from datetime import UTC, datetime
@@ -17,14 +16,7 @@ from modules.tools.web_search import SemanticWebSearchCache, create_web_search_t
 
 
 def default_search_tool(backend: Any = None):
-    async def tavily_provider(query: str, limit: int):
-        from strands_tools.tavily import tavily_search
-
-        return await tavily_search(query=query, max_results=min(limit, 20))
-
     kwargs = {"cache": SemanticWebSearchCache(backend)} if backend is not None else {}
-    if os.getenv("TAVILY_API_KEY"):
-        kwargs["search_provider"] = tavily_provider
     return create_web_search_tool(**kwargs)
 
 
@@ -142,7 +134,7 @@ class WebResearch:
             counts["search"] += 1
             queries.append(query)
             result = await self.search_tool(query=query, limit=6)
-            # Tavily's Strands adapter returns a tool-result envelope containing Python repr data.
+            # Normalize injected search providers that return serialized tool-result envelopes.
             if isinstance(result, dict) and "content" in result and "results" not in result:
                 from modules.utils.json_repair import parse_json_response
 

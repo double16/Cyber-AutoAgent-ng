@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from typing import Any
 
+from strands.agent.invocation_context import InvocationContext
 from strands.tools.executors._executor import ToolExecutor
 from strands.types._events import ToolInterruptEvent, ToolResultEvent
 from strands.types.tools import ToolResult, ToolUse
@@ -32,6 +33,7 @@ class FailFastSequentialToolExecutor(ToolExecutor):
         cycle_span: Any,
         invocation_state: dict[str, Any],
         structured_output_context: Any = None,
+        invocation_context: InvocationContext | None = None,
     ) -> AsyncGenerator[Any, None]:
         for index, tool_use in enumerate(tool_uses):
             failed = False
@@ -43,6 +45,7 @@ class FailFastSequentialToolExecutor(ToolExecutor):
                 cycle_span,
                 invocation_state,
                 structured_output_context,
+                invocation_context=invocation_context,
             ):
                 yield event
                 if isinstance(event, ToolInterruptEvent):

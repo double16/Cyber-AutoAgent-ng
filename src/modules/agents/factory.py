@@ -169,8 +169,7 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
         agent_type = agent_type or name
 
         kwargs = kwargs.copy()
-        if "load_tools_from_directory" not in kwargs:
-            kwargs["load_tools_from_directory"] = True
+        kwargs["load_tools_from_directory"] = False
 
         # Configure model provider
         provider = config_manager.get_provider()

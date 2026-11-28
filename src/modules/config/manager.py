@@ -595,7 +595,7 @@ class ConfigManager:
         Creates operation-specific directories using configured base_dir:
         - root: outputs/<target>/<operation_id>/
         - artifacts: outputs/<target>/<operation_id>/artifacts/
-        - tools: outputs/<target>/<operation_id>/tools/ (for editor+load_tool meta-tooling)
+        - tools: outputs/<target>/<operation_id>/tools/ (legacy operation workspace)
 
         Safe to call multiple times.
 

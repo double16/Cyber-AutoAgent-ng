@@ -1,91 +1,99 @@
-"""Python REPL adapter that records completed HTTP calls for task receipts."""
+"""SDK Python execution with task-local, completed HTTP call receipts."""
 
-from __future__ import annotations
-
-import functools
+import inspect
 import json
-import threading
-from collections.abc import Callable
+import uuid
 from typing import Any
-from urllib.request import Request
 
-from strands_tools import python_repl as _python_repl
+from strands import tool
+from strands.types.tools import ToolContext
+from strands.vended_tools import make_python_repl
 
-TOOL_SPEC = _python_repl.TOOL_SPEC
 _RECEIPT_MARKER = "__CYBER_EXECUTION_RECEIPT__"
-_PATCH_LOCK = threading.RLock()
 
 
-def _request_url(value: Any) -> str:
-    if isinstance(value, Request):
-        return str(value.full_url)
-    return str(getattr(value, "url", value) or "")
+def _run_instrumented(code: str, marker: str) -> None:
+    """Run inside the child interpreter; emit receipts only after successful execution."""
+    import functools
+    import importlib
+    import json
+    from urllib.request import Request
 
+    receipts = []
+    patches = []
 
-def _append_receipts(result: Any, receipts: list[str]) -> Any:
-    if not receipts or not isinstance(result, dict):
-        return result
-    content = result.get("content")
-    if not isinstance(content, list) or not content:
-        return result
-    first = content[0]
-    if not isinstance(first, dict):
-        return result
-    payload = {
-        "subjects": list(dict.fromkeys(receipts)),
-        "request_count": len(receipts),
-        "collection": len(set(receipts)) >= 2,
-    }
-    first["text"] = str(first.get("text") or "") + "\n" + _RECEIPT_MARKER + json.dumps(payload, sort_keys=True)
-    return result
+    def wrap(callback, index):
+        @functools.wraps(callback)
+        def request(*args, **kwargs):
+            response = callback(*args, **kwargs)
+            value = kwargs.get("url", kwargs.get("fullurl", args[index] if len(args) > index else ""))
+            url = str(value.full_url if isinstance(value, Request) else value)
+            if url.startswith(("http://", "https://")):
+                receipts.append(url)
+            return response
 
+        return request
 
-def _with_http_receipts(
-    callback: Callable[..., Any], receipts: list[str], positional_url_index: int
-) -> Callable[..., Any]:
-    @functools.wraps(callback)
-    def wrapped(*args: Any, **kwargs: Any) -> Any:
-        response = callback(*args, **kwargs)
-        url = kwargs.get("url")
-        if url is None and len(args) > positional_url_index:
-            url = args[positional_url_index]
-        normalized = _request_url(url)
-        if normalized.startswith(("http://", "https://")):
-            receipts.append(normalized)
-        return response
-
-    return wrapped
-
-
-def python_repl(tool: Any, **kwargs: Any) -> Any:
-    """Run the standard REPL while emitting runtime HTTP provenance on success."""
-
-    receipts: list[str] = []
-    with _PATCH_LOCK:
-        import urllib.request
-
-        original_open = urllib.request.OpenerDirector.open
-        urllib.request.OpenerDirector.open = _with_http_receipts(original_open, receipts, 1)
-        patches: list[tuple[Any, str, Any]] = [(urllib.request.OpenerDirector, "open", original_open)]
+    for module_name, class_name, method, index in (
+        ("urllib.request", "OpenerDirector", "open", 1),
+        ("requests.sessions", "Session", "request", 2),
+        ("httpx", "Client", "request", 2),
+    ):
         try:
-            try:
-                import requests.sessions
+            owner = getattr(importlib.import_module(module_name), class_name)
+        except ImportError:
+            continue
+        original = getattr(owner, method)
+        patches.append((owner, method, original))
+        setattr(owner, method, wrap(original, index))
+    try:
+        exec(compile(code, "<python_repl>", "exec"), {"__name__": "__main__"})
+        if receipts:
+            print("\n" + marker + json.dumps(receipts))
+    finally:
+        for owner, method, original in reversed(patches):
+            setattr(owner, method, original)
 
-                original_request = requests.sessions.Session.request
-                requests.sessions.Session.request = _with_http_receipts(original_request, receipts, 2)
-                patches.append((requests.sessions.Session, "request", original_request))
-            except ImportError:
-                pass
-            try:
-                import httpx
 
-                original_request = httpx.Client.request
-                httpx.Client.request = _with_http_receipts(original_request, receipts, 2)
-                patches.append((httpx.Client, "request", original_request))
-            except ImportError:
-                pass
-            result = _python_repl.python_repl(tool, **kwargs)
-        finally:
-            for owner, attribute, original in reversed(patches):
-                setattr(owner, attribute, original)
-    return _append_receipts(result, receipts)
+class _ReceiptSandbox:
+    """Delegate SDK execution after adding child-process HTTP instrumentation."""
+
+    def __init__(self, sandbox: Any, marker: str) -> None:
+        self.sandbox = sandbox
+        self.marker = marker
+
+    async def execute_code(self, code: str, language: str, *, timeout: int, cancel_signal: Any = None):
+        source = inspect.getsource(_run_instrumented)
+        instrumented = f"{source}\n_run_instrumented({code!r}, {self.marker!r})\n"
+        return await self.sandbox.execute_code(instrumented, language, timeout=timeout, cancel_signal=cancel_signal)
+
+
+@tool(context="tool_context")
+async def python_repl(code: str, tool_context: ToolContext, timeout: int = 120) -> dict[str, Any]:
+    """Run Python in a fresh interpreter and record completed HTTP requests.
+
+    Files persist between calls; variables and imports do not. Timeout must be positive.
+    """
+    marker = f"__CYBER_HTTP_{uuid.uuid4().hex}__"
+    runner = make_python_repl(sandbox=_ReceiptSandbox(tool_context.agent.sandbox, marker))
+    result = await runner(code=code, tool_context=tool_context, timeout=timeout)
+    receipts = []
+    output = []
+    for line in result["output"].splitlines(keepends=True):
+        if line.startswith(marker):
+            receipts.extend(json.loads(line[len(marker) :]))
+        else:
+            output.append(line)
+    result["output"] = "".join(output)
+    text = json.dumps(result)
+    if result["exit_code"] == 0 and receipts:
+        payload = {
+            "subjects": list(dict.fromkeys(receipts)),
+            "request_count": len(receipts),
+            "collection": len(set(receipts)) >= 2,
+        }
+        text += "\n" + _RECEIPT_MARKER + json.dumps(payload, sort_keys=True)
+    return {
+        "status": "success" if result["exit_code"] == 0 else "error",
+        "content": [{"text": text}],
+    }

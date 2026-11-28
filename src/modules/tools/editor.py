@@ -1,65 +1,48 @@
-"""Compatibility wrapper for the Strands editor tool."""
+"""Resolve operation-relative paths for the SDK file editor."""
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from strands import tool
+from strands.types.tools import ToolContext
 
 
 def create_absolute_path_editor(
-    editor_tool: Callable[..., dict[str, Any]],
+    editor_tool: Callable[..., Any],
     *,
     current_directory: Callable[[], Path] = Path.cwd,
 ) -> Any:
-    """Wrap an editor tool so its ``path`` input is always absolute.
+    """Expose supported SDK editor commands with operation-relative path resolution."""
 
-    The Strands editor rejects relative paths.  Resolving them here lets agents use
-    the process working directory without needing a corrective tool call.  This is
-    intentionally not limited to an operation output directory: editor is also used
-    for module tooling and other non-artifact files.
-    """
-
-    wrapped_description = str(editor_tool.tool_spec["description"])
-
-    @tool(name="editor")
-    def absolute_path_editor(
-        command: str,
+    @tool(name="editor", context="tool_context")
+    async def absolute_path_editor(
+        command: Literal["view", "create", "str_replace", "insert"],
         path: str,
+        tool_context: ToolContext,
         file_text: str | None = None,
-        insert_line: str | int | None = None,
+        insert_line: int | None = None,
         new_str: str | None = None,
         old_str: str | None = None,
-        pattern: str | None = None,
-        search_text: str | None = None,
-        fuzzy: bool = False,
         view_range: list[int] | None = None,
-    ) -> dict[str, Any]:
-        """Edit a file or directory, resolving relative paths from the current directory.
+    ) -> Any:
+        """View, create, replace a unique string, or insert text in a file.
 
-        Relative paths and user-relative paths (``~/...``) are accepted.  The path
-        passed to the underlying editor is always absolute.
+        Accept absolute, operation-relative, and user-relative paths.
         """
-
         resolved_path = Path(path).expanduser()
         if not resolved_path.is_absolute():
             resolved_path = current_directory() / resolved_path
-        return editor_tool(
+        return await editor_tool(
             command=command,
             path=str(resolved_path.resolve()),
+            tool_context=tool_context,
             file_text=file_text,
             insert_line=insert_line,
             new_str=new_str,
             old_str=old_str,
-            pattern=pattern,
-            search_text=search_text,
-            fuzzy=fuzzy,
             view_range=view_range,
         )
 
     absolute_path_editor.__name__ = "editor"
-    absolute_path_editor.tool_spec["description"] = (
-        f"{wrapped_description}\n\n"
-        "Relative paths are resolved from the current working directory before the editor is invoked."
-    )
     return absolute_path_editor

@@ -182,7 +182,6 @@ The compose stack automatically provides:
 - **Evidence Collection**: Stores observations and knowledge separately and verifies every finding in its own task
 - **Evidence-Grounded Taxonomy**: Seeds CWE candidates from vulnerability terminology, then enriches confirmed findings
   with ATT&CK mappings after terminal workflow evidence is available
-- **Meta-Tool Creation**: Dynamically creates custom exploitation tools when needed
 - **Adaptive Execution**: Metacognitive assessment guides strategy based on confidence levels
 - **Assessment Reporting**: Generates comprehensive reports with findings, remediation, and a discovered
   attack-surface summary grounded in current-operation records
@@ -301,7 +300,7 @@ flowchart TD
 
     B --> |Basic Task| C[Shell Commands]
     B --> |Security Task| D[Cyber Tools via Shell]
-    B --> |Complex Task| E[Create Meta-Tool]
+    B --> |Complex Task| E[Write PoC Script]
     B --> |Parallel Task| P[Swarm Orchestration]
 
     C --> F[Reflect: Evaluate Results]
@@ -339,7 +338,8 @@ At the core of Cyber-AutoAgent is a Python-owned workflow that creates focused a
 
 - **Role Agents**: Short-lived agents work on defined planning, execution, and evaluation objectives
 - **Swarm Capability**: The swarm tool can deploy dynamic agents for complex subtasks
-- **Meta-Tooling**: Through the editor and load_tool capabilities, the agent can create, modify, and deploy new tools at runtime to address novel challenges
+- **Artifact Scripts**: The editor and Python execution tools support task-specific scripts and evidence artifacts.
+  Generated files are not loaded as agent tools.
 - **Meta-Learning**: Continuous memory storage and retrieval enables cross-session learning, building expertise over time
 - **Meta-Cognition**: Self-reflection and confidence assessment drives strategic decisions about tool selection and approach
 
@@ -355,14 +355,14 @@ This architecture keeps phase/task state deterministic in Python while preservin
   - Specialized security tools for known vulnerabilities (sqlmap, nikto, nmap)
   - Swarm deployment when multiple approaches needed (with memory access)
   - Parallel shell for rapid reconnaissance (up to 7 commands)
-  - Meta-tool creation only when no existing tool suffices
+  - Task-specific scripts only when no existing tool suffices
 - **Learn & Store**: Store findings with category="finding" for memory persistence
 
 **Tool Selection Hierarchy (Confidence-Based):**
 1. Specialized cyber tools (sqlmap, nikto, metasploit) - when vulnerability type is known
 2. Swarm deployment - when confidence <70% or need multiple perspectives (includes memory)
 3. Parallel shell execution - for rapid multi-command reconnaissance
-4. Meta-tool creation - only for novel exploits when existing tools fail
+4. Task-specific scripts - when existing tools lack a required capability
 
 Shell batches never mask command failures. Sequential batches stop at the first failure; parallel batches report an
 error when any command fails while preserving each command's output and exit code. Task executors get one bounded

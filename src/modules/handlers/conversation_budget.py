@@ -22,6 +22,7 @@ from strands.agent.conversation_manager import (
     SlidingWindowConversationManager,
     SummarizingConversationManager,
 )
+from strands.agent.invocation_context import InvocationContext
 from strands.hooks import (  # type: ignore
     AfterModelCallEvent,
     BeforeModelCallEvent,
@@ -809,11 +810,11 @@ class MappingConversationManager(SummarizingConversationManager):
     - Messages modified in-place: agent.messages[:] = new
     """
 
-    def _summarize_oldest(self, agent: Agent) -> None:
+    def _summarize_oldest(self, agent: Agent, invocation_context: InvocationContext | None = None) -> None:
         from modules.config.models.generation_budget import summary_generation_budget
 
         with summary_generation_budget():
-            super()._summarize_oldest(agent)
+            super()._summarize_oldest(agent, invocation_context)
 
     def __init__(
         self,

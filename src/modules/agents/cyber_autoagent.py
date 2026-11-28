@@ -17,18 +17,8 @@ from typing import Any
 from strands import Agent
 from strands.hooks import HookProvider
 from strands.tools.executors import ConcurrentToolExecutor, SequentialToolExecutor
-
-# These tools are modules, not functions, the following imports MUST import the module
-from strands_tools import (
-    environment,
-    http_request,
-)
-
-# These tools have the @tool decorator, the function is to be imported
-from strands_tools.editor import editor as strands_editor
-from strands_tools.load_tool import load_tool
-from strands_tools.sleep import sleep
-from strands_tools.tavily import tavily_search
+from strands.vended_tools import file_editor as strands_editor
+from strands.vended_tools import sleep
 
 from modules import __version__, prompts
 from modules.agents.factory import (
@@ -87,7 +77,6 @@ from modules.handlers.utils import (
     sanitize_target_name,
     tool_append_description,
 )
-from modules.tools import python_repl
 from modules.tools.advanced_payload_coordinator import advanced_payload_coordinator
 from modules.tools.artifact import create_artifact_reader, create_artifact_searcher, resolve_tool_result_max_chars
 from modules.tools.artifact_references import ArtifactReferenceInputNormalizationHook
@@ -142,6 +131,7 @@ from modules.tools.credentials import (
     store_credential,
 )
 from modules.tools.editor import create_absolute_path_editor
+from modules.tools.http_request import http_request
 from modules.tools.idor_specialist import idor_specialist
 from modules.tools.inventory_item import create_inventory_item_reader
 from modules.tools.mcp import (
@@ -169,6 +159,7 @@ from modules.tools.oast import (
     oast_poll,
     oast_register_http_response,
 )
+from modules.tools.python_repl import python_repl
 from modules.tools.recon_inventory_manifest import recon_output_to_inventory_manifest
 from modules.tools.shell import shell
 from modules.tools.specialized_recon_orchestrator import specialized_recon_orchestrator
@@ -178,17 +169,12 @@ from modules.tools.tool_catalog import (
     remove_shell_command,
     tool_catalog_wrapper,
 )
-from modules.tools.web_search import create_web_search_tool, web_search
+from modules.tools.web_search import web_search
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 logger = get_logger("Agents.CyberAutoAgent")
 
-
-async def _tavily_web_search_provider(query: str, limit: int) -> dict[str, Any]:
-    """Adapt Tavily's provider-specific schema behind the agent-facing web-search wrapper."""
-
-    return await tavily_search(query=query, max_results=min(limit, 20))
 
 _SECLISTS_CONSUMER_TOOLS = {"dirb", "feroxbuster", "ffuf", "gobuster", "hydra", "ncrack", "wfuzz", "wpscan"}
 _FAIL_FAST_TOOL_ROLES = {"task_evaluator", "plan_critic", "task_prompt_critic"}
@@ -372,8 +358,6 @@ def create_agent_runtime_resources(
             if target_name:
                 os.environ["CYBER_TARGET_NAME"] = target_name
 
-        # Fix python_repl race condition by disabling PTY mode
-        os.environ["PYTHON_REPL_INTERACTIVE"] = "false"
     except Exception:
         logger.debug("Unable to set overlay environment context", exc_info=True)
 
@@ -484,7 +468,8 @@ def create_agent_runtime_resources(
                 # Fallback to just showing discovered tools
                 tool_names = [Path(tool_path).stem for tool_path in module_tool_paths]
                 print_status(
-                    f"Discovered {len(module_tool_paths)} module-specific tools for '{config.module}' (will need load_tool)",
+                    f"Discovered {len(module_tool_paths)} module-specific tools for '{config.module}' "
+                    "(unavailable: import failed)",
                     "INFO",
                 )
             # Log module and tool discovery explicitly for validation
@@ -504,22 +489,6 @@ def create_agent_runtime_resources(
                     tool_examples.append(
                         f"{tool_name}(...)"
                     )
-            else:
-                # Fallback to load_tool instructions using discovered absolute paths
-                # This works in both local CLI and Docker since module_tool_paths are resolved in the current runtime
-                for tool_path in module_tool_paths:
-                    try:
-                        abs_path = str(Path(tool_path).resolve())
-                        tool_name = Path(tool_path).stem
-                        tool_examples.append(
-                            f'load_tool(path="{abs_path}", name="{tool_name}")'
-                        )
-                    except Exception:
-                        # As a last resort, include a name-only hint
-                        tool_name = Path(tool_path).stem
-                        tool_examples.append(
-                            f"# load_tool path resolution failed for {tool_name}"
-                        )
 
             tool_count += len(tool_names)
         else:
@@ -572,18 +541,11 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
     tool_append_description(http_request, http_request_instructions)
 
     python_repl_instructions = """
-- Usage: Rapid PoC prototyping, batch multiple tests. NO TIMEOUT (avoid >600s operations)
-- File writes: MUST use absolute paths from OPERATION ARTIFACTS DIRECTORY (relative paths write to operation root)
-- Promotion trigger: POC works + logic needed >2 times → MUST promote via editor+load_tool to OPERATION TOOLS DIRECTORY
-- Results: Store all outputs as artifacts with descriptive names
-
-**editor + load_tool** (meta-tooling)
-- Purpose: Promote working POCs to reusable tools | Novel exploits when existing tools insufficient
-- Trigger: POC tested + works + pattern repeats >2 times → promote to tool (cost: create once vs rewrite each time)
-- Workflow: editor(path in OPERATION TOOLS DIRECTORY, @tool decorator) → load_tool(name) → invoke
-- Structure: @tool decorator, docstring, type hints | Location: tools/ subdirectory, NOT artifacts/
-- Debug first: Error in tool? Fix via editor → load_tool → test. Create new only if incompatible.
-- NOT for: Reports, documents, one-time scripts (use artifacts/ for those)
+- Usage: Rapid PoC prototyping and batch tests. Each call starts a fresh interpreter.
+- Persist intermediate results in files; variables and imports do not carry over between calls.
+- Timeout: Defaults to 120 seconds; choose a positive timeout suitable for the task.
+- File writes: Use absolute paths in the OPERATION ARTIFACTS DIRECTORY.
+- Results: Store outputs as artifacts with descriptive names.
 """
     tool_append_description(python_repl, python_repl_instructions)
 
@@ -623,11 +585,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
   - use get_technique for reusable methodology, CVE verification, and tool guidance when available.
   - NOT for: Do not run published proof-of-concepts; use them only to understand conditions and design an authorized test.
 """
-    selected_web_search = (
-        create_web_search_tool(_tavily_web_search_provider)
-        if os.getenv("TAVILY_API_KEY")
-        else web_search
-    )
+    selected_web_search = web_search
     tool_append_description(selected_web_search, web_search_instructions)
     builtin_tools_list.append(selected_web_search)
 
@@ -645,7 +603,6 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         swarm,
         shell,
         editor,
-        load_tool,
         store_observation,
         store_knowledge,
         technique_service.tool(),
@@ -661,7 +618,6 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         create_tasks,
         sleep,
         python_repl,
-        environment,  # environment is referenced by other strands tools
     ]
 
     optional_tools_list = [
@@ -1263,7 +1219,7 @@ def create_agent(
         "system_prompt": resolved_system_prompt,
         "callback_handler": callback_handler,
         "hooks": agent_hooks or None,
-        "load_tools_from_directory": tools is None,
+        "load_tools_from_directory": False,
         "trace_attributes": trace_attributes,
     }
     from modules.techniques.triggers import TechniqueObservationHook

@@ -521,7 +521,7 @@ class TestLayerCascadeIntegration:
         # Mock summarization to track if it's called
         summarization_called = []
 
-        def _mock_generate_summary(messages, _agent):
+        def _mock_generate_summary(messages, _agent, invocation_context=None):
             summarization_called.append(len(messages))
             return create_user_message("Summary of conversation")
 

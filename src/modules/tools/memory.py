@@ -11099,6 +11099,9 @@ class QdrantMemoryClient:
             return QdrantClient(url=self.qdrant_url, api_key=os.getenv("QDRANT_API_KEY") or None)
         path = _get_memory_base_path(self.config)
         os.makedirs(path, exist_ok=True)
+        from modules.storage.qdrant_migration import migrate_unnamed_collection
+
+        migrate_unnamed_collection(path)
         return QdrantClient(path=path)
 
     def _ensure_collection(self) -> None:

@@ -54,4 +54,7 @@ def open_qdrant(output_dir: str) -> QdrantClient:
         return QdrantClient(url=url, api_key=os.getenv("QDRANT_API_KEY") or None)
     path = Path(output_dir) / "qdrant"
     path.mkdir(parents=True, exist_ok=True)
+    from modules.storage.qdrant_migration import migrate_unnamed_collection
+
+    migrate_unnamed_collection(path)
     return QdrantClient(path=str(path))

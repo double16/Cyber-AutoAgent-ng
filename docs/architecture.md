@@ -109,11 +109,10 @@ Agents operate through role-specific restricted tool lists.
 
 ### Primary Tools
 - **shell**: Execute system commands (nmap, sqlmap, custom scripts)
-- **editor**: Create/modify files and custom tools
+- **editor**: Create and modify artifact files
 - **swarm**: Deploy parallel agents for complex tasks
 - **http_request**: Make HTTP requests for web testing
 - **memory_list / memory_retrieve**: List or semantically retrieve findings and knowledge
-- **load_tool**: Dynamically load created tools
 - **create_tasks**: Create durable follow-up tasks from task executors when permitted
 
 Plan/task state transitions are owned by Python workflow code. Task creators return schema-validated `TaskProposal`
@@ -803,10 +802,9 @@ Based on confidence, task complexity, and role-specific tool selection:
    - Medium confidence
    - Parallel reconnaissance
 
-3. **Meta-Tool Creation** (via editor + load_tool)
-   - Novel exploits required
-   - No existing tool fits
-   - Custom payload generation
+3. **Artifact scripts** (via editor and Python execution)
+   - Task-specific testing when existing tools lack a required capability
+   - Files remain artifacts; dynamic agent-tool loading is disabled
 
 ## Environment Discovery
 
@@ -1812,3 +1810,12 @@ The fixture runs the full production task entry and default semantic evaluator w
 Qdrant stores and no target-execution tools. It preserves an interrupted attempt, backs up state, and
 reopens the same operation for controlled continuation. Fixture vectors are deterministic stand-ins;
 semantic conclusions and acceptance checks remain production code.
+
+### SDK tool execution
+
+Sleep, file editing, and Python execution use Strands SDK tools. A local HTTP request tool
+preserves bodies for all response statuses, including negative controls, and honors proxy settings.
+Python runs in a fresh interpreter per call with a default 120-second timeout; save intermediate
+results to files rather than relying on persistent variables. HTTP execution receipts are captured
+inside that interpreter. Web search uses DDGS with sensitive-query checks and semantic caching.
+Tavily and the legacy environment tool are no longer registered.

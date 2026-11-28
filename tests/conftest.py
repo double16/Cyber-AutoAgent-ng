@@ -117,6 +117,31 @@ def restore_provider_override_environment():
 
 
 @pytest.fixture(autouse=True)
+def close_sqlite_connections_after_test(monkeypatch):
+    """Close test-owned connections, including persistence dropped by local Qdrant."""
+    import sqlite3
+
+    connections = []
+    connect = sqlite3.connect
+
+    def tracked_connect(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", tracked_connect)
+    yield
+    for connection in reversed(connections):
+        try:
+            connection.in_transaction
+        except sqlite3.ProgrammingError as error:
+            if "closed database" not in str(error):
+                raise
+            continue
+        connection.close()
+
+
+@pytest.fixture(autouse=True)
 def close_memory_client_after_test():
     """Close local Qdrant persistence created by a test before it is garbage-collected."""
     yield
