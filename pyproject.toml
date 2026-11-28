@@ -32,6 +32,7 @@ dependencies = [
     "cryptography~=48.0.1",
     "strands-agents[ollama,otel,litellm]>=1.68.0,<2",
     "qdrant-client==1.20.0",
+    "portalocker>=2.7,<4",
     "google-genai~=1.71.0",
     "litellm>=1.92,<1.111",
     "fastapi>=0.136.3,<0.166.0",
